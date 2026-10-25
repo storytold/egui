@@ -131,6 +131,10 @@ pub struct State {
     held_keys: held_keys::HeldKeys,
 
     pointer_pos_in_points: Option<egui::Pos2>,
+    /// Where the pointer was last seen, kept after it leaves the window. A button released
+    /// after the pointer left (a drag that ends outside the window) is reported there, so egui
+    /// doesn't keep the button held.
+    last_pointer_pos_in_points: Option<egui::Pos2>,
     any_pointer_button_down: bool,
     current_cursor_icon: Option<egui::CursorIcon>,
 
@@ -568,6 +572,7 @@ impl State {
             modifiers: egui::Modifiers::default(),
             held_keys: held_keys::HeldKeys::default(),
             pointer_pos_in_points: None,
+            last_pointer_pos_in_points: None,
             any_pointer_button_down: false,
             current_cursor_icon: None,
             current_custom_cursor: None,
@@ -2870,11 +2875,13 @@ impl State {
         state: winit::event::ElementState,
         button: winit::event::MouseButton,
     ) {
-        if let Some(pos) = self.pointer_pos_in_points
-            && let Some(button) = translate_mouse_button(button)
+        let pressed = state == winit::event::ElementState::Pressed;
+        if let Some(pos) = button_pos(
+            pressed,
+            self.pointer_pos_in_points,
+            self.last_pointer_pos_in_points,
+        ) && let Some(button) = translate_mouse_button(button)
         {
-            let pressed = state == winit::event::ElementState::Pressed;
-
             self.egui_input.events.push(egui::Event::PointerButton {
                 pos,
                 button,
@@ -2928,6 +2935,7 @@ impl State {
             pos_in_pixels.y as f32 / pixels_per_point,
         );
         self.pointer_pos_in_points = Some(pos_in_points);
+        self.last_pointer_pos_in_points = Some(pos_in_points);
 
         if self.simulate_touch_screen {
             if self.any_pointer_button_down {
@@ -5134,9 +5142,40 @@ pub fn short_window_event_description(event: &winit::event::WindowEvent) -> &'st
     }
 }
 
+/// Where a button press or release is reported: at the pointer, or for a release after the
+/// pointer left the window, where it was last seen. A press needs the pointer in the window.
+fn button_pos(
+    pressed: bool,
+    pointer: Option<egui::Pos2>,
+    last_seen: Option<egui::Pos2>,
+) -> Option<egui::Pos2> {
+    if pressed {
+        pointer
+    } else {
+        pointer.or(last_seen)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_release_after_the_pointer_left_is_reported_where_it_was_last_seen() {
+        let (inside, last) = (egui::pos2(10.0, 20.0), egui::pos2(30.0, 40.0));
+        assert_eq!(button_pos(false, Some(inside), Some(last)), Some(inside));
+        assert_eq!(
+            button_pos(false, None, Some(last)),
+            Some(last),
+            "a release outside the window still ends the press"
+        );
+        assert_eq!(
+            button_pos(true, None, Some(last)),
+            None,
+            "a press outside the window is not this window's"
+        );
+        assert_eq!(button_pos(false, None, None), None);
+    }
 
     #[test]
     fn destroyed_window_resets_ime_cursor_purpose_and_allow_on_every_platform() {
