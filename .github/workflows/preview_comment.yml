@@ -7,6 +7,8 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    permissions:
+      pull-requests: write
     steps:
       - name: Comment PR
         uses: thollander/actions-comment-pull-request@v2
