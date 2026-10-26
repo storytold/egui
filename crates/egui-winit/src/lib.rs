@@ -770,7 +770,7 @@ impl State {
     /// platforms keep their synchronous compatibility behavior.
     pub fn request_paste(&mut self, window: &Window) {
         self.rebind_clipboard_target(window);
-        self.begin_regular_clipboard_paste();
+        self.begin_regular_clipboard_paste(None);
     }
 
     /// Forward an app-requested cut (`ViewportCommand::RequestCut`) through the normal egui path.
@@ -1512,7 +1512,14 @@ impl State {
 
     /// Start a non-blocking regular-clipboard paste on Wayland, or use the platform's
     /// synchronous compatibility path elsewhere.
-    fn begin_regular_clipboard_paste(&mut self) {
+    ///
+    /// `shortcut_key` is the key that triggered a paste *shortcut* (e.g. `V` for Ctrl+V), or
+    /// `None` for an application-requested paste. When it is `Some` and the clipboard holds no
+    /// non-empty text, the synchronous path emits an ordinary key press so the shortcut still
+    /// reaches the application. Without it, a paste whose clipboard has no text representation (an
+    /// empty clipboard, or an image/file copied with no accompanying text) produced no event at
+    /// all, so application-level shortcuts bound to Ctrl+V never fired.
+    fn begin_regular_clipboard_paste(&mut self, shortcut_key: Option<egui::Key>) {
         #[cfg(all(
             feature = "clipboard",
             feature = "wayland",
@@ -1567,12 +1574,25 @@ impl State {
             let contents = contents.replace("\r\n", "\n");
             if !contents.is_empty() {
                 self.egui_input.events.push(egui::Event::Paste(contents));
+                return;
             }
-        } else if let Some(image) = self.clipboard.get_image() {
-            // No usable text on the clipboard (e.g. an image was copied with
-            // mspaint/Snipping Tool, which never puts a text representation
-            // alongside it) — fall back to an image paste rather than doing
-            // nothing, mirroring `Event::Copy`/`OutputCommand::CopyImage`.
+        }
+        // No non-empty text on the clipboard. Let a paste *shortcut* reach the application as the
+        // ordinary key press that the clipboard handling suppressed, so app-level Ctrl+V bindings
+        // still fire when the clipboard is empty or holds non-text data.
+        if let Some(key) = shortcut_key {
+            self.egui_input.events.push(egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: self.modifiers,
+            });
+        }
+        // Still offer an image paste to a focused text field (e.g. an image copied with
+        // mspaint/Snipping Tool, which never puts a text representation alongside it) — mirroring
+        // `Event::Copy`/`OutputCommand::CopyImage`.
+        if let Some(image) = self.clipboard.get_image() {
             self.egui_input
                 .events
                 .push(egui::Event::PasteImage(std::sync::Arc::new(image)));
@@ -3127,8 +3147,10 @@ impl State {
             self.egui_input.events.push(egui::Event::Copy);
         } else if is_paste_command(self.modifiers, active_key) {
             // On Wayland this only starts a transfer and requests a viewport repaint on
-            // completion; it never blocks the event path on the clipboard peer.
-            self.begin_regular_clipboard_paste();
+            // completion; it never blocks the event path on the clipboard peer. `active_key` lets
+            // the synchronous path fall back to a key press when the clipboard holds no text, so a
+            // paste shortcut still reaches the application.
+            self.begin_regular_clipboard_paste(Some(active_key));
         } else {
             return false;
         }
