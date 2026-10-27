@@ -214,7 +214,7 @@ pub(crate) fn on_keydown(event: web_sys::KeyboardEvent, runner: &mut AppRunner) 
             key: active_key,
             physical_key,
             pressed: true,
-            repeat: false, // egui will fill this in for us!
+            repeat: event.repeat(),
             modifiers,
         };
         let should_stop_propagation = (runner.web_options.should_stop_propagation)(&egui_event);

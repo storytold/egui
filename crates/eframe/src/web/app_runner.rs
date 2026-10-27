@@ -779,6 +779,88 @@ mod ime_reset_browser_tests {
         }
     }
 
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn browser_repeat_survives_focus_regain_and_a_fresh_press_after_a_missing_release() {
+        fn keyboard_event(
+            kind: &str,
+            key: &str,
+            code: &str,
+            repeat: bool,
+        ) -> web_sys::KeyboardEvent {
+            // Use the real DOM constructor, in Rust, rather than replacing its readonly getter.
+            let options = js_sys::Object::new();
+            for (name, value) in [
+                ("key", JsValue::from_str(key)),
+                ("code", JsValue::from_str(code)),
+                ("repeat", JsValue::from_bool(repeat)),
+                ("bubbles", JsValue::TRUE),
+            ] {
+                js_sys::Reflect::set(&options, &JsValue::from_str(name), &value).unwrap();
+            }
+            let constructor = js_sys::Reflect::get(
+                &web_sys::window().unwrap(),
+                &JsValue::from_str("KeyboardEvent"),
+            )
+            .unwrap()
+            .dyn_into::<js_sys::Function>()
+            .unwrap();
+            js_sys::Reflect::construct(
+                &constructor,
+                &js_sys::Array::of2(&JsValue::from_str(kind), &options),
+            )
+            .unwrap()
+            .unchecked_into()
+        }
+
+        for (key, code, egui_key) in [("n", "KeyN", egui::Key::N), ("y", "KeyY", egui::Key::Y)] {
+            let fixture = Fixture::new();
+            let input = fixture.input();
+            let document = web_sys::window().unwrap().document().unwrap();
+            let outside = document
+                .create_element("input")
+                .unwrap()
+                .unchecked_into::<web_sys::HtmlInputElement>();
+            document.body().unwrap().append_child(&outside).unwrap();
+
+            for repeat in [true, false] {
+                input
+                    .dispatch_event(&keyboard_event("keydown", key, code, false))
+                    .unwrap();
+                fixture.runner.try_lock().unwrap().logic();
+                outside.focus().unwrap();
+                fixture.runner.try_lock().unwrap().logic();
+                input.focus().unwrap();
+                fixture.runner.try_lock().unwrap().logic();
+                // true: same physical hold continues; false: release went elsewhere, then a fresh press.
+                let event = keyboard_event("keydown", key, code, repeat);
+                assert_eq!(event.repeat(), repeat);
+                input.dispatch_event(&event).unwrap();
+                let mut runner = fixture.runner.try_lock().unwrap();
+                assert!(runner.input.raw.events.iter().any(|e| matches!(e,
+                    egui::Event::Key { key, pressed: true, repeat: actual, .. } if *key == egui_key && *actual == repeat
+                )), "the actual DOM keydown adapter must preserve browser repeat");
+                runner.logic();
+                assert!(runner.egui_ctx().input(|i| i.events.iter().any(|e| matches!(e,
+                    egui::Event::Key { key, pressed: true, repeat: actual, .. } if *key == egui_key && *actual == repeat
+                ))));
+                drop(runner);
+                input
+                    .dispatch_event(&keyboard_event("keyup", key, code, false))
+                    .unwrap();
+                fixture.runner.try_lock().unwrap().logic();
+                assert!(
+                    !fixture
+                        .runner
+                        .try_lock()
+                        .unwrap()
+                        .egui_ctx()
+                        .input(|i| i.key_down(egui_key))
+                );
+            }
+            outside.remove();
+        }
+    }
+
     // Invoke the public lifecycle before Fixture::drop can consume any pending output.
     fn destroy_with_pending_output(fixture: Fixture) {
         let input = fixture.input();

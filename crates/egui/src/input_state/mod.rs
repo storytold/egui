@@ -408,7 +408,8 @@ impl InputState {
                 } => {
                     if *pressed {
                         let first_press = keys_down.insert(*key);
-                        *repeat = !first_press;
+                        // A native repeat can arrive first after focus or viewport changes.
+                        *repeat |= !first_press;
                     } else {
                         keys_down.remove(key);
                     }
@@ -1764,5 +1765,71 @@ impl PointerState {
         ui.label(format!("last_last_click_time: {last_last_click_time:#?}"));
         ui.label(format!("last_move_time: {last_move_time:#?}"));
         ui.label(format!("pointer_events: {pointer_events:?}"));
+    }
+}
+
+#[cfg(test)]
+mod native_repeat_tests {
+    use super::*;
+
+    fn pass(state: InputState, events: Vec<Event>) -> InputState {
+        state.begin_pass(
+            RawInput {
+                events,
+                ..Default::default()
+            },
+            false,
+            1.0,
+            Default::default(),
+        )
+    }
+
+    fn press(repeat: bool) -> Event {
+        Event::Key {
+            key: Key::N,
+            physical_key: Some(Key::N),
+            pressed: true,
+            repeat,
+            modifiers: Modifiers::NONE,
+        }
+    }
+
+    fn repeated(state: &InputState) -> bool {
+        matches!(state.events.as_slice(), [Event::Key { repeat: true, .. }])
+    }
+
+    #[test]
+    fn native_repeat_survives_a_new_viewport_and_focus_loss() {
+        let state = pass(InputState::default(), vec![press(true)]);
+        assert!(
+            repeated(&state),
+            "a held key first arriving in a viewport is still a native repeat"
+        );
+        let state = pass(state, vec![Event::WindowFocused(false)]);
+        assert!(!state.key_down(Key::N));
+        let state = pass(state, vec![Event::WindowFocused(true)]);
+        let state = pass(state, vec![press(true)]);
+        assert!(
+            repeated(&state),
+            "focus loss must not turn a native repeat into a fresh press"
+        );
+    }
+
+    #[test]
+    fn native_repeat_preserves_inference_and_fresh_presses_after_missing_releases() {
+        let state = pass(InputState::default(), vec![press(false)]);
+        assert!(!repeated(&state));
+        let state = pass(state, vec![press(false)]);
+        assert!(
+            repeated(&state),
+            "integrations without native repeat metadata still get inference"
+        );
+        let state = pass(state, vec![Event::WindowFocused(false)]);
+        let state = pass(state, vec![Event::WindowFocused(true)]);
+        let state = pass(state, vec![press(false)]);
+        assert!(
+            !repeated(&state),
+            "a genuine press after an out-of-focus release stays fresh"
+        );
     }
 }
