@@ -389,3 +389,132 @@ fn window_grip_at_the_bottom_left_right_to_left() {
     let (left, right) = window_grip_lines(true);
     assert!(left > 0 && right == 0, "{left} {right}");
 }
+
+// ----------------------------------------------------------------------------
+
+/// Returns a menu's rect and the rect of a short item's text, under a longer item.
+fn menu_items(right_to_left: bool) -> (Rect, Rect) {
+    let ctx = context(right_to_left);
+    let menu = Cell::new(Rect::NOTHING);
+    let shapes = run_frames(&ctx, |ui| {
+        ui.add_space(100.0);
+        ui.horizontal(|ui| {
+            ui.add_space(200.0);
+            let response = ui.button("Menu");
+            if let Some(inner) = Popup::menu(&response).open(true).show(|ui| {
+                ui.button("A much longer item").clicked();
+                ui.button("Short").clicked();
+            }) {
+                menu.set(inner.response.rect);
+            }
+        });
+    });
+    (menu.get(), text_rect(&shapes, "Short"))
+}
+
+#[test]
+fn menu_items_start_at_the_left() {
+    let (menu, short) = menu_items(false);
+    assert!(short.left() - menu.left() < 20.0, "{menu:?} {short:?}");
+    assert!(menu.right() - short.right() > 40.0, "{menu:?} {short:?}");
+}
+
+#[test]
+fn menu_items_start_at_the_right_right_to_left() {
+    let (menu, short) = menu_items(true);
+    assert!(menu.right() - short.right() < 20.0, "{menu:?} {short:?}");
+    assert!(short.left() - menu.left() > 40.0, "{menu:?} {short:?}");
+}
+
+/// Hovers a submenu's button, and returns the submenu's rect and the rect of a short item's text.
+fn submenu_items(right_to_left: bool) -> (Rect, Rect) {
+    let ctx = context(right_to_left);
+    let sub = Cell::new(Rect::NOTHING);
+    let add = |ui: &mut Ui| {
+        ui.add_space(100.0);
+        ui.horizontal(|ui| {
+            ui.add_space(300.0);
+            let response = ui.button("Menu");
+            Popup::menu(&response).open(true).show(|ui| {
+                let sub_response = ui.menu_button("Submenu", |ui| {
+                    ui.button("A much longer item").clicked();
+                    ui.button("Short").clicked();
+                });
+                sub.set(sub_response.response.rect);
+            });
+        });
+    };
+    run_frames(&ctx, add);
+    let hover = sub.get().center();
+    sub.set(Rect::NOTHING);
+    run(&ctx, vec![Event::PointerMoved(hover)], add);
+    let shapes = run_frames(&ctx, add);
+    let short = text_rect(&shapes, "Short");
+    // The submenu's frame: the widest non-text shape around the short item, below the hover.
+    let frame = shapes
+        .iter()
+        .filter(|clipped| !matches!(clipped.shape, Shape::Text(_)))
+        .map(|clipped| clipped.shape.visual_bounding_rect())
+        .filter(|bounds| bounds.contains_rect(short) && !bounds.contains(hover))
+        .fold(
+            Rect::NOTHING,
+            |a, b| if b.width() > a.width() { b } else { a },
+        );
+    assert!(frame.is_positive(), "No submenu frame around {short:?}");
+    (frame, short)
+}
+
+#[test]
+fn submenu_items_start_at_the_left() {
+    // The frame's rect includes its shadow, a few points on each side.
+    let (menu, short) = submenu_items(false);
+    assert!(short.left() - menu.left() < 30.0, "{menu:?} {short:?}");
+    assert!(menu.right() - short.right() > 40.0, "{menu:?} {short:?}");
+}
+
+#[test]
+fn submenu_items_start_at_the_right_right_to_left() {
+    let (menu, short) = submenu_items(true);
+    assert!(menu.right() - short.right() < 30.0, "{menu:?} {short:?}");
+    assert!(short.left() - menu.left() > 40.0, "{menu:?} {short:?}");
+}
+
+/// Opens a wide combo box, and returns its list's frame and the rect of a short option's text.
+fn combo_box_options(right_to_left: bool) -> (Rect, Rect) {
+    let ctx = context(right_to_left);
+    let combo = Cell::new(Rect::NOTHING);
+    let add = |ui: &mut Ui| {
+        let response = ComboBox::from_id_salt("combo")
+            .width(300.0)
+            .selected_text("Selected")
+            .show_ui(ui, |ui| {
+                ui.button("Short").clicked();
+            });
+        combo.set(response.response.rect);
+    };
+    run_frames(&ctx, add);
+    let at = combo.get().center();
+    run(&ctx, vec![Event::PointerMoved(at), click(at, true)], add);
+    run(&ctx, vec![click(at, false)], add);
+    let shapes = run_frames(&ctx, add);
+    let short = text_rect(&shapes, "Short");
+    let below = Rect::from_min_max(
+        Pos2::new(0.0, combo.get().bottom()),
+        Pos2::new(800.0, 600.0),
+    );
+    (non_text_rect(&shapes, below), short)
+}
+
+#[test]
+fn combo_box_options_start_at_the_left() {
+    let (list, short) = combo_box_options(false);
+    assert!(short.left() - list.left() < 30.0, "{list:?} {short:?}");
+    assert!(list.right() - short.right() > 100.0, "{list:?} {short:?}");
+}
+
+#[test]
+fn combo_box_options_start_at_the_right_right_to_left() {
+    let (list, short) = combo_box_options(true);
+    assert!(list.right() - short.right() < 30.0, "{list:?} {short:?}");
+    assert!(short.left() - list.left() > 100.0, "{list:?} {short:?}");
+}
