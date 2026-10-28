@@ -146,6 +146,11 @@ impl TextEditState {
     /// While composing, the buffer holds the pre-edit text as well as the committed text. A
     /// widget that wraps a [`crate::TextEdit`] removes this range to get the committed text, and
     /// shows the same buffer again in the next pass so the composition goes on.
+    ///
+    /// A composition belongs to one IME context: it ends when the editor runs without the focus,
+    /// and when a new context starts (the editor gains the focus, comes back after a pass it was
+    /// not shown in, or changes its IME purpose). Its pre-edit text then stays in the buffer as
+    /// typed text.
     pub fn preedit(&self) -> Option<(core::ops::Range<usize>, &str)> {
         match &self.cursor_purpose {
             TextEditCursorPurpose::Selection => None,
@@ -160,7 +165,8 @@ impl TextEditState {
     /// Update the IME owner/focus epoch and return the current context generation.
     ///
     /// The generation is stable through ordinary text and selection updates. It changes when
-    /// this widget acquires focus, or when its IME purpose changes while focused.
+    /// this widget acquires focus, reappears after a pass it was not shown in, or changes its IME
+    /// purpose while focused. A new context ends the composition of the old one.
     pub(crate) fn update_ime_context(
         &mut self,
         focused: bool,
@@ -182,6 +188,15 @@ impl TextEditState {
             if context_changed {
                 self.ime_context_generation =
                     crate::ime_context::next_context_generation().unwrap_or(0);
+                if self.cursor_purpose.is_ime_composition() {
+                    // The cursor spans the pre-edit text; it stays at its end, as typed text.
+                    self.cursor_purpose = TextEditCursorPurpose::Selection;
+                    let collapsed = self
+                        .cursor
+                        .char_range()
+                        .map(|r| CCursorRange::one(r.primary));
+                    self.cursor.set_char_range(collapsed);
+                }
             }
             self.ime_context_purpose = purpose;
             self.ime_context_focused = true;
@@ -474,6 +489,56 @@ mod tests {
         let committed = frame(vec![Event::Ime(ImeEvent::Commit("日本".to_owned()))]);
         assert_eq!(committed.preedit(), None);
         assert_eq!(text, "ab日本");
+    }
+
+    #[test]
+    fn a_composition_ends_when_its_editor_comes_back_after_a_pass_without_it() {
+        use crate::{Event, ImeEvent, Key, Modifiers, RawInput, TextEdit};
+
+        let ctx = Context::default();
+        let id = Id::unique("returning-field");
+        let mut text = String::from("ab");
+        let mut frame = |shown: bool, events: Vec<Event>| {
+            let mut state = None;
+            let mut output = ctx.run_ui(
+                RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    if shown {
+                        ui.memory_mut(|mem| mem.request_focus(id));
+                        let output = TextEdit::singleline(&mut text)
+                            .id(id)
+                            .cursor_at_end(true)
+                            .show(ui);
+                        state = Some(output.state);
+                    }
+                },
+            );
+            output.textures_delta.clear();
+            (state, text.clone())
+        };
+        let preedit = Event::Ime(ImeEvent::Preedit {
+            text: "にほ".to_owned(),
+            active_range_chars: None,
+        });
+        let backspace = Event::Key {
+            key: Key::Backspace,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        };
+
+        frame(true, vec![]);
+        let (composing, _) = frame(true, vec![preedit]);
+        assert_eq!(composing.expect("shown").preedit(), Some((2..4, "にほ")));
+        frame(false, vec![]);
+        let (back, text) = frame(true, vec![]);
+        assert_eq!(back.expect("shown").preedit(), None);
+        assert_eq!(text, "abにほ");
+        assert_eq!(frame(true, vec![backspace]).1, "abに");
     }
 
     #[test]
