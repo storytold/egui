@@ -35,11 +35,14 @@ pub enum PassMode {
     /// Run [`crate::App::logic`], plus the ui and painting if the viewport is visible.
     Full,
 
-    /// Run only [`crate::App::logic`]: no egui pass and no painting.
+    /// Run [`crate::App::logic`], but don't paint this viewport's window. The egui pass runs only
+    /// when a visible immediate viewport is drawn inside it, so that child still gets its input
+    /// and is painted in its own window.
     ///
     /// Used when the window was asked to redraw, but the windowing system hasn't let it
-    /// (e.g. a Wayland compositor withholding frame callbacks from a hidden window).
-    LogicOnly,
+    /// (e.g. a Wayland compositor withholding frame callbacks from a hidden window, such as one
+    /// covered by its own immediate child window).
+    WithoutPaint,
 }
 
 /// Create an egui context, restoring it from storage if possible.
@@ -105,6 +108,10 @@ pub trait WinitApp {
     fn window(&self, window_id: WindowId) -> Option<Arc<Window>>;
 
     fn window_id_from_viewport_id(&self, id: ViewportId) -> Option<WindowId>;
+
+    /// Does this window's viewport draw a visible immediate viewport (directly, or through other
+    /// immediate viewports)? Those only get a pass while their parent runs one.
+    fn has_visible_immediate_viewport(&self, window_id: WindowId) -> bool;
 
     fn save(&mut self);
 
