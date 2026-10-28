@@ -140,6 +140,23 @@ impl TextEditState {
         self.set_undoer(TextEditUndoer::default());
     }
 
+    /// The IME composition under way: the character range of the pre-edit (marked) text in the
+    /// buffer, and that text. `None` when nothing is composing.
+    ///
+    /// While composing, the buffer holds the pre-edit text as well as the committed text. A
+    /// widget that wraps a [`crate::TextEdit`] removes this range to get the committed text, and
+    /// shows the same buffer again in the next pass so the composition goes on.
+    pub fn preedit(&self) -> Option<(core::ops::Range<usize>, &str)> {
+        match &self.cursor_purpose {
+            TextEditCursorPurpose::Selection => None,
+            TextEditCursorPurpose::ImeComposition {
+                preedit_range,
+                preedit_text,
+                ..
+            } => Some((preedit_range.clone(), preedit_text.as_str())),
+        }
+    }
+
     /// Update the IME owner/focus epoch and return the current context generation.
     ///
     /// The generation is stable through ordinary text and selection updates. It changes when
@@ -415,6 +432,49 @@ fn byte_index_from_char_index(text: &str, char_index: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preedit_reports_the_marked_text_and_its_range_until_the_commit() {
+        use crate::{Event, ImeEvent, RawInput, TextEdit};
+
+        let ctx = Context::default();
+        let id = Id::unique("preedit-field");
+        let mut text = String::from("ab");
+        let mut frame = |events: Vec<Event>| {
+            let mut state = None;
+            let mut output = ctx.run_ui(
+                RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    ui.memory_mut(|mem| mem.request_focus(id));
+                    let output = TextEdit::singleline(&mut text)
+                        .id(id)
+                        .cursor_at_end(true)
+                        .show(ui);
+                    state = Some(output.state);
+                },
+            );
+            output.textures_delta.clear();
+            state.expect("the field was shown")
+        };
+        let preedit = |text: &str| {
+            Event::Ime(ImeEvent::Preedit {
+                text: text.to_owned(),
+                active_range_chars: None,
+            })
+        };
+
+        assert_eq!(frame(vec![]).preedit(), None);
+        assert_eq!(frame(vec![preedit("に")]).preedit(), Some((2..3, "に")));
+        assert_eq!(frame(vec![preedit("にほ")]).preedit(), Some((2..4, "にほ")));
+        let loaded = TextEditState::load(&ctx, id).expect("stored");
+        assert_eq!(loaded.preedit(), Some((2..4, "にほ")));
+        let committed = frame(vec![Event::Ime(ImeEvent::Commit("日本".to_owned()))]);
+        assert_eq!(committed.preedit(), None);
+        assert_eq!(text, "ab日本");
+    }
 
     #[test]
     fn many_ime_receipts_are_compressed_to_one_bounded_chain() {
