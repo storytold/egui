@@ -87,12 +87,23 @@ pub struct InteractOptions {
     /// If we call interact on the same widget multiple times,
     /// should we move it to the top on subsequent calls?
     pub move_to_top: bool,
+
+    /// If `false`, the widget is disabled even if its [`crate::Ui`] is enabled:
+    /// it senses no input and reports itself disabled.
+    ///
+    /// Unlike [`crate::Ui::disable`], this does not fade what the [`crate::Ui`] paints,
+    /// and needs no child [`crate::Ui`] (which would shift the auto-ids of later widgets).
+    ///
+    /// Only used by [`crate::Ui::interact_opt`].
+    pub enabled: bool,
 }
 
-#[expect(clippy::derivable_impls)] // Nice to be explicit
 impl Default for InteractOptions {
     fn default() -> Self {
-        Self { move_to_top: false }
+        Self {
+            move_to_top: false,
+            enabled: true,
+        }
     }
 }
 
@@ -190,7 +201,10 @@ impl WidgetRects {
             infos: _,
         } = self;
 
-        let InteractOptions { move_to_top } = options;
+        let InteractOptions {
+            move_to_top,
+            enabled: _,
+        } = options;
 
         let mut shift_layer_index_after = None;
 

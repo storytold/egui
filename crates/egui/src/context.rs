@@ -5240,6 +5240,50 @@ mod test {
         assert!(shapes.is_empty());
     }
 
+    /// `InteractOptions::enabled: false` disables one widget of an enabled `Ui`.
+    #[test]
+    fn test_interact_opt_disabled_widget_in_enabled_ui() {
+        use crate::{Event, Id, InteractOptions, PointerButton, RawInput, Rect, Sense, pos2, vec2};
+
+        let ctx = Context::default();
+        ctx.set_fonts(FontDefinitions::empty());
+        let rect = Rect::from_min_size(pos2(10.0, 10.0), vec2(20.0, 20.0));
+        let pos = rect.center();
+        let button = |pressed| Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+
+        for enabled in [true, false] {
+            let options = InteractOptions {
+                enabled,
+                ..Default::default()
+            };
+            let mut clicked = false;
+            // The first pass registers the widget, the second clicks it.
+            for events in [
+                vec![Event::PointerMoved(pos)],
+                vec![button(true), button(false)],
+            ] {
+                let input = RawInput {
+                    events,
+                    ..Default::default()
+                };
+                let output = ctx.run_ui(input, |ui| {
+                    let response =
+                        ui.interact_opt(rect, Id::unique("widget"), Sense::click(), options);
+                    assert!(ui.is_enabled(), "the Ui stays enabled");
+                    assert_eq!(response.enabled(), enabled);
+                    clicked = response.clicked();
+                });
+                output.drop_without_applying_deltas();
+            }
+            assert_eq!(clicked, enabled, "only an enabled widget is clicked");
+        }
+    }
+
     /// Changing the font providers mid-pass must not drop the [`crate::text::Fonts`]
     /// that the rest of the pass is still laying out text with.
     #[test]
