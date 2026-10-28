@@ -28,6 +28,7 @@ Drop a patch when an egui release in use contains it.
 | E20 | `23955535` | egui | widget text laid out in the language of its `Ui` | fork-only (goes with E15 and E17) | language support |
 | E21 | `a70470b0` | egui-winit, egui | `ImeEvent::DeleteSurroundingBytes`: `TextEdit` deletes the exact bytes an input method replaces, in the commit's undo step | not proposed | macOS press-and-hold and dictation, Wayland input methods; needs winit `craft/0.30.13-lang` |
 | E26 | on `craft/interact-enabled` | egui | a pointer press goes to the widget under the press position (`PointerEvent::Pressed::position`), not the one under the pass's last pointer position: when a press and moves arrive in one pass (a quick drag, a slow frame), `begin_pass` hit-tests the press at its own position, so `is_pointer_button_down_on`, `drag_started` and `clicked` name the widget `PointerState::press_origin` is over; hover stays at the last position | upstreamable | craft-ui `Rulers` (corner and ruler strips next to the canvas) |
+| E27 | on `craft/interact-enabled` | egui | `DragAndDrop::aborted_by_escape`: true in the pass where Escape cleared the payload, so a widget that owns a drag can tell an Escape cancel from `clear_payload` or another widget's `set_payload` | upstreamable | craft-libs `List` reorder drag |
 
 E1 changes from `e7e37ad`: the hooks are installed in `init_native`, so `create_native` uses them too, and a
 unit test covers installing and replacing them. E2+E3 is the same change as `b02321d` with a `surface_fit`
