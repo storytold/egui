@@ -35,6 +35,7 @@ Drop a patch when an egui release in use contains it.
 | E31 | on `craft/focus-surrender` | egui | `Memory::set_focus_surrender(id, SurrenderFocusOn)`: the focused widget's own rule for a press or click elsewhere, in place of `InputOptions::surrender_focus_on`, while it keeps focus; egui's click-away reads it first | upstreamable | craft-ui: the runtime's focus moves only by its press rule, the app's own widgets keep egui's rule with the app's option |
 | E23 | on `craft/interact-enabled` | egui | `Response::describe_for_accessibility` is public: the AccessKit description and name `on_hover_text` sets, for tooltips with other contents | upstreamable | craft-ui `TooltipExt` |
 | E24 | on `craft/interact-enabled` | egui | `ScrollArea::horizontal_scroll_bar_label` and `vertical_scroll_bar_label`: the AccessKit name of each scroll bar (WCAG 4.1.2); no name by default | upstreamable | craft-libs `List` accessibility check |
+| E25 | on `craft/interact-enabled` | egui | `Context::set_accesskit_focus`: reports a widget as the AccessKit focus for one pass without changing `memory.focused()` or event routing, for menus that light a row while no widget has egui focus | upstreamable | craft-libs `Menu` |
 
 E1 changes from `e7e37ad`: the hooks are installed in `init_native`, so `create_native` uses them too, and a
 unit test covers installing and replacing them. E2+E3 is the same change as `b02321d` with a `surface_fit`

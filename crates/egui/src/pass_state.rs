@@ -71,6 +71,9 @@ impl ScrollTarget {
 pub struct AccessKitPassState {
     pub nodes: IdMap<accesskit::Node>,
     pub parent_map: IdMap<Id>,
+
+    /// See [`crate::Context::set_accesskit_focus`].
+    pub focus_override: Option<Id>,
 }
 
 #[cfg(debug_assertions)]

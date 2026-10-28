@@ -593,6 +593,7 @@ impl ContextImpl {
             viewport.this_pass.accesskit_state = Some(AccessKitPassState {
                 nodes,
                 parent_map: IdMap::default(),
+                focus_override: None,
             });
         }
 
@@ -3281,10 +3282,14 @@ impl ContextImpl {
                 }
                 let root_id = crate::accesskit_root_id().accesskit_id();
                 // A widget can have focus without a node, e.g. if it requested focus while invisible.
-                let focus_id = self
-                    .memory
-                    .focused()
+                let focus_id = state
+                    .focus_override
                     .filter(|id| state.nodes.contains_key(id))
+                    .or_else(|| {
+                        self.memory
+                            .focused()
+                            .filter(|id| state.nodes.contains_key(id))
+                    })
                     .map_or(root_id, |id| id.accesskit_id());
                 // The `(id, node)` pairs of the coming `accesskit::TreeUpdate`:
                 let mut nodes: Vec<(accesskit::NodeId, accesskit::Node)> = state
@@ -4340,6 +4345,23 @@ impl Context {
         })
     }
 
+    /// Report the widget with this id as the focused node of this pass's accessibility tree.
+    ///
+    /// This is for widgets that show an active item without taking keyboard focus, such as a
+    /// menu that is navigated with the keyboard while the focus stays where it was: screen
+    /// readers then follow the active item, as they do in native menus.
+    ///
+    /// It changes neither [`Memory::focused`] nor how events are routed.
+    /// It applies to the current pass only, so call it every pass. The last call wins.
+    /// If the widget has no accessibility node in this pass, the usual focus is reported.
+    pub fn set_accesskit_focus(&self, id: Id) {
+        self.write(|ctx| {
+            if let Some(state) = ctx.viewport().this_pass.accesskit_state.as_mut() {
+                state.focus_override = Some(id);
+            }
+        });
+    }
+
     pub(crate) fn register_accesskit_parent(&self, id: Id, parent_id: Id) {
         self.write(|ctx| {
             if let Some(state) = ctx.viewport().this_pass.accesskit_state.as_mut() {
@@ -5319,6 +5341,50 @@ mod test {
             }
             assert_eq!(clicked, enabled, "only an enabled widget is clicked");
         }
+    }
+
+    /// `set_accesskit_focus` moves the reported AccessKit focus for one pass only,
+    /// and leaves egui's own focus alone.
+    #[test]
+    fn test_set_accesskit_focus() {
+        use crate::{Id, RawInput};
+
+        let ctx = Context::default();
+        ctx.set_fonts(FontDefinitions::empty());
+        ctx.enable_accesskit();
+        let missing = Id::NULL.with("no node");
+        let ids = core::cell::Cell::new((Id::NULL, Id::NULL));
+
+        let run = |ctx: &Context, over: Option<Id>| {
+            let mut output = ctx.run_ui(RawInput::default(), |ui| {
+                ids.set((ui.button("a").id, ui.button("b").id));
+                if let Some(id) = over {
+                    ui.ctx().set_accesskit_focus(id);
+                }
+            });
+            output.textures_delta.clear();
+            output.platform_output.accesskit_update.unwrap().focus
+        };
+
+        run(&ctx, None);
+        let (a, b) = ids.get();
+        ctx.memory_mut(|mem| mem.request_focus(a));
+        assert_eq!(run(&ctx, None), a.accesskit_id());
+        assert_eq!(ctx.memory(|mem| mem.focused()), Some(a));
+
+        assert_eq!(run(&ctx, Some(b)), b.accesskit_id());
+        assert_eq!(ctx.memory(|mem| mem.focused()), Some(a));
+
+        assert_eq!(
+            run(&ctx, None),
+            a.accesskit_id(),
+            "applies to one pass only"
+        );
+        assert_eq!(
+            run(&ctx, Some(missing)),
+            a.accesskit_id(),
+            "no node: usual focus"
+        );
     }
 
     /// Enter clicks a focused widget; Space only if `InteractOptions::activate_on_space`.
