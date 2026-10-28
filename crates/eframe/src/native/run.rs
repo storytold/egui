@@ -7,7 +7,7 @@ use winit::{
     window::WindowId,
 };
 
-use ahash::HashMap;
+use ahash::{HashMap, HashSet};
 
 use super::winit_integration::{UserEvent, WinitApp};
 use crate::{
@@ -31,9 +31,19 @@ const INVISIBLE_WINDOW_REPAINT_INTERVAL: Duration = Duration::from_millis(100);
 /// On Wayland, `RedrawRequested` waits for the compositor's frame callback, and compositors
 /// may withhold those from a window that isn't shown (e.g. one covered by a fullscreen window),
 /// without telling us that it is occluded. Nothing we paint would be shown, and presenting could
-/// block, so until the compositor asks for a frame again we only run [`crate::App::logic`].
+/// block, so until the compositor asks for a frame again we run [`crate::App::logic`] without
+/// painting the window (and its ui only for the immediate viewports drawn inside it).
 /// See <https://github.com/emilk/egui/issues/5136>.
 const MISSED_REDRAW_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// How long to wait for a `RedrawRequested` the compositor is already withholding, when a visible
+/// immediate viewport is drawn inside the window.
+///
+/// An immediate viewport only gets a pass, and so its input, while its parent runs one. A window
+/// covered by its own immediate child window (e.g. a second document window the compositor
+/// placed over the first) gets no frame callbacks, so waiting [`MISSED_REDRAW_TIMEOUT`] each
+/// time would leave the child answering clicks four times a second.
+const WITHHELD_PARENT_PASS_INTERVAL: Duration = Duration::from_millis(16);
 
 // ----------------------------------------------------------------------------
 fn create_event_loop(native_options: &mut epi::NativeOptions) -> Result<EventLoop<UserEvent>> {
@@ -92,6 +102,9 @@ struct WinitAppWrapper<T: WinitApp> {
     /// Windows we asked to redraw, and when to give up waiting for their `RedrawRequested`.
     windows_redraw_deadlines: HashMap<WindowId, Instant>,
 
+    /// Windows whose last requested `RedrawRequested` never came, until one does.
+    windows_redraw_withheld: HashSet<WindowId>,
+
     winit_app: T,
     return_result: Result<(), crate::Error>,
     run_and_return: bool,
@@ -102,6 +115,7 @@ impl<T: WinitApp> WinitAppWrapper<T> {
         Self {
             windows_next_repaint_times: HashMap::default(),
             windows_redraw_deadlines: HashMap::default(),
+            windows_redraw_withheld: HashSet::default(),
             winit_app,
             return_result: Ok(()),
             run_and_return,
@@ -230,9 +244,16 @@ impl<T: WinitApp> WinitAppWrapper<T> {
                         // busy-loops a whole CPU core.
                         // See https://github.com/emilk/egui/issues/8326.
                         window.request_redraw();
+                        let timeout = if self.windows_redraw_withheld.contains(window_id)
+                            && self.winit_app.has_visible_immediate_viewport(*window_id)
+                        {
+                            WITHHELD_PARENT_PASS_INTERVAL
+                        } else {
+                            MISSED_REDRAW_TIMEOUT
+                        };
                         self.windows_redraw_deadlines
                             .entry(*window_id)
-                            .or_insert(now + MISSED_REDRAW_TIMEOUT);
+                            .or_insert(now + timeout);
                     }
                 } else {
                     log::trace!("No window found for {window_id:?}");
@@ -275,10 +296,11 @@ impl<T: WinitApp> WinitAppWrapper<T> {
             // `handle_event_result` re-enters `check_redraw_requests`, which may already
             // have handled this window, so only run it if the deadline is still there:
             if self.windows_redraw_deadlines.remove(&window_id).is_some() {
-                log::trace!("RedrawRequested is overdue for {window_id:?}: running logic only");
+                log::trace!("RedrawRequested is overdue for {window_id:?}: running without paint");
+                self.windows_redraw_withheld.insert(window_id);
                 let event_result =
                     self.winit_app
-                        .run_ui_and_paint(event_loop, window_id, PassMode::LogicOnly);
+                        .run_ui_and_paint(event_loop, window_id, PassMode::WithoutPaint);
                 self.handle_event_result(event_loop, event_result);
             }
         }
@@ -419,6 +441,7 @@ impl<T: WinitApp> ApplicationHandler<UserEvent> for WinitAppWrapper<T> {
             let event_result = match event {
                 winit::event::WindowEvent::RedrawRequested => {
                     self.windows_redraw_deadlines.remove(&window_id);
+                    self.windows_redraw_withheld.remove(&window_id);
                     self.winit_app
                         .run_ui_and_paint(event_loop, window_id, PassMode::Full)
                 }

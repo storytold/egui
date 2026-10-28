@@ -496,6 +496,16 @@ impl WinitApp for GlowWinitApp<'_> {
             .copied()
     }
 
+    fn has_visible_immediate_viewport(&self, window_id: WindowId) -> bool {
+        self.running.as_ref().is_some_and(|running| {
+            let glutin = running.glutin.borrow();
+            glutin
+                .viewport_from_window
+                .get(&window_id)
+                .is_some_and(|id| has_visible_immediate_descendant(&glutin.viewports, *id))
+        })
+    }
+
     fn save(&mut self) {
         log::debug!("WinitApp::save called");
         if let Some(running) = self.running.as_mut() {
@@ -694,9 +704,16 @@ impl GlowWinitRunning<'_> {
             let mut raw_input = egui_winit.take_egui_input(window);
             let viewport_ui_cb = viewport.viewport_ui_cb.clone();
 
-            let show_ui = mode == PassMode::Full
-                && (is_visible
-                    || is_viewport_or_descendant_visible(&glutin.viewports, viewport_id));
+            let show_ui = match mode {
+                PassMode::Full => {
+                    is_visible || is_viewport_or_descendant_visible(&glutin.viewports, viewport_id)
+                }
+                PassMode::WithoutPaint => {
+                    has_visible_immediate_descendant(&glutin.viewports, viewport_id)
+                }
+            };
+            // The windowing system hasn't asked for a frame: presenting one could block.
+            let is_visible = is_visible && mode == PassMode::Full;
 
             self.integration.pre_update();
 
@@ -1741,6 +1758,21 @@ fn is_viewport_or_descendant_visible(
         child.ids.parent == viewport_id
             && child.ids.this != viewport_id // ROOT is its own parent; avoid self-recursion.
             && is_viewport_or_descendant_visible(viewports, child.ids.this)
+    })
+}
+
+/// Does this viewport draw a visible immediate viewport, directly or through other immediate
+/// ones? Those only get a pass (and their input) while this viewport runs one.
+fn has_visible_immediate_descendant(
+    viewports: &OrderedViewportIdMap<Viewport>,
+    viewport_id: ViewportId,
+) -> bool {
+    viewports.values().any(|child| {
+        child.ids.parent == viewport_id
+            && child.ids.this != viewport_id // ROOT is its own parent; avoid self-recursion.
+            && child.viewport_ui_cb.is_none()
+            && (child.info.visible().unwrap_or(true)
+                || has_visible_immediate_descendant(viewports, child.ids.this))
     })
 }
 
