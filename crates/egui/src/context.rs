@@ -524,9 +524,8 @@ impl ContextImpl {
                 .collect();
             layers.sort_by(|&a, &b| self.memory.areas().compare_order(a, b));
 
-            viewport.hits = if let Some(pos) = viewport.input.pointer.interact_pos() {
-                let interact_radius = self.memory.options.style().interaction.interact_radius;
-
+            let interact_radius = self.memory.options.style().interaction.interact_radius;
+            let hit_test_at = |pos| {
                 crate::hit_test::hit_test(
                     &viewport.prev_pass.widgets,
                     &layers,
@@ -534,14 +533,32 @@ impl ContextImpl {
                     pos,
                     interact_radius,
                 )
-            } else {
-                WidgetHits::default()
             };
+
+            let interact_pos = viewport.input.pointer.interact_pos();
+            viewport.hits = interact_pos.map(hit_test_at).unwrap_or_default();
+
+            // The pointer may have moved on after a press in the same pass
+            // (a quick drag, or a slow frame), so each press goes to the widgets
+            // under its own position:
+            let press_hits: Vec<(Pos2, WidgetHits)> = viewport
+                .input
+                .pointer
+                .pointer_events
+                .iter()
+                .filter_map(|event| match event {
+                    PointerEvent::Pressed { position, .. } if Some(*position) != interact_pos => {
+                        Some((*position, hit_test_at(*position)))
+                    }
+                    _ => None,
+                })
+                .collect();
 
             viewport.interact_widgets = crate::interaction::interact(
                 &viewport.interact_widgets,
                 &viewport.prev_pass.widgets,
                 &viewport.hits,
+                &press_hits,
                 &viewport.input,
                 self.memory.interaction_mut(),
             );
@@ -5324,6 +5341,58 @@ mod test {
                     "{key:?}, activate_on_space: {activate_on_space}"
                 );
             }
+        }
+    }
+
+    /// A press goes to the widget under the press,
+    /// even when the pointer moves on to another widget in the same frame.
+    #[test]
+    fn test_press_goes_to_widget_under_press() {
+        use crate::{Event, Id, PointerButton, RawInput, Rect, Sense, pos2, vec2};
+
+        let ctx = Context::default();
+        ctx.set_fonts(FontDefinitions::empty());
+        let small = Rect::from_min_size(pos2(0.0, 0.0), vec2(20.0, 20.0));
+        let large = Rect::from_min_size(pos2(40.0, 40.0), vec2(200.0, 200.0));
+        let (a, b) = (small.center(), large.center());
+        let (small_id, large_id) = (Id::unique("small"), Id::unique("large"));
+
+        // The first pass registers the widgets, the second presses on `a` and moves to `b`,
+        // the third moves on.
+        for (pass, events) in [
+            vec![Event::PointerMoved(a)],
+            vec![
+                Event::PointerMoved(a),
+                Event::PointerButton {
+                    pos: a,
+                    button: PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Default::default(),
+                },
+                Event::PointerMoved(b),
+            ],
+            vec![Event::PointerMoved(b + vec2(10.0, 0.0))],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let input = RawInput {
+                events,
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| {
+                let small = ui.interact(small, small_id, Sense::click_and_drag());
+                let large = ui.interact(large, large_id, Sense::click_and_drag());
+                if pass == 0 {
+                    return;
+                }
+                assert!(small.is_pointer_button_down_on(), "pass {pass}");
+                assert!(!large.is_pointer_button_down_on(), "pass {pass}");
+                assert_eq!(small.drag_started(), pass == 1, "pass {pass}");
+                assert!(small.dragged(), "pass {pass}");
+                assert!(!large.drag_started() && !large.dragged(), "pass {pass}");
+            });
+            output.drop_without_applying_deltas();
         }
     }
 

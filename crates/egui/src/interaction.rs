@@ -1,6 +1,6 @@
 //! How mouse and touch interzcts with widgets.
 
-use crate::{Id, InputState, Key, WidgetRects, hit_test, id, input_state, memory};
+use crate::{Id, InputState, Key, Pos2, WidgetRects, hit_test, id, input_state, memory};
 
 use self::{hit_test::WidgetHits, id::IdSet, input_state::PointerEvent, memory::InteractionState};
 
@@ -110,6 +110,7 @@ pub(crate) fn interact(
     prev_snapshot: &InteractionSnapshot,
     widgets: &WidgetRects,
     hits: &WidgetHits,
+    press_hits: &[(Pos2, WidgetHits)],
     input: &InputState,
     interaction: &mut InteractionState,
 ) -> InteractionSnapshot {
@@ -159,7 +160,14 @@ pub(crate) fn interact(
         match pointer_event {
             PointerEvent::Moved(_) => {}
 
-            PointerEvent::Pressed { .. } => {
+            PointerEvent::Pressed { position, .. } => {
+                // The press goes to the widgets under the press, which is not where
+                // the pointer is now if it moved on later in the same frame.
+                let hits = press_hits
+                    .iter()
+                    .find(|(pos, _)| pos == position)
+                    .map_or(hits, |(_, press_hits)| press_hits);
+
                 // Maybe new click?
                 if interaction.potential_click_id.is_none() {
                     interaction.potential_click_id = hits.click.map(|w| w.id);
