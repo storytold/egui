@@ -401,6 +401,16 @@ impl FontsView<'_> {
         self.fonts.characters(family)
     }
 
+    /// The name of the face that draws this grapheme cluster, for tests.
+    #[cfg(all(test, feature = "monochrome_emoji_fonts", feature = "color_fonts"))]
+    pub(crate) fn face_name_of_cluster(&mut self, family: &FontFamily, cluster: &str) -> String {
+        let family = self.fonts.family_key(family);
+        let key = self.fonts.resolve_cluster_face(family, cluster);
+        self.fonts
+            .face(key)
+            .map_or_else(String::new, |face| face.name().to_owned())
+    }
+
     /// Height of one row of text in points.
     ///
     /// Returns a value rounded to [`emath::GUI_ROUNDING`].

@@ -13,4 +13,4 @@ The default egui fonts cover Latin, Greek, and Cyrillic. When egui is asked to r
 egui_ctx.add_font_provider(std::sync::Arc::new(egui_system_font_provider::SystemFontProvider::new()));
 ```
 
-System emoji fonts are skipped for now, since they contain bitmaps or color glyphs that epaint cannot render yet.
+A grapheme cluster with emoji presentation (😀, or ❤ followed by U+FE0F) gets the system's color emoji font (Apple Color Emoji, Segoe UI Emoji, Noto Color Emoji) when it has the character, ahead of the installed fonts.

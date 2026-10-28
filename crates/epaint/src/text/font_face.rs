@@ -556,6 +556,24 @@ impl FontFace {
         Some(resolution)
     }
 
+    /// Does this face draw `c` as a color glyph (bitmap or `COLR`), e.g. a color emoji?
+    ///
+    /// Always `false` without the `color_fonts` feature, since such glyphs cannot be rendered then.
+    pub(super) fn has_color_glyph_for_char(&mut self, c: char) -> bool {
+        let Some(GlyphIdResolution::Glyph(glyph_id)) = self.glyph_id_resolution(c) else {
+            return false;
+        };
+        core::cfg_select! {
+            feature = "color_fonts" => {
+                self.font.has_color_glyph(glyph_id, skrifa::instance::Size::unscaled())
+            }
+            _ => {
+                let _ = glyph_id;
+                false
+            }
+        }
+    }
+
     /// Unscaled advance width for `c` at the given variation location.
     ///
     /// Location-dependent (variable fonts can vary advances via HVAR).

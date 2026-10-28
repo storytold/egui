@@ -147,7 +147,9 @@ pub fn create_storage_with_file(_file: impl Into<PathBuf>) -> Option<Box<dyn epi
 /// Stands in for the system font provider when the `system_fonts` feature is off.
 ///
 /// It never finds a font, but tells you once why nothing was even looked for,
-/// so missing CJK/Arabic/emoji glyphs don't look like an egui bug.
+/// so missing CJK/Arabic glyphs don't look like an egui bug.
+/// (Not for a cluster with emoji presentation: it asks the providers before the installed fonts,
+/// so nothing is known to be missing yet.)
 #[cfg(not(feature = "system_fonts"))]
 #[derive(Default)]
 struct MissingSystemFontsWarning {
@@ -158,6 +160,10 @@ struct MissingSystemFontsWarning {
 impl egui::FontProvider for MissingSystemFontsWarning {
     fn font_for(&self, request: &egui::FallbackRequest<'_>) -> Option<egui::FontInsert> {
         use core::sync::atomic::Ordering::Relaxed;
+        // An emoji cluster asks the providers before the installed fonts: no font is missing yet.
+        if egui::epaint::text::has_emoji_presentation(request.cluster) {
+            return None;
+        }
         if !self.warned.swap(true, Relaxed) {
             log::info!(
                 "No font has {:?}. \

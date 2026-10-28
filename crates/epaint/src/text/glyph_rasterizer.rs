@@ -151,7 +151,8 @@ impl core::fmt::Debug for GlyphRasterizer {
 /// False for text-presentation symbols (⏮, ✔, ♥) and for clusters
 /// with an explicit text presentation selector (⏮︎, U+FE0E).
 ///
-/// Used by `eframe`'s web glyph rasterizer to guess whether a browser-drawn glyph is color.
+/// Used by `eframe`'s web glyph rasterizer to guess whether a browser-drawn glyph is color,
+/// and by font resolution to ask the font providers first for such a cluster.
 pub fn has_emoji_presentation(cluster: &str) -> bool {
     use unicode_properties::emoji::{
         EmojiStatus, UnicodeEmoji as _, is_emoji_presentation_selector,

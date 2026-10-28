@@ -134,18 +134,23 @@ impl FontProvider for SystemFontProvider {
         } else {
             // Punctuation, symbols, emoji, etc. belong to no script, so there is no fallback for them.
             // Try the generic families instead.
+            // A cluster with emoji presentation (😀, ❤️) wants a color emoji font:
+            // the sans-serif and system fonts have outlines for many of these code points.
+            let emoji_first = epaint::text::has_emoji_presentation(cluster);
+            let mut generics = vec![
+                generic,
+                GenericFamily::SystemUi,
+                GenericFamily::Emoji,
+                GenericFamily::Math,
+                GenericFamily::Serif,
+                GenericFamily::Monospace,
+            ];
+            if emoji_first {
+                generics.remove(2);
+                generics.insert(0, GenericFamily::Emoji);
+            }
             let mut query = collection.query(source_cache);
-            query.set_families(
-                [
-                    generic,
-                    GenericFamily::SystemUi,
-                    GenericFamily::Emoji,
-                    GenericFamily::Math,
-                    GenericFamily::Serif,
-                    GenericFamily::Monospace,
-                ]
-                .map(QueryFamily::Generic),
-            );
+            query.set_families(generics.into_iter().map(QueryFamily::Generic));
             find_font(&mut query, base_char)
         }?;
 
@@ -293,6 +298,32 @@ mod tests {
             };
             println!("{script} {c:?}: {}", insert.name);
             assert!(insert.name.starts_with("system:"));
+        }
+    }
+
+    /// Characters that have a text and an emoji form get an emoji font when U+FE0F asks for it.
+    #[test]
+    #[ignore = "Depends on which fonts are installed on this machine"]
+    fn emoji_presentation_finds_an_emoji_font() {
+        let provider = SystemFontProvider::new();
+        for cluster in [
+            "\u{2764}\u{FE0F}",
+            "\u{26A0}\u{FE0F}",
+            "\u{1F44D}",
+            "\u{263A}\u{FE0F}",
+        ] {
+            let request = FallbackRequest {
+                cluster,
+                family: &FontFamily::Proportional,
+            };
+            let Some(insert) = provider.font_for(&request) else {
+                panic!("No system font for {cluster:?}");
+            };
+            assert!(
+                insert.name.contains("Emoji"),
+                "{cluster:?}: {}",
+                insert.name
+            );
         }
     }
 

@@ -4,6 +4,7 @@ use crate::text::{
     FontFamily,
     face_store::{FaceStore, FontFaceKey},
     font_provider::FontProviders,
+    has_emoji_presentation,
 };
 
 /// Index of a [`Family`] in `FontsImpl`.
@@ -17,6 +18,10 @@ pub(crate) struct FamilyKey(pub(crate) usize);
 /// This is the only place that decides which face renders a given char:
 /// first the fonts the [`FontProviders`] install up front (the configured fonts),
 /// then fonts they discover on demand, then the `.notdef` glyph ("tofu") of the primary face.
+///
+/// The exception is a grapheme cluster with emoji presentation (😀, ❤️, 👍🏽): there the providers
+/// are asked first, so that a color emoji font can win over a text face that happens to have the
+/// same code point (see [`Family::resolve_cluster`]).
 #[derive(Debug)]
 pub(crate) struct Family {
     name: FontFamily,
@@ -31,6 +36,12 @@ pub(crate) struct Family {
     /// Location-independent (fallback choice depends only on charmap support,
     /// not on variation coordinates).
     face_cache: ahash::HashMap<char, FontFaceKey>,
+
+    /// Like [`Self::face_cache`], for the base chars of clusters with emoji presentation.
+    ///
+    /// Separate, because ❤ and ❤️ (U+2764 followed by U+FE0F) have the same base char
+    /// but are not drawn with the same face.
+    emoji_face_cache: ahash::HashMap<char, FontFaceKey>,
 
     /// Lazily calculated: every supported char, and the names of the faces that have it.
     characters: Option<BTreeMap<char, Vec<String>>>,
@@ -69,6 +80,7 @@ impl Family {
             name: name.clone(),
             chain,
             face_cache: Default::default(),
+            emoji_face_cache: Default::default(),
             characters: None,
         }
     }
@@ -87,7 +99,8 @@ impl Family {
     /// Find which face in the fallback chain owns `c`.
     ///
     /// Location-independent: fallback choice depends only on charmap support.
-    /// Asks the [`FontProviders`] when no face has `c`,
+    /// Asks the [`FontProviders`] when no face has `c`
+    /// (for emoji presentation, see [`Self::resolve_cluster`]),
     /// and falls back to the primary face (whose `.notdef` glyph we then render)
     /// when they have no font for it either.
     #[inline]
@@ -104,6 +117,13 @@ impl Family {
 
     /// Like [`Self::resolve`] for the first char of `cluster`,
     /// but lets the [`FontProviders`] see the whole grapheme cluster.
+    ///
+    /// A cluster with emoji presentation ([`has_emoji_presentation`]: 😀, ❤️ with U+FE0F, 👍🏽)
+    /// asks the providers *first*: many text faces have ❤ or ⚠ as an outline, which would otherwise
+    /// win over the color emoji that U+FE0F asks for. A color face in the chain (installed, or found
+    /// for an earlier emoji) is used first; else the providers' face if it has a color glyph for the
+    /// char; otherwise the installed faces come first, as always.
+    /// A cluster with U+FE0E (text presentation) and any other cluster keep the usual order.
     #[inline]
     pub fn resolve_cluster(
         &mut self,
@@ -114,10 +134,54 @@ impl Family {
         let Some(base_char) = cluster.chars().next() else {
             return self.notdef_face();
         };
+        if !cluster.is_ascii() && has_emoji_presentation(cluster) {
+            if let Some(font_key) = self.emoji_face_cache.get(&base_char) {
+                return *font_key;
+            }
+            return self.resolve_emoji_slow(faces, providers, cluster, base_char);
+        }
         if let Some(font_key) = self.face_cache.get(&base_char) {
             return *font_key;
         }
         self.resolve_slow(faces, providers, cluster, base_char)
+    }
+
+    /// [`Self::resolve_slow`] for a cluster with emoji presentation:
+    /// a color face already in the chain, a provider's color face, then the installed faces
+    /// (a provider's other face is in the chain by then, and fills in what they lack).
+    ///
+    /// Each provider is still asked at most once per (family, char) with emoji presentation.
+    #[cold]
+    fn resolve_emoji_slow(
+        &mut self,
+        faces: &mut FaceStore,
+        providers: &mut FontProviders,
+        cluster: &str,
+        c: char,
+    ) -> FontFaceKey {
+        let font_key = self
+            // A color face the app installed itself stays ahead of the providers':
+            .find_color_face_for_char(c, faces)
+            .or_else(|| self.discover(faces, providers, cluster))
+            // Only a color face beats the installed ones: a provider that has no emoji font may
+            // still return a text font, e.g. for `★` + U+FE0F, which has no emoji form.
+            // (That text font is in the chain now, so it is found below if no installed face has `c`.)
+            .filter(|key| {
+                faces
+                    .get_mut(*key)
+                    .is_some_and(|face| face.has_color_glyph_for_char(c))
+            })
+            .or_else(|| self.find_face_for_char(c, faces))
+            .unwrap_or_else(|| {
+                log::debug!(
+                    "No font for emoji {c:?} (U+{:04X}) in {:?}: rendering the tofu glyph instead",
+                    c as u32,
+                    self.name
+                );
+                self.notdef_face()
+            });
+        self.emoji_face_cache.insert(c, font_key);
+        font_key
     }
 
     #[cold]
@@ -166,6 +230,15 @@ impl Family {
             self.characters = None;
         }
         Some(key)
+    }
+
+    /// The first face in the chain that draws `c` as a color glyph.
+    fn find_color_face_for_char(&self, c: char, faces: &mut FaceStore) -> Option<FontFaceKey> {
+        self.chain.iter().copied().find(|&key| {
+            faces
+                .get_mut(key)
+                .is_some_and(|face| face.has_color_glyph_for_char(c))
+        })
     }
 
     /// The first face in the whole chain whose charmap supports `c`.
