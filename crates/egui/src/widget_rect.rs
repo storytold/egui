@@ -96,6 +96,14 @@ pub struct InteractOptions {
     ///
     /// Only used by [`crate::Ui::interact_opt`].
     pub enabled: bool,
+
+    /// Does Space act as a click while the widget has keyboard focus?
+    ///
+    /// Enter always does. Set this to `false` for a link, which Space doesn't activate
+    /// (Space scrolls the page in a browser).
+    ///
+    /// Applies to the response of this call; [`crate::Context::read_response`] uses the default.
+    pub activate_on_space: bool,
 }
 
 impl Default for InteractOptions {
@@ -103,6 +111,7 @@ impl Default for InteractOptions {
         Self {
             move_to_top: false,
             enabled: true,
+            activate_on_space: true,
         }
     }
 }
@@ -204,6 +213,7 @@ impl WidgetRects {
         let InteractOptions {
             move_to_top,
             enabled: _,
+            activate_on_space: _,
         } = options;
 
         let mut shift_layer_index_after = None;

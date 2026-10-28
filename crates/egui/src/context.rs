@@ -1592,7 +1592,7 @@ impl Context {
         // Response inspection is also used to choose styling before a widget processes input.
         // Apply click-away focus changes only when the widget is actually registered, so a
         // TextEdit can preserve its selection for an action later in this pass (egui#8763).
-        let res = self.get_response_with_focus_policy(w, true);
+        let res = self.get_response_with_focus_policy(w, true, options);
 
         #[cfg(debug_assertions)]
         if res.contains_pointer() {
@@ -1754,13 +1754,14 @@ impl Context {
 
     /// Do all interaction for an existing widget, without (re-)registering it.
     pub(crate) fn get_response(&self, widget_rect: WidgetRect) -> Response {
-        self.get_response_with_focus_policy(widget_rect, false)
+        self.get_response_with_focus_policy(widget_rect, false, Default::default())
     }
 
     fn get_response_with_focus_policy(
         &self,
         widget_rect: WidgetRect,
         apply_click_away: bool,
+        options: crate::InteractOptions,
     ) -> Response {
         use response::Flags;
 
@@ -1808,7 +1809,8 @@ impl Context {
             if enabled
                 && sense.senses_click()
                 && memory.has_focus(id)
-                && (input.key_pressed(Key::Space) || input.key_pressed(Key::Enter))
+                && ((options.activate_on_space && input.key_pressed(Key::Space))
+                    || input.key_pressed(Key::Enter))
             {
                 // Space/enter works like a primary click for e.g. selected buttons
                 res.flags.set(Flags::FAKE_PRIMARY_CLICKED, true);
@@ -5281,6 +5283,47 @@ mod test {
                 output.drop_without_applying_deltas();
             }
             assert_eq!(clicked, enabled, "only an enabled widget is clicked");
+        }
+    }
+
+    /// Enter clicks a focused widget; Space only if `InteractOptions::activate_on_space`.
+    #[test]
+    fn test_interact_opt_activate_on_space() {
+        use crate::{Event, Id, InteractOptions, Key, RawInput, Rect, Sense, pos2, vec2};
+
+        let ctx = Context::default();
+        ctx.set_fonts(FontDefinitions::empty());
+        let rect = Rect::from_min_size(pos2(10.0, 10.0), vec2(20.0, 20.0));
+        let id = Id::unique("widget");
+        ctx.memory_mut(|mem| mem.request_focus(id));
+        let press = |key| Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Default::default(),
+        };
+
+        for activate_on_space in [true, false] {
+            let options = InteractOptions {
+                activate_on_space,
+                ..Default::default()
+            };
+            for (key, expected) in [(Key::Space, activate_on_space), (Key::Enter, true)] {
+                let input = RawInput {
+                    events: vec![press(key)],
+                    ..Default::default()
+                };
+                let mut clicked = false;
+                let output = ctx.run_ui(input, |ui| {
+                    clicked = ui.interact_opt(rect, id, Sense::click(), options).clicked();
+                });
+                output.drop_without_applying_deltas();
+                assert_eq!(
+                    clicked, expected,
+                    "{key:?}, activate_on_space: {activate_on_space}"
+                );
+            }
         }
     }
 
