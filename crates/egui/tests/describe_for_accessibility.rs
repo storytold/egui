@@ -14,13 +14,19 @@ fn describe_for_accessibility_sets_description_and_name() {
         response.widget_info(|| egui::WidgetInfo::new(egui::Role::Button));
         response.describe_for_accessibility("Save the file");
         node = ctx.accesskit_node_builder(response.id, |n| {
-            (n.description().map(str::to_owned), n.label().map(str::to_owned))
+            (
+                n.description().map(str::to_owned),
+                n.label().map(str::to_owned),
+            )
         });
     });
     output.drop_without_applying_deltas();
 
     assert_eq!(
         node,
-        Some((Some("Save the file".to_owned()), Some("Save the file".to_owned())))
+        Some((
+            Some("Save the file".to_owned()),
+            Some("Save the file".to_owned())
+        ))
     );
 }
