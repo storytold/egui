@@ -266,7 +266,8 @@ impl<'app> GlowWinitApp<'app> {
         native_options: &mut NativeOptions,
     ) -> Result<(GlutinWindowContext, egui_glow::Painter)> {
         profiling::function_scope!();
-        let mut window_settings = epi_integration::load_window_settings(storage);
+        let mut window_settings =
+            epi_integration::load_window_settings(native_options.persist_window, storage);
 
         let winit_window_builder = epi_integration::viewport_builder(
             egui_ctx.zoom_factor(),
@@ -519,6 +520,7 @@ impl WinitApp for GlowWinitApp<'_> {
                 running.app.as_mut(),
                 Some(&running.glutin.borrow().window(ViewportId::ROOT)),
             );
+            running.integration.close_storage();
             running.app.on_exit(Some(running.painter.borrow().gl()));
             running.painter.borrow_mut().destroy();
         }
@@ -1110,6 +1112,9 @@ impl GlowWinitRunning<'_> {
                 if let (Some(window), Some(egui_winit)) =
                     (&viewport.window, &mut viewport.egui_winit)
                 {
+                    if viewport_id == ViewportId::ROOT {
+                        self.integration.track_window_geometry(window);
+                    }
                     event_response = self.integration.on_window_event(window, egui_winit, event);
                 }
             } else {
