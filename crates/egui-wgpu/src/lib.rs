@@ -117,12 +117,16 @@ pub struct RenderState {
     /// Wgpu adapter used for rendering.
     pub adapter: wgpu::Adapter,
 
-    /// All the available adapters.
+    /// What each adapter that was available when the render state was created is.
+    ///
+    /// Only their [`wgpu::AdapterInfo`] is kept, not the adapters: an adapter holds what its
+    /// backend set up to describe it (on Direct3D 12, a device of its own), so keeping the ones
+    /// not chosen held tens of MiB for the life of the app.
     ///
     /// This is not available on web.
     /// On web, we always select WebGPU is available, then fall back to WebGL if not.
     #[cfg(not(target_arch = "wasm32"))]
-    pub available_adapters: Vec<wgpu::Adapter>,
+    pub available_adapters: Vec<wgpu::AdapterInfo>,
 
     /// Wgpu instance used for creating surfaces and adapters.
     pub instance: wgpu::Instance,
@@ -296,8 +300,12 @@ impl RenderState {
         Ok(Self {
             instance,
             adapter,
+            // The adapters not chosen are dropped here (see the field).
             #[cfg(not(target_arch = "wasm32"))]
-            available_adapters,
+            available_adapters: available_adapters
+                .iter()
+                .map(wgpu::Adapter::get_info)
+                .collect(),
             device,
             queue,
             target_format,
@@ -568,5 +576,40 @@ pub fn parse_vendor_id(vendor_id: u32) -> &'static str {
         wgpu::hal::auxil::db::nvidia::VENDOR => "NVIDIA",
         wgpu::hal::auxil::db::qualcomm::VENDOR => "Qualcomm",
         _ => "Unknown",
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::{RenderState, RendererOptions, WgpuConfiguration, WgpuSetup};
+
+    /// The render state keeps the adapter it draws with and lets go of the others it enumerated,
+    /// which on Direct3D 12 each hold a device of their own.
+    #[test]
+    fn only_the_chosen_adapter_stays_alive() {
+        let setup = WgpuSetup::without_display_handle();
+        let instance = pollster::block_on(setup.new_instance());
+        let config = WgpuConfiguration {
+            wgpu_setup: setup,
+            ..Default::default()
+        };
+        let Ok(state) = pollster::block_on(RenderState::create(
+            &config,
+            &instance,
+            None,
+            RendererOptions::default(),
+        )) else {
+            // No adapter here (a machine without a GPU or a software renderer): nothing to keep.
+            return;
+        };
+        let live = instance
+            .generate_report()
+            .map(|report| report.hub_report().adapters.num_kept_from_user);
+        assert_eq!(
+            live,
+            Some(1),
+            "{} adapters were available",
+            state.available_adapters.len()
+        );
     }
 }
