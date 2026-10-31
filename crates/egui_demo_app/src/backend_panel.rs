@@ -208,9 +208,7 @@ fn integration_ui(ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
 
     #[cfg(feature = "wgpu")]
     if let Some(render_state) = _frame.wgpu_render_state() {
-        let wgpu_adapter_details_ui = |ui: &mut egui::Ui, adapter: &eframe::wgpu::Adapter| {
-            let info = &adapter.get_info();
-
+        let wgpu_adapter_details_ui = |ui: &mut egui::Ui, info: &eframe::wgpu::AdapterInfo| {
             let eframe::wgpu::AdapterInfo {
                 name,
                 vendor,
@@ -224,7 +222,7 @@ fn integration_ui(ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
                 subgroup_max_size,
                 transient_saves_memory,
                 limit_bucket,
-            } = &info;
+            } = info;
 
             // Example values:
             // > name: "llvmpipe (LLVM 16.0.6, 256 bits)", device_type: Cpu, backend: Vulkan, driver: "llvmpipe", driver_info: "Mesa 23.1.6-arch1.4 (LLVM 16.0.6)"
@@ -286,10 +284,9 @@ fn integration_ui(ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
             });
         };
 
-        let wgpu_adapter_ui = |ui: &mut egui::Ui, adapter: &eframe::wgpu::Adapter| {
-            let info = &adapter.get_info();
+        let wgpu_adapter_ui = |ui: &mut egui::Ui, info: &eframe::wgpu::AdapterInfo| {
             ui.label(format!("{:?}", info.backend)).on_hover_ui(|ui| {
-                wgpu_adapter_details_ui(ui, adapter);
+                wgpu_adapter_details_ui(ui, info);
             });
         };
 
@@ -298,17 +295,18 @@ fn integration_ui(ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
             ui.hyperlink_to("wgpu", "https://wgpu.rs/");
             ui.end_row();
 
+            let chosen = render_state.adapter.get_info();
             ui.label("Backend:");
-            wgpu_adapter_ui(ui, &render_state.adapter);
+            wgpu_adapter_ui(ui, &chosen);
             ui.end_row();
 
             #[cfg(not(target_arch = "wasm32"))]
             if 1 < render_state.available_adapters.len() {
                 ui.label("Others:");
                 ui.vertical(|ui| {
-                    for adapter in &*render_state.available_adapters {
-                        if adapter.get_info() != render_state.adapter.get_info() {
-                            wgpu_adapter_ui(ui, adapter);
+                    for info in &render_state.available_adapters {
+                        if *info != chosen {
+                            wgpu_adapter_ui(ui, info);
                         }
                     }
                 });
