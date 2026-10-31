@@ -221,3 +221,4 @@ The canonical immutable winit pin and lock are now aligned. Managed `canonical-l
 `audit34` passed lock generation and locked/offline metadata validation; the only dependency
 identity change was the qualified local winit source becoming its exact canonical Git revision.
 Consumer egui-family pins and their canonical locks remain a separate landing step.
+| E28 | on `craft/interact-enabled` | egui | `Popup::swallow_outside_press` (and `Memory::swallow_presses_outside`, `Memory::allow_presses_in` underneath): while an opted-in popup is shown, a primary-button press outside it reaches no widget and neither does its release, so the press that closes a popup does nothing else; presses on the popup's anchor widget, in rects given to `allow_presses_in`, and with other buttons go through; default behaviour unchanged | upstreamable | craft-ui `Menu` popup, `MenuBar`, `ContextMenu` |

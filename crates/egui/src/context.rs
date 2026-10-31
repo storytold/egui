@@ -547,6 +547,11 @@ impl ContextImpl {
                 .pointer_events
                 .iter()
                 .filter_map(|event| match event {
+                    PointerEvent::Pressed { position, button }
+                        if self.memory.press_is_swallowed(*position, *button) =>
+                    {
+                        Some((*position, WidgetHits::default()))
+                    }
                     PointerEvent::Pressed { position, .. } if Some(*position) != interact_pos => {
                         Some((*position, hit_test_at(*position)))
                     }
@@ -5393,6 +5398,76 @@ mod test {
                 assert!(!large.drag_started() && !large.dragged(), "pass {pass}");
             });
             output.drop_without_applying_deltas();
+        }
+    }
+
+    /// A primary press outside a popup that swallows outside presses reaches no widget,
+    /// and neither does its release, unless it is in an allowed rect.
+    /// By default, and for other buttons, the widget under the press gets it.
+    #[test]
+    fn test_popup_swallows_outside_press() {
+        use crate::{
+            Event, Id, LayerId, Order, PointerButton, Popup, PopupAnchor, RawInput, Rect, Sense,
+            pos2, vec2,
+        };
+
+        // (swallow, button, allow the background's rect)
+        let cases = [
+            (false, PointerButton::Primary, false),
+            (true, PointerButton::Primary, false),
+            (true, PointerButton::Primary, true),
+            (true, PointerButton::Secondary, false),
+        ];
+        for (swallow, pointer_button, allow) in cases {
+            let reaches = !swallow || allow || pointer_button != PointerButton::Primary;
+            let button = |pressed| Event::PointerButton {
+                pos: pos2(10.0, 10.0),
+                button: pointer_button,
+                pressed,
+                modifiers: Default::default(),
+            };
+
+            let ctx = Context::default();
+            ctx.set_fonts(FontDefinitions::empty());
+            let background = Rect::from_min_size(pos2(0.0, 0.0), vec2(100.0, 100.0));
+            let background_id = Id::unique("background");
+            let popup_id = Id::unique("popup");
+
+            // Hover, press outside the popup, release.
+            let passes = [
+                vec![Event::PointerMoved(pos2(10.0, 10.0))],
+                vec![Event::PointerMoved(pos2(10.0, 10.0))],
+                vec![button(true)],
+                vec![button(false)],
+            ];
+            for (pass, events) in passes.into_iter().enumerate() {
+                let input = RawInput {
+                    events,
+                    ..Default::default()
+                };
+                let output = ctx.run_ui(input, |ui| {
+                    let response = ui.interact(background, background_id, Sense::click_and_drag());
+                    Popup::new(
+                        popup_id,
+                        ui.ctx().clone(),
+                        PopupAnchor::Position(pos2(200.0, 200.0)),
+                        LayerId::new(Order::Foreground, popup_id),
+                    )
+                    .open(true)
+                    .swallow_outside_press(swallow)
+                    .show(|ui| ui.label("popup"));
+                    if allow {
+                        ui.ctx().memory_mut(|mem| mem.allow_presses_in(background));
+                    }
+
+                    match pass {
+                        2 => assert_eq!(response.is_pointer_button_down_on(), reaches),
+                        3 => assert_eq!(response.clicked_by(pointer_button), reaches),
+                        _ => {}
+                    }
+                });
+                output.drop_without_applying_deltas();
+            }
         }
     }
 

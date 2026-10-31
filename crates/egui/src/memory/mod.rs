@@ -7,8 +7,8 @@ use ahash::{HashMap, HashSet};
 use epaint::emath::TSTransform;
 
 use crate::{
-    EventFilter, Id, IdMap, LayerId, Order, Pos2, Rangef, RawInput, Rect, Style, Vec2, ViewportId,
-    ViewportIdMap, ViewportIdSet, area, vec2,
+    EventFilter, Id, IdMap, LayerId, Order, PointerButton, Pos2, Rangef, RawInput, Rect, Style,
+    Vec2, ViewportId, ViewportIdMap, ViewportIdSet, area, vec2,
 };
 
 mod theme;
@@ -118,6 +118,24 @@ pub struct Memory {
     #[cfg_attr(feature = "persistence", serde(skip))]
     popups: ViewportIdMap<OpenPopup>,
 
+    /// Layers that swallow a press outside them, from the previous pass.
+    /// See [`Self::swallow_presses_outside`].
+    #[cfg_attr(feature = "persistence", serde(skip))]
+    press_swallowing_layers: ViewportIdMap<Vec<LayerId>>,
+
+    /// Layers that swallow a press outside them, registered in the current pass.
+    #[cfg_attr(feature = "persistence", serde(skip))]
+    press_swallowing_layers_current_pass: ViewportIdMap<Vec<LayerId>>,
+
+    /// Rectangles where presses are not swallowed, from the previous pass.
+    /// See [`Self::allow_presses_in`].
+    #[cfg_attr(feature = "persistence", serde(skip))]
+    press_allowed_rects: ViewportIdMap<Vec<Rect>>,
+
+    /// Rectangles where presses are not swallowed, registered in the current pass.
+    #[cfg_attr(feature = "persistence", serde(skip))]
+    press_allowed_rects_current_pass: ViewportIdMap<Vec<Rect>>,
+
     /// Whether to inform the backend to interrupt any ongoing IME composition
     /// this pass.
     #[cfg_attr(feature = "persistence", serde(skip))]
@@ -143,6 +161,10 @@ impl Default for Memory {
             popups: Default::default(),
             everything_is_visible: Default::default(),
             add_fonts: Default::default(),
+            press_swallowing_layers: Default::default(),
+            press_swallowing_layers_current_pass: Default::default(),
+            press_allowed_rects: Default::default(),
+            press_allowed_rects_current_pass: Default::default(),
             requested_interrupt_ime: Default::default(),
             requested_ime_resets: Default::default(),
         };
@@ -807,6 +829,18 @@ impl Memory {
 
         self.viewport_id = new_raw_input.viewport_id;
 
+        let current = self
+            .press_swallowing_layers_current_pass
+            .remove(&self.viewport_id)
+            .unwrap_or_default();
+        self.press_swallowing_layers
+            .insert(self.viewport_id, current);
+        let current = self
+            .press_allowed_rects_current_pass
+            .remove(&self.viewport_id)
+            .unwrap_or_default();
+        self.press_allowed_rects.insert(self.viewport_id, current);
+
         // Cleanup
         self.interactions.retain(|id, _| viewports.contains(id));
         self.areas.retain(|id, _| viewports.contains(id));
@@ -1078,6 +1112,61 @@ impl Memory {
         for area in self.areas.values_mut() {
             *area = Default::default();
         }
+    }
+
+    /// While this layer is shown every pass, a primary-button pointer press outside it (and outside every other layer
+    /// that called this) reaches no widget, and neither does the release that ends it:
+    /// no widget is hovered-and-pressed, dragged or clicked by it.
+    ///
+    /// This is for popups that close on the press itself, where the press should do nothing else.
+    /// The layer's area rectangle from the previous pass decides what is outside.
+    /// Presses inside the layer are unaffected, and so is the hover state.
+    /// Presses with other buttons are never swallowed, so a secondary press can still
+    /// reach the widget that opened a context menu. See also [`Self::allow_presses_in`].
+    ///
+    /// Call it every pass the layer is shown. The effect starts in the next pass
+    /// and ends in the first pass after the layer stops calling it.
+    pub fn swallow_presses_outside(&mut self, layer_id: LayerId) {
+        let layers = self
+            .press_swallowing_layers_current_pass
+            .entry(self.viewport_id)
+            .or_default();
+        if !layers.contains(&layer_id) {
+            layers.push(layer_id);
+        }
+    }
+
+    /// Let primary-button presses in this rectangle through, even while a layer that called
+    /// [`Self::swallow_presses_outside`] is shown, e.g. the widget that opened a popup.
+    ///
+    /// Call it every pass; the rectangle is in global coordinates and takes effect in the next pass.
+    pub fn allow_presses_in(&mut self, rect: Rect) {
+        self.press_allowed_rects_current_pass
+            .entry(self.viewport_id)
+            .or_default()
+            .push(rect);
+    }
+
+    /// Is a press with this button at this position swallowed by [`Self::swallow_presses_outside`]?
+    pub(crate) fn press_is_swallowed(&self, pos: Pos2, button: PointerButton) -> bool {
+        if button != PointerButton::Primary {
+            return false;
+        }
+        if self
+            .press_allowed_rects
+            .get(&self.viewport_id)
+            .is_some_and(|rects| rects.iter().any(|rect| rect.contains(pos)))
+        {
+            return false;
+        }
+        let Some(layers) = self.press_swallowing_layers.get(&self.viewport_id) else {
+            return false;
+        };
+        !layers.is_empty()
+            && !layers.iter().any(|layer_id| {
+                self.area_rect(layer_id.id)
+                    .is_some_and(|rect| rect.contains(pos))
+            })
     }
 
     /// Obtain the previous rectangle of an area.

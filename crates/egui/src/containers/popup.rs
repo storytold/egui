@@ -182,6 +182,7 @@ pub struct Popup<'a> {
     sizing_pass: bool,
     sense: Sense,
     interactable: bool,
+    swallow_outside_press: bool,
     layout: Layout,
     frame: Option<Frame>,
     style: StyleModifier,
@@ -214,6 +215,7 @@ impl<'a> Popup<'a> {
             sizing_pass: false,
             sense: Sense::CLICK,
             interactable: true,
+            swallow_outside_press: false,
             layout: Layout::default(),
             frame: None,
             style: StyleModifier::default(),
@@ -415,6 +417,25 @@ impl<'a> Popup<'a> {
         self
     }
 
+    /// If `true`, a primary-button pointer press outside the popup reaches no widget while the popup
+    /// is open, and neither does the release that ends it, so a press that closes the popup does nothing else.
+    ///
+    /// Presses inside the popup, inside any other popup that sets this, and on the popup's anchor
+    /// widget (see [`Self::anchor_widget`]) are unaffected. Presses with other buttons are never
+    /// swallowed. Use [`crate::Memory::allow_presses_in`] to let presses through elsewhere.
+    /// The popup does not close by itself on the press: close it when you see the press
+    /// (see [`crate::PointerState::any_pressed`]) or on the click, as usual.
+    /// Takes effect in the pass after the popup is first shown.
+    ///
+    /// See [`crate::Memory::swallow_presses_outside`].
+    ///
+    /// Default: `false`.
+    #[inline]
+    pub fn swallow_outside_press(mut self, swallow: bool) -> Self {
+        self.swallow_outside_press = swallow;
+        self
+    }
+
     /// Set the sense of the popup.
     #[inline]
     pub fn sense(mut self, sense: Sense) -> Self {
@@ -607,6 +628,7 @@ impl<'a> Popup<'a> {
             sizing_pass,
             sense,
             interactable,
+            swallow_outside_press,
             layout,
             frame,
             style,
@@ -664,6 +686,15 @@ impl<'a> Popup<'a> {
             }
             inner
         });
+
+        if swallow_outside_press {
+            ctx.memory_mut(|mem| {
+                mem.swallow_presses_outside(response.response.layer_id);
+                if anchor_widget.is_some() {
+                    mem.allow_presses_in(anchor_rect);
+                }
+            });
+        }
 
         // Only a click whose press started while the popup was already open may close it.
         // Otherwise a popup opened on a pointer *press* (e.g. a right-press context menu)
