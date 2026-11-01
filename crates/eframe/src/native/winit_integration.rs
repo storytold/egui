@@ -45,6 +45,44 @@ pub enum PassMode {
     WithoutPaint,
 }
 
+/// What [`has_visible_immediate_descendant`] needs to know about one viewport.
+#[derive(Clone, Copy, Debug)]
+pub struct ViewportNode {
+    pub ids: egui::ViewportIdPair,
+
+    /// Drawn inside its parent's pass, rather than having its own ui callback.
+    pub is_immediate: bool,
+
+    pub is_visible: bool,
+}
+
+/// Does this viewport draw a visible immediate viewport, directly or through other immediate
+/// ones? Those only get a pass (and their input) while this viewport runs one.
+///
+/// Each viewport is visited at most once, so a parent cycle or a parent id that isn't in
+/// `viewports` can't make the walk loop.
+pub fn has_visible_immediate_descendant(
+    viewports: &[ViewportNode],
+    viewport_id: ViewportId,
+) -> bool {
+    let mut visited = egui::ViewportIdSet::default();
+    visited.insert(viewport_id); // ROOT is its own parent.
+    let mut to_visit = vec![viewport_id];
+    while let Some(parent) = to_visit.pop() {
+        for child in viewports {
+            if child.ids.parent != parent || !child.is_immediate || !visited.insert(child.ids.this)
+            {
+                continue;
+            }
+            if child.is_visible {
+                return true;
+            }
+            to_visit.push(child.ids.this);
+        }
+    }
+    false
+}
+
 /// Create an egui context, restoring it from storage if possible.
 pub fn create_egui_context(storage: Option<&dyn crate::Storage>) -> egui::Context {
     profiling::function_scope!();
@@ -220,5 +258,116 @@ pub(crate) fn on_accesskit_window_event(
             // so there's no need to repaint.
             EventResult::Wait
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use egui::{ViewportId, ViewportIdPair};
+
+    use super::{ViewportNode, has_visible_immediate_descendant};
+
+    fn id(name: &str) -> ViewportId {
+        ViewportId::from_hash_of(name)
+    }
+
+    fn node(
+        this: ViewportId,
+        parent: ViewportId,
+        is_immediate: bool,
+        is_visible: bool,
+    ) -> ViewportNode {
+        ViewportNode {
+            ids: ViewportIdPair { this, parent },
+            is_immediate,
+            is_visible,
+        }
+    }
+
+    fn check(viewports: &[ViewportNode], viewport_id: ViewportId) -> bool {
+        has_visible_immediate_descendant(viewports, viewport_id)
+    }
+
+    /// A parent whose frames are withheld (here: hidden) still runs its pass for a visible
+    /// immediate child, so the child keeps updating.
+    #[test]
+    fn withheld_parent_with_visible_immediate_child() {
+        let root = ViewportId::ROOT;
+        let child = id("child");
+        let viewports = [
+            node(root, root, false, false),
+            node(child, root, true, true),
+        ];
+        assert!(check(&viewports, root));
+    }
+
+    /// A deferred child has its own pass, so the withheld parent's behaviour is unchanged.
+    #[test]
+    fn withheld_parent_with_deferred_child() {
+        let root = ViewportId::ROOT;
+        let child = id("child");
+        let viewports = [
+            node(root, root, false, false),
+            node(child, root, false, true),
+        ];
+        assert!(!check(&viewports, root));
+    }
+
+    #[test]
+    fn hidden_immediate_child_only() {
+        let root = ViewportId::ROOT;
+        let child = id("child");
+        let viewports = [
+            node(root, root, false, true),
+            node(child, root, true, false),
+        ];
+        assert!(!check(&viewports, root));
+    }
+
+    #[test]
+    fn visible_immediate_grandchild_through_hidden_immediate_child() {
+        let root = ViewportId::ROOT;
+        let (child, grandchild) = (id("child"), id("grandchild"));
+        let viewports = [
+            node(root, root, false, true),
+            node(child, root, true, false),
+            node(grandchild, child, true, true),
+        ];
+        assert!(check(&viewports, root));
+    }
+
+    /// An immediate viewport under a deferred one is drawn by that deferred viewport's pass,
+    /// not by the root's.
+    #[test]
+    fn immediate_grandchild_through_deferred_child() {
+        let root = ViewportId::ROOT;
+        let (child, grandchild) = (id("child"), id("grandchild"));
+        let viewports = [
+            node(root, root, false, true),
+            node(child, root, false, false),
+            node(grandchild, child, true, true),
+        ];
+        assert!(!check(&viewports, root));
+        assert!(check(&viewports, child));
+    }
+
+    #[test]
+    fn parent_cycle_terminates() {
+        let (a, b) = (id("a"), id("b"));
+        let viewports = [node(a, b, true, false), node(b, a, true, false)];
+        assert!(!check(&viewports, a));
+        assert!(!check(&viewports, b));
+
+        let viewports = [node(a, b, true, false), node(b, a, true, true)];
+        assert!(check(&viewports, a));
+    }
+
+    #[test]
+    fn missing_ids() {
+        let (orphan, gone) = (id("orphan"), id("gone"));
+        let viewports = [node(orphan, gone, true, true)];
+        assert!(check(&viewports, gone));
+        assert!(!check(&viewports, id("unknown")));
+        assert!(!check(&[], ViewportId::ROOT));
     }
 }

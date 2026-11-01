@@ -1235,16 +1235,17 @@ fn is_viewport_or_descendant_visible(viewports: &Viewports, viewport_id: Viewpor
     })
 }
 
-/// Does this viewport draw a visible immediate viewport, directly or through other immediate
-/// ones? Those only get a pass (and their input) while this viewport runs one.
+/// See [`winit_integration::has_visible_immediate_descendant`].
 fn has_visible_immediate_descendant(viewports: &Viewports, viewport_id: ViewportId) -> bool {
-    viewports.values().any(|child| {
-        child.ids.parent == viewport_id
-            && child.ids.this != viewport_id // ROOT is its own parent; avoid self-recursion.
-            && child.viewport_ui_cb.is_none()
-            && (child.info.visible().unwrap_or(true)
-                || has_visible_immediate_descendant(viewports, child.ids.this))
-    })
+    let nodes: Vec<_> = viewports
+        .values()
+        .map(|viewport| winit_integration::ViewportNode {
+            ids: viewport.ids,
+            is_immediate: viewport.viewport_ui_cb.is_none(),
+            is_visible: viewport.info.visible().unwrap_or(true),
+        })
+        .collect();
+    winit_integration::has_visible_immediate_descendant(&nodes, viewport_id)
 }
 
 fn render_immediate_viewport(
