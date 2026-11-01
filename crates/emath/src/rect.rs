@@ -722,6 +722,8 @@ impl Rect {
 
             tmin = tmin.max(tx1.min(tx2));
             tmax = tmax.min(tx1.max(tx2));
+        } else if o.x < self.min.x || self.max.x < o.x {
+            return false; // Parallel to the left and right edges, and outside of them.
         }
 
         if d.y != 0.0 {
@@ -730,6 +732,8 @@ impl Rect {
 
             tmin = tmin.max(ty1.min(ty2));
             tmax = tmax.min(ty1.max(ty2));
+        } else if o.y < self.min.y || self.max.y < o.y {
+            return false; // Parallel to the top and bottom edges, and outside of them.
         }
 
         0.0 <= tmax && tmin <= tmax
@@ -850,6 +854,36 @@ impl BitOrAssign for Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_intersects_ray() {
+        let rect = Rect::from_min_max(pos2(10.0, 10.0), pos2(20.0, 20.0));
+        let (right, left, down, up) = (Vec2::RIGHT, Vec2::LEFT, Vec2::DOWN, Vec2::UP);
+
+        // Along an axis, towards the rect and away from it:
+        assert!(rect.intersects_ray(pos2(0.0, 15.0), right));
+        assert!(rect.intersects_ray(pos2(30.0, 15.0), left));
+        assert!(rect.intersects_ray(pos2(15.0, 0.0), down));
+        assert!(rect.intersects_ray(pos2(15.0, 30.0), up));
+        assert!(!rect.intersects_ray(pos2(0.0, 15.0), left));
+        assert!(!rect.intersects_ray(pos2(15.0, 0.0), up));
+
+        // Along an axis, passing beside the rect:
+        assert!(!rect.intersects_ray(pos2(0.0, 5.0), right));
+        assert!(!rect.intersects_ray(pos2(0.0, 25.0), right));
+        assert!(!rect.intersects_ray(pos2(5.0, 0.0), down));
+        assert!(!rect.intersects_ray(pos2(25.0, 0.0), down));
+        assert!(!rect.intersects_ray(pos2(5.0, 30.0), up));
+
+        // Along an edge counts as touching it, and a ray starting inside always hits:
+        assert!(rect.intersects_ray(pos2(10.0, 0.0), down));
+        assert!(rect.intersects_ray(pos2(15.0, 15.0), up));
+
+        // Diagonally:
+        let d = vec2(1.0, 1.0).normalized();
+        assert!(rect.intersects_ray(pos2(0.0, 0.0), d));
+        assert!(!rect.intersects_ray(pos2(0.0, 15.0), d.rot90().rot90()));
+    }
 
     #[test]
     fn test_rect() {
