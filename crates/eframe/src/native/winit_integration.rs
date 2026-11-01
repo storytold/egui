@@ -45,6 +45,31 @@ pub enum PassMode {
     WithoutPaint,
 }
 
+impl PassMode {
+    /// Does this pass run the viewport's ui?
+    ///
+    /// `has_visible_descendant` and `has_visible_immediate_descendant` are only called when the
+    /// answer depends on them.
+    pub fn runs_ui(
+        self,
+        is_visible: bool,
+        has_visible_descendant: impl FnOnce() -> bool,
+        has_visible_immediate_descendant: impl FnOnce() -> bool,
+    ) -> bool {
+        match self {
+            Self::Full => is_visible || has_visible_descendant(),
+            Self::WithoutPaint => has_visible_immediate_descendant(),
+        }
+    }
+
+    /// Does this pass paint the viewport's own window?
+    ///
+    /// Not without a frame from the windowing system: presenting one could block.
+    pub fn paints(self, is_visible: bool) -> bool {
+        is_visible && self == Self::Full
+    }
+}
+
 /// What [`has_visible_immediate_descendant`] needs to know about one viewport.
 #[derive(Clone, Copy, Debug)]
 pub struct ViewportNode {
@@ -265,7 +290,7 @@ pub(crate) fn on_accesskit_window_event(
 mod tests {
     use egui::{ViewportId, ViewportIdPair};
 
-    use super::{ViewportNode, has_visible_immediate_descendant};
+    use super::{PassMode, ViewportNode, has_visible_immediate_descendant};
 
     fn id(name: &str) -> ViewportId {
         ViewportId::from_hash_of(name)
@@ -288,10 +313,8 @@ mod tests {
         has_visible_immediate_descendant(viewports, viewport_id)
     }
 
-    /// A parent whose frames are withheld (here: hidden) still runs its pass for a visible
-    /// immediate child, so the child keeps updating.
     #[test]
-    fn withheld_parent_with_visible_immediate_child() {
+    fn finds_visible_immediate_child() {
         let root = ViewportId::ROOT;
         let child = id("child");
         let viewports = [
@@ -301,9 +324,8 @@ mod tests {
         assert!(check(&viewports, root));
     }
 
-    /// A deferred child has its own pass, so the withheld parent's behaviour is unchanged.
     #[test]
-    fn withheld_parent_with_deferred_child() {
+    fn ignores_deferred_child() {
         let root = ViewportId::ROOT;
         let child = id("child");
         let viewports = [
@@ -369,5 +391,70 @@ mod tests {
         assert!(check(&viewports, gone));
         assert!(!check(&viewports, id("unknown")));
         assert!(!check(&[], ViewportId::ROOT));
+    }
+
+    /// What a pass of `viewport_id` does: (runs its ui, paints its window).
+    fn pass(mode: PassMode, viewports: &[ViewportNode], viewport_id: ViewportId) -> (bool, bool) {
+        let is_visible = viewports
+            .iter()
+            .find(|v| v.ids.this == viewport_id)
+            .is_some_and(|v| v.is_visible);
+        let runs_ui = mode.runs_ui(
+            is_visible,
+            || panic!("a withheld pass doesn't look at deferred descendants"),
+            || check(viewports, viewport_id),
+        );
+        (runs_ui, mode.paints(is_visible))
+    }
+
+    /// The window's frames are withheld but it is shown (e.g. covered by its own child window),
+    /// and a visible immediate child is drawn inside it: the overdue pass runs the window's ui,
+    /// so the child gets its pass and input, and doesn't paint the window.
+    #[test]
+    fn withheld_pass_runs_ui_for_visible_immediate_child() {
+        let root = ViewportId::ROOT;
+        let viewports = [
+            node(root, root, false, true),
+            node(id("child"), root, true, true),
+        ];
+        assert_eq!(
+            pass(PassMode::WithoutPaint, &viewports, root),
+            (true, false)
+        );
+        assert_eq!(pass(PassMode::Full, &viewports, root), (true, true));
+    }
+
+    /// A deferred child has a pass of its own: the overdue pass stays logic only, as before E22.
+    #[test]
+    fn withheld_pass_with_deferred_child_is_logic_only() {
+        let root = ViewportId::ROOT;
+        let viewports = [
+            node(root, root, false, true),
+            node(id("child"), root, false, true),
+        ];
+        assert_eq!(
+            pass(PassMode::WithoutPaint, &viewports, root),
+            (false, false)
+        );
+    }
+
+    #[test]
+    fn withheld_pass_with_hidden_immediate_child_is_logic_only() {
+        let root = ViewportId::ROOT;
+        let viewports = [
+            node(root, root, false, true),
+            node(id("child"), root, true, false),
+        ];
+        assert_eq!(
+            pass(PassMode::WithoutPaint, &viewports, root),
+            (false, false)
+        );
+    }
+
+    #[test]
+    fn full_pass_of_hidden_window_runs_ui_for_visible_descendant() {
+        assert!(PassMode::Full.runs_ui(false, || true, || unreachable!()));
+        assert!(!PassMode::Full.runs_ui(false, || false, || unreachable!()));
+        assert!(!PassMode::Full.paints(false));
     }
 }

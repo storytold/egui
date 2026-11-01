@@ -710,14 +710,12 @@ impl WgpuWinitRunning<'_> {
             };
             let mut raw_input = egui_winit.take_egui_input(window);
 
-            let show_ui = match mode {
-                PassMode::Full => {
-                    is_visible || is_viewport_or_descendant_visible(viewports, viewport_id)
-                }
-                PassMode::WithoutPaint => has_visible_immediate_descendant(viewports, viewport_id),
-            };
-            // The windowing system hasn't asked for a frame: presenting one could block.
-            let is_visible = is_visible && mode == PassMode::Full;
+            let show_ui = mode.runs_ui(
+                is_visible,
+                || is_viewport_or_descendant_visible(viewports, viewport_id),
+                || has_visible_immediate_descendant(viewports, viewport_id),
+            );
+            let is_visible = mode.paints(is_visible);
 
             integration.pre_update();
 

@@ -45,6 +45,20 @@ const MISSED_REDRAW_TIMEOUT: Duration = Duration::from_millis(250);
 /// time would leave the child answering clicks four times a second.
 const WITHHELD_PARENT_PASS_INTERVAL: Duration = Duration::from_millis(16);
 
+/// How long to wait for a requested `RedrawRequested` before running a pass without it.
+///
+/// `has_visible_immediate_viewport` is only called for a window whose frames are withheld.
+fn redraw_timeout(
+    is_withheld: bool,
+    has_visible_immediate_viewport: impl FnOnce() -> bool,
+) -> Duration {
+    if is_withheld && has_visible_immediate_viewport() {
+        WITHHELD_PARENT_PASS_INTERVAL
+    } else {
+        MISSED_REDRAW_TIMEOUT
+    }
+}
+
 // ----------------------------------------------------------------------------
 fn create_event_loop(native_options: &mut epi::NativeOptions) -> Result<EventLoop<UserEvent>> {
     #[cfg(target_os = "android")]
@@ -244,13 +258,10 @@ impl<T: WinitApp> WinitAppWrapper<T> {
                         // busy-loops a whole CPU core.
                         // See https://github.com/emilk/egui/issues/8326.
                         window.request_redraw();
-                        let timeout = if self.windows_redraw_withheld.contains(window_id)
-                            && self.winit_app.has_visible_immediate_viewport(*window_id)
-                        {
-                            WITHHELD_PARENT_PASS_INTERVAL
-                        } else {
-                            MISSED_REDRAW_TIMEOUT
-                        };
+                        let timeout = redraw_timeout(
+                            self.windows_redraw_withheld.contains(window_id),
+                            || self.winit_app.has_visible_immediate_viewport(*window_id),
+                        );
                         self.windows_redraw_deadlines
                             .entry(*window_id)
                             .or_insert(now + timeout);
@@ -656,4 +667,23 @@ pub enum EframePumpStatus {
 
     /// The exit code for the application
     Exit(i32),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MISSED_REDRAW_TIMEOUT, WITHHELD_PARENT_PASS_INTERVAL, redraw_timeout};
+
+    #[test]
+    fn withheld_window_with_visible_immediate_child_retries_at_frame_rate() {
+        assert_eq!(redraw_timeout(true, || true), WITHHELD_PARENT_PASS_INTERVAL);
+    }
+
+    #[test]
+    fn other_windows_wait_the_missed_redraw_timeout() {
+        assert_eq!(redraw_timeout(true, || false), MISSED_REDRAW_TIMEOUT);
+        assert_eq!(
+            redraw_timeout(false, || panic!("only asked for a withheld window")),
+            MISSED_REDRAW_TIMEOUT
+        );
+    }
 }
