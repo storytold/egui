@@ -219,3 +219,17 @@ The canonical immutable winit pin and lock are now aligned. Managed `canonical-l
 `audit34` passed lock generation and locked/offline metadata validation; the only dependency
 identity change was the qualified local winit source becoming its exact canonical Git revision.
 Consumer egui-family pins and their canonical locks remain a separate landing step.
+
+### macOS IME surrounding-text bridge and TextEdit composition parity
+
+`egui-winit` enables IME immediately on macOS window initialization so cold-start Korean jamo input
+is not dropped before the first output pass, routes `IMEOutput` surrounding-text updates to
+`WindowExtMacOS::set_ime_surrounding_text_with_change_cause` and `clear_ime_surrounding_text`
+(paired with `storytold/winit#24`), and preserves the macOS input context across transient
+`WindowEvent::Focused(false)` events (such as the floating `Option+Return` Hanja candidate window)
+while keeping Wayland's seat-focus teardown intact.
+
+`egui::TextEdit` handles `ImeEvent::DeleteSurroundingBytes` for UTF-8 replacement commits, latches
+same-pass `[Preedit(""), Key::Escape]` batches so cancelling an active IME composition does not
+surrender `TextEdit` focus, and commits active pre-edit text cleanly when focus transfers to
+another widget.

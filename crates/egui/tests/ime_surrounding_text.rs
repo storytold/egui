@@ -1053,3 +1053,307 @@ fn reset_completion_does_not_end_stock_preedit_or_move_its_selection() {
     assert_eq!(with_control.text, baseline.text);
     assert_eq!(Field::payload(&a), Field::payload(&b));
 }
+
+#[test]
+fn empty_text_edit_with_hint_text_renders_first_hangul_jamo_galley_on_same_frame() {
+    for with_prefix in [false, true] {
+        let ctx = Context::default();
+        let id = Id::unique(("hint-first-jamo", with_prefix));
+        let mut text = String::new();
+        let screen_rect = Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(500.0, 300.0)));
+
+        let mut empty_galley_text = String::new();
+        let mut init_out = ctx.run_ui(
+            RawInput {
+                screen_rect,
+                time: Some(0.1),
+                ..Default::default()
+            },
+            |ui| {
+                ui.memory_mut(|mem| mem.request_focus(id));
+                let mut edit = TextEdit::singleline(&mut text)
+                    .id(id)
+                    .hint_text("Search...");
+                if with_prefix {
+                    edit = edit.prefix("Q: ");
+                }
+                let out = edit.show(ui);
+                empty_galley_text = out.galley.text().to_owned();
+            },
+        );
+        init_out.textures_delta.clear();
+        let empty_ime = init_out
+            .platform_output
+            .ime
+            .expect("focused empty field emits IMEOutput");
+        assert_eq!(empty_galley_text, "");
+
+        let mut first_jamo_galley_text = String::new();
+        let mut is_composing = false;
+        let mut jamo_out = ctx.run_ui(
+            RawInput {
+                screen_rect,
+                time: Some(0.2),
+                events: vec![preedit("ㅎ")],
+                ..Default::default()
+            },
+            |ui| {
+                let mut edit = TextEdit::singleline(&mut text)
+                    .id(id)
+                    .hint_text("Search...");
+                if with_prefix {
+                    edit = edit.prefix("Q: ");
+                }
+                let out = edit.show(ui);
+                first_jamo_galley_text = out.galley.text().to_owned();
+                is_composing = out.state.is_ime_composition();
+            },
+        );
+        jamo_out.textures_delta.clear();
+        let jamo_ime = jamo_out
+            .platform_output
+            .ime
+            .expect("focused composing field emits IMEOutput");
+
+        assert_eq!(text, "ㅎ");
+        assert_eq!(
+            first_jamo_galley_text, "ㅎ",
+            "first Hangul jamo must appear in output.galley on the exact frame it arrives"
+        );
+        assert!(is_composing, "TextEditState reports active IME composition");
+        assert!(
+            jamo_ime.cursor_rect.min.x > empty_ime.cursor_rect.min.x,
+            "IME cursor_rect must advance past the first jamo on the same frame"
+        );
+        assert_eq!(Field::payload(&jamo_ime).text, "");
+        assert_eq!(Field::payload(&jamo_ime).cursor, 0);
+    }
+}
+
+#[test]
+fn text_edit_state_is_ime_composition_tracks_preedit_and_commit() {
+    let mut field = Field::new("가");
+    field.frame(vec![]);
+    let loaded = egui::text_edit::TextEditState::load(&field.ctx, field.id)
+        .expect("persisted TextEditState exists");
+    assert!(
+        !loaded.is_ime_composition(),
+        "initial selection state is not composing"
+    );
+
+    field.frame(vec![preedit("ㅎ")]);
+    assert!(
+        egui::text_edit::TextEditState::load(&field.ctx, field.id)
+            .expect("persisted TextEditState exists")
+            .is_ime_composition(),
+        "Preedit activates is_ime_composition()"
+    );
+
+    field.frame(vec![preedit("하")]);
+    assert!(
+        egui::text_edit::TextEditState::load(&field.ctx, field.id)
+            .expect("persisted TextEditState exists")
+            .is_ime_composition(),
+        "updated Preedit keeps is_ime_composition() active"
+    );
+
+    field.frame(vec![commit("한")]);
+    assert_eq!(field.text, "가한");
+    assert!(
+        !egui::text_edit::TextEditState::load(&field.ctx, field.id)
+            .expect("persisted TextEditState exists")
+            .is_ime_composition(),
+        "Commit clears is_ime_composition()"
+    );
+}
+
+#[test]
+fn clear_preedit_uses_clamped_preedit_range_when_cursor_moved_inside_composition() {
+    let ctx = Context::default();
+    let id = Id::unique("clear-preedit-range");
+    let mut text = "가나".to_owned();
+    let screen_rect = Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(500.0, 300.0)));
+
+    let run = |ctx: &Context, text: &mut String, time: f64, events: Vec<Event>| {
+        let mut out = ctx.run_ui(
+            RawInput {
+                screen_rect,
+                time: Some(time),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                ui.add(TextEdit::singleline(text).id(id).cursor_at_end(true));
+            },
+        );
+        out.textures_delta.clear();
+        out.platform_output
+            .ime
+            .expect("focused field emits IMEOutput")
+    };
+
+    ctx.memory_mut(|mem| mem.request_focus(id));
+    run(&ctx, &mut text, 0.1, vec![]);
+
+    // Move caret between "가" and "나" (index 1), then start a 2-syllable preedit "한글" (1..3).
+    let left_key = Event::Key {
+        key: Key::ArrowLeft,
+        physical_key: Some(Key::ArrowLeft),
+        pressed: true,
+        repeat: false,
+        modifiers: Modifiers::NONE,
+    };
+    run(&ctx, &mut text, 0.2, vec![left_key.clone()]);
+    run(&ctx, &mut text, 0.3, vec![preedit("한글")]);
+    assert_eq!(text, "가한글나");
+
+    // Collapse `cursor_range` to `1..1` while `state.cursor_purpose` still holds `preedit_range: 1..3`,
+    // then update preedit to "함": the full `1..3` preedit must be replaced cleanly.
+    run(&ctx, &mut text, 0.4, vec![left_key.clone(), preedit("함")]);
+    assert_eq!(
+        text, "가함나",
+        "updated Preedit must clear the full active preedit_range rather than the collapsed cursor"
+    );
+
+    // Collapse `cursor_range` again and commit "합": `Commit` must read `preedit_range` BEFORE
+    // resetting `state.cursor_purpose = Selection`.
+    let committed = run(&ctx, &mut text, 0.5, vec![left_key, commit("합")]);
+    assert_eq!(
+        text, "가합나",
+        "Commit must clear the active preedit_range before resetting cursor_purpose"
+    );
+    assert_eq!(Field::payload(&committed).text, "가합나");
+    assert_eq!(committed.change_cause, ImeChangeCause::InputMethod);
+}
+
+#[test]
+fn escape_during_ime_composition_cancels_preedit_interrupts_ime_and_retains_focus() {
+    let ctx = Context::default();
+    let id = Id::unique("escape-composition-focus-lock");
+    let mut text = "가".to_owned();
+    let screen_rect = Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(500.0, 300.0)));
+
+    let run = |ctx: &Context, text: &mut String, time: f64, events: Vec<Event>| {
+        let mut out = ctx.run_ui(
+            RawInput {
+                screen_rect,
+                time: Some(time),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                // Intentionally do NOT call `request_focus` here so `Focus::begin_pass` governs focus!
+                ui.add(TextEdit::singleline(text).id(id).cursor_at_end(true));
+            },
+        );
+        out.textures_delta.clear();
+        out.platform_output.ime
+    };
+
+    ctx.memory_mut(|mem| mem.request_focus(id));
+    assert!(run(&ctx, &mut text, 0.1, vec![]).is_some());
+    assert!(ctx.memory(|mem| mem.has_focus(id)));
+
+    assert!(run(&ctx, &mut text, 0.2, vec![preedit("ㅎ")]).is_some());
+    assert!(run(&ctx, &mut text, 0.3, vec![preedit("하")]).is_some());
+    assert_eq!(text, "가하");
+    assert!(
+        egui::text_edit::TextEditState::load(&ctx, id)
+            .expect("persisted TextEditState exists")
+            .is_ime_composition()
+    );
+
+    let escape = Event::Key {
+        key: Key::Escape,
+        physical_key: Some(Key::Escape),
+        pressed: true,
+        repeat: false,
+        modifiers: Modifiers::NONE,
+    };
+
+    let after_first_escape = run(&ctx, &mut text, 0.4, vec![escape.clone()])
+        .expect("Escape during active composition must retain focus and emit IMEOutput");
+    assert!(
+        ctx.memory(|mem| mem.has_focus(id)),
+        "Escape during active Hangul composition must NOT drop TextEdit focus"
+    );
+    assert_eq!(text, "가", "Escape deletes the active preedit text");
+    assert!(
+        !egui::text_edit::TextEditState::load(&ctx, id)
+            .expect("persisted TextEditState exists")
+            .is_ime_composition(),
+        "Escape exits ImeComposition"
+    );
+    assert!(
+        after_first_escape.should_interrupt_composition,
+        "Escape notifies platform integration to interrupt IME composition"
+    );
+    assert_eq!(Field::payload(&after_first_escape).text, "가");
+
+    // Once composition has ended, pressing Escape again surrenders focus normally.
+    let after_second_escape = run(&ctx, &mut text, 0.5, vec![escape]);
+    assert!(
+        !ctx.memory(|mem| mem.has_focus(id)),
+        "Escape outside composition surrenders focus as usual"
+    );
+    assert!(after_second_escape.is_none());
+}
+
+#[test]
+fn hangul_preedit_jamo_steps_are_not_recorded_in_undo_history() {
+    let mut field = Field::new("");
+    // Focus and settle the initial empty checkpoint.
+    field.frame(vec![]);
+    field.time += 2.0;
+    field.frame(vec![]);
+
+    // Commit "가" and let the undoer settle a checkpoint for "가".
+    field.frame(vec![preedit("ㄱ")]);
+    field.time += 2.0;
+    field.frame(vec![preedit("가")]);
+    field.time += 2.0;
+    field.frame(vec![preedit(""), commit("가")]);
+    field.time += 2.0;
+    field.frame(vec![]);
+    assert_eq!(field.text, "가");
+
+    // Compose "한" slowly across multiple frames exceeding the undoer's auto-save interval.
+    field.time += 2.0;
+    field.frame(vec![preedit("ㅎ")]);
+    assert_eq!(field.text, "가ㅎ");
+    field.time += 2.0;
+    field.frame(vec![]);
+
+    field.time += 2.0;
+    field.frame(vec![preedit("하")]);
+    assert_eq!(field.text, "가하");
+    field.time += 2.0;
+    field.frame(vec![]);
+
+    field.time += 2.0;
+    field.frame(vec![preedit("한")]);
+    assert_eq!(field.text, "가한");
+
+    field.time += 2.0;
+    field.frame(vec![preedit(""), commit("한")]);
+    assert_eq!(field.text, "가한");
+
+    let undo = Event::Key {
+        key: Key::Z,
+        physical_key: Some(Key::Z),
+        pressed: true,
+        repeat: false,
+        modifiers: Modifiers::COMMAND,
+    };
+
+    // First Cmd+Z must step directly back to "가", never "가하" or "가ㅎ".
+    field.frame(vec![undo.clone()]);
+    assert_eq!(
+        field.text, "가",
+        "Cmd+Z must skip intermediate preedit jamo states"
+    );
+
+    // Second Cmd+Z steps back to initial "".
+    field.frame(vec![undo]);
+    assert_eq!(field.text, "");
+}

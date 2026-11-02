@@ -39,19 +39,23 @@ mod clipboard_bridge;
     )
 ))]
 mod clipboard_image;
-// Wayland surrounding-text bridge. Winit compiles its Wayland backend for free Unix
-// targets (Linux, the BSDs and the rest of winit's `wayland_platform` set), not only Linux.
+// Surrounding-text bridge for macOS (`NSTextInputClient`) and Wayland (`zwp_text_input_v3`).
+// Winit compiles its Wayland backend for free Unix targets (Linux, the BSDs and the rest of
+// winit's `wayland_platform` set), not only Linux.
 #[cfg(not(target_arch = "wasm32"))]
 mod dropped_file;
 mod held_keys;
 mod ime_reset;
-#[cfg(all(
-    feature = "wayland",
-    unix,
-    not(target_vendor = "apple"),
-    not(target_os = "android"),
-    not(target_os = "emscripten"),
-    not(target_os = "redox"),
+#[cfg(any(
+    target_os = "macos",
+    all(
+        feature = "wayland",
+        unix,
+        not(target_vendor = "apple"),
+        not(target_os = "android"),
+        not(target_os = "emscripten"),
+        not(target_os = "redox"),
+    ),
 ))]
 mod ime_surrounding;
 mod output_selector;
@@ -270,14 +274,17 @@ pub struct State {
     ime_cursor_rect_px: Option<egui::Rect>,
     old_ime_purpose: egui::IMEPurpose,
 
-    /// Outgoing text-input-v3 surrounding text, cached per window and IME owner.
-    #[cfg(all(
-        feature = "wayland",
-        unix,
-        not(target_vendor = "apple"),
-        not(target_os = "android"),
-        not(target_os = "emscripten"),
-        not(target_os = "redox"),
+    /// Outgoing surrounding text, cached per window and IME owner.
+    #[cfg(any(
+        target_os = "macos",
+        all(
+            feature = "wayland",
+            unix,
+            not(target_vendor = "apple"),
+            not(target_os = "android"),
+            not(target_os = "emscripten"),
+            not(target_os = "redox"),
+        ),
     ))]
     ime_surrounding: ime_surrounding::ImeSurroundingSync,
 
@@ -660,13 +667,16 @@ impl State {
             clipboard_shortcuts: true,
             ime_cursor_rect_px: None,
             old_ime_purpose: egui::IMEPurpose::Normal,
-            #[cfg(all(
-                feature = "wayland",
-                unix,
-                not(target_vendor = "apple"),
-                not(target_os = "android"),
-                not(target_os = "emscripten"),
-                not(target_os = "redox"),
+            #[cfg(any(
+                target_os = "macos",
+                all(
+                    feature = "wayland",
+                    unix,
+                    not(target_vendor = "apple"),
+                    not(target_os = "android"),
+                    not(target_os = "emscripten"),
+                    not(target_os = "redox"),
+                ),
             ))]
             ime_surrounding: ime_surrounding::ImeSurroundingSync::default(),
             #[cfg(all(
@@ -2006,6 +2016,18 @@ impl State {
         self.allow_ime = allow;
         if !allow {
             self.ime_reset.invalidate();
+            #[cfg(any(
+                target_os = "macos",
+                all(
+                    feature = "wayland",
+                    unix,
+                    not(target_vendor = "apple"),
+                    not(target_os = "android"),
+                    not(target_os = "emscripten"),
+                    not(target_os = "redox"),
+                ),
+            ))]
+            self.ime_surrounding.forget_backend();
         }
     }
 
@@ -2423,11 +2445,22 @@ impl State {
                 ))]
                 {
                     // A reused `State` must not retain this window's focus, external-veto or
-                    // pending-enable latches, nor believe that its surrounding text is still
-                    // cached. The window is gone, so there is nothing to disable on the platform.
+                    // pending-enable latches. The window is gone, so there is nothing to disable
+                    // on the platform.
                     self.ime_gate.forget_window();
-                    self.ime_surrounding.forget_backend();
                 }
+                #[cfg(any(
+                    target_os = "macos",
+                    all(
+                        feature = "wayland",
+                        unix,
+                        not(target_vendor = "apple"),
+                        not(target_os = "android"),
+                        not(target_os = "emscripten"),
+                        not(target_os = "redox"),
+                    ),
+                ))]
+                self.ime_surrounding.forget_backend();
                 EventResponse {
                     repaint: true,
                     consumed: false,
@@ -2672,13 +2705,16 @@ impl State {
                 // `set_ime_allowed` from this asynchronous event, which would create an
                 // event-driven enable/disable loop. The next platform-output pass republishes
                 // the authoritative snapshot once, if the window is still allowed and focused.
-                #[cfg(all(
-                    feature = "wayland",
-                    unix,
-                    not(target_vendor = "apple"),
-                    not(target_os = "android"),
-                    not(target_os = "emscripten"),
-                    not(target_os = "redox"),
+                #[cfg(any(
+                    target_os = "macos",
+                    all(
+                        feature = "wayland",
+                        unix,
+                        not(target_vendor = "apple"),
+                        not(target_os = "android"),
+                        not(target_os = "emscripten"),
+                        not(target_os = "redox"),
+                    ),
                 ))]
                 self.ime_surrounding.forget_backend();
             }
@@ -2789,21 +2825,30 @@ impl State {
             return;
         }
 
+        #[cfg(target_os = "macos")]
+        if self.allow_ime != allowed {
+            self.allow_ime = allowed;
+            self.ime_surrounding.forget_backend();
+        }
+
         window.set_ime_allowed(allowed);
     }
 
-    /// Publish this pass's authoritative outgoing IME surrounding text on Wayland.
+    /// Publish this pass's authoritative outgoing IME surrounding text on Wayland and macOS.
     ///
     /// The planner is pure and the window adapter is a sink. The cache is only committed after
     /// every sink operation for the pass was applied; a locally suppressed write is forgotten,
     /// not cached. Diagnostics only contain redacted lengths.
-    #[cfg(all(
-        feature = "wayland",
-        unix,
-        not(target_vendor = "apple"),
-        not(target_os = "android"),
-        not(target_os = "emscripten"),
-        not(target_os = "redox"),
+    #[cfg(any(
+        target_os = "macos",
+        all(
+            feature = "wayland",
+            unix,
+            not(target_vendor = "apple"),
+            not(target_os = "android"),
+            not(target_os = "emscripten"),
+            not(target_os = "redox"),
+        ),
     ))]
     fn sync_ime_surrounding_text(
         &mut self,
@@ -3161,9 +3206,7 @@ impl State {
             text,
 
             state,
-
-            location: _, // e.g. is it on the numpad?
-            repeat: _,   // egui will figure this out for us
+            // `location` (e.g. is it on the numpad?) and `repeat` (egui will figure this out for us)
             ..
         } = event;
 
@@ -3427,13 +3470,16 @@ impl State {
             not(target_os = "redox"),
         )))]
         let (allow_ime, is_toggling_ime) = (ime_requested, self.allow_ime != ime_requested);
-        #[cfg(all(
-            feature = "wayland",
-            unix,
-            not(target_vendor = "apple"),
-            not(target_os = "android"),
-            not(target_os = "emscripten"),
-            not(target_os = "redox"),
+        #[cfg(any(
+            target_os = "macos",
+            all(
+                feature = "wayland",
+                unix,
+                not(target_vendor = "apple"),
+                not(target_os = "android"),
+                not(target_os = "emscripten"),
+                not(target_os = "redox"),
+            ),
         ))]
         let mut ime_context_was_reset = is_toggling_ime;
         if is_toggling_ime {
@@ -3470,13 +3516,16 @@ impl State {
                 window.set_ime_allowed(false);
                 window.set_ime_allowed(true);
             }
-            #[cfg(all(
-                feature = "wayland",
-                unix,
-                not(target_vendor = "apple"),
-                not(target_os = "android"),
-                not(target_os = "emscripten"),
-                not(target_os = "redox"),
+            #[cfg(any(
+                target_os = "macos",
+                all(
+                    feature = "wayland",
+                    unix,
+                    not(target_vendor = "apple"),
+                    not(target_os = "android"),
+                    not(target_os = "emscripten"),
+                    not(target_os = "redox"),
+                ),
             ))]
             {
                 ime_context_was_reset = true;
@@ -3511,13 +3560,16 @@ impl State {
             self.ime_cursor_rect_px = None;
         }
 
-        #[cfg(all(
-            feature = "wayland",
-            unix,
-            not(target_vendor = "apple"),
-            not(target_os = "android"),
-            not(target_os = "emscripten"),
-            not(target_os = "redox"),
+        #[cfg(any(
+            target_os = "macos",
+            all(
+                feature = "wayland",
+                unix,
+                not(target_vendor = "apple"),
+                not(target_os = "android"),
+                not(target_os = "emscripten"),
+                not(target_os = "redox"),
+            ),
         ))]
         {
             if ime_context_was_reset {
@@ -4543,15 +4595,18 @@ fn process_viewport_command(
                 .apply_purpose_command(&mut state.old_ime_purpose, p)
             {
                 window.set_ime_purpose(to_winit_ime_purpose(p));
-                #[cfg(all(
-                    feature = "wayland",
-                    unix,
-                    not(target_vendor = "apple"),
-                    not(target_os = "android"),
-                    not(target_os = "emscripten"),
-                    not(target_os = "redox"),
+                #[cfg(any(
+                    target_os = "macos",
+                    all(
+                        feature = "wayland",
+                        unix,
+                        not(target_vendor = "apple"),
+                        not(target_os = "android"),
+                        not(target_os = "emscripten"),
+                        not(target_os = "redox"),
+                    ),
                 ))]
-                if ime_surrounding::is_wayland_window(window) {
+                if ime_surrounding::supports_ime_surrounding_window(window) {
                     // A changed purpose is a real context boundary. An unchanged command above
                     // is a no-op and keeps the bridge cache, including a later owner/generation
                     // transition's ability to plan `ClearThenSet`.
