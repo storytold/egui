@@ -34,6 +34,18 @@ test. E4 is storytold/egui `c01acc2` on 0.37's `unsafe` `Clipboard::new`; it is 
 needs the `craft/0.30.13-lang` pin. The local E4/P2b follow-up below replaces E4's temporary
 PRIMARY gap once the reviewed winit W15P API is pinned.
 
+## Focus visibility in scrollable menus and popups
+
+Menu and popup entries request minimal scrolling when they gain focus, while their own
+`ScrollArea` is being built. This covers arrow and Tab navigation, including custom controls
+and nested menus, without requiring application-side scrolling at each call site. Unchanged
+focus does not override manual scrolling. A popup without its own scroll area does not scroll
+its background, and ordinary non-menu scroll areas keep their existing focus policy.
+
+`egui_kittest/tests/menu_scroll_focus.rs` checks actual paint clipping at 1×/2×, both arrow
+wrap directions, Tab/Shift+Tab, activation, nested-menu ownership and manual wheel scrolling.
+The change is scoped to focus visibility; it does not alter menu navigation or closing rules.
+
 ## Local migration follow-ups (not yet committed)
 
 ### Local E4/P2b: bounded asynchronous Wayland clipboard and PRIMARY bridge
