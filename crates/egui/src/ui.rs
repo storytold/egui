@@ -975,7 +975,7 @@ impl Ui {
     ) -> Response {
         self.ctx().register_accesskit_parent(id, self.unique_id);
 
-        self.ctx().create_widget(
+        let response = self.ctx().create_widget(
             WidgetRect {
                 id,
                 parent_id: self.unique_id,
@@ -988,7 +988,21 @@ impl Ui {
             },
             true,
             options,
-        )
+        );
+        // Menu navigation applies focus on the next pass. Reveal the entry while its own
+        // ScrollArea is still being built, not after Popup has finished laying it out.
+        // Only focus changes scroll: a stationary focus must not fight wheel/bar input.
+        // A menu without its own ScrollArea must not leak a target into its background.
+        if response.gained_focus()
+            && crate::containers::menu::is_in_menu(self)
+            && self
+                .stack()
+                .iter()
+                .any(|stack| stack.kind() == Some(UiKind::ScrollArea))
+        {
+            response.scroll_to_me(None);
+        }
+        response
     }
 
     /// Run `add_contents`, then mark every input widget it added that has no accessible name
