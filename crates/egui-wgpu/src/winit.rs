@@ -285,7 +285,8 @@ impl Painter {
         profiling::scope!("Painter::set_window"); // profile_function gives bad names for async functions
 
         if let Some(window) = window {
-            let size = window.inner_size();
+            // iOS: the whole screen, as egui is laid out over it (inner_size is the safe area)
+            let size = if cfg!(target_os = "ios") { window.outer_size() } else { window.inner_size() };
             if !self.surfaces.contains_key(&viewport_id) {
                 let surface = self.instance.create_surface(window)?;
                 self.add_surface(surface, viewport_id, size).await?;
@@ -311,7 +312,8 @@ impl Painter {
         profiling::scope!("Painter::set_window_unsafe"); // profile_function gives bad names for async functions
 
         if let Some(window) = window {
-            let size = window.inner_size();
+            // iOS: the whole screen, as egui is laid out over it (inner_size is the safe area)
+            let size = if cfg!(target_os = "ios") { window.outer_size() } else { window.inner_size() };
             if !self.surfaces.contains_key(&viewport_id) {
                 let surface = unsafe {
                     self.instance

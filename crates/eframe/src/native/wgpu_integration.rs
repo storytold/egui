@@ -1013,7 +1013,7 @@ impl WgpuWinitRunning<'_> {
                 let physical_size = viewport_id
                     .and_then(|id| shared.viewports.get(&id))
                     .and_then(|viewport| viewport.window.as_ref())
-                    .map_or(*physical_size, |window| window.inner_size());
+                    .map_or(*physical_size, |window| surface_size(window));
 
                 // Resize with 0 width and height is used by winit to signal a minimize event on Windows.
                 // See: https://github.com/rust-windowing/winit/issues/208
@@ -1407,7 +1407,7 @@ fn handle_viewport_output(
         let viewport =
             initialize_or_update_viewport(viewports, ids, class, builder, viewport_ui_cb, painter);
 
-        let old_inner_size = viewport.window.as_ref().map(|window| window.inner_size());
+        let old_inner_size = viewport.window.as_ref().map(|window| surface_size(window));
 
         viewport.process_commands(egui_ctx, commands);
 
@@ -1416,7 +1416,7 @@ fn handle_viewport_output(
             && let Some(window) = viewport.window.as_ref()
             && let Some(old_inner_size) = old_inner_size
         {
-            let new_inner_size = window.inner_size();
+            let new_inner_size = surface_size(window);
             if new_inner_size != old_inner_size
                 && let (Some(width), Some(height)) = (
                     NonZeroU32::new(new_inner_size.width),
@@ -1520,4 +1520,11 @@ fn initialize_or_update_viewport<'a>(
             entry.into_mut()
         }
     }
+}
+
+/// The size the window's surface must have: on iOS the whole screen (`outer_size`), as
+/// `egui_winit::screen_size_in_pixels` lays egui out over it; `inner_size` there is only the safe
+/// area, and a surface that size is stretched over the screen.
+fn surface_size(window: &winit::window::Window) -> winit::dpi::PhysicalSize<u32> {
+    if cfg!(target_os = "ios") { window.outer_size() } else { window.inner_size() }
 }
