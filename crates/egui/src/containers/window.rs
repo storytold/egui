@@ -1391,6 +1391,7 @@ fn title_ui(
     {
         first_text.shrink = true;
     }
+
     atoms.extend_right(title);
 
     atoms.push_right(Atom::grow());

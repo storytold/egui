@@ -356,13 +356,10 @@ pub fn paint_default_icon(ui: &mut Ui, openness: f32, response: &Response) {
     let rect = Rect::from_center_size(rect.center(), vec2(rect.width(), rect.height()) * 0.75);
     let rect = rect.expand(visuals.expansion);
     use core::f32::consts::TAU;
-    // Collapsed, the triangle points in the reading direction.
-    let collapsed_rotation = if ui.style().right_to_left {
-        TAU * 0.25
-    } else {
-        -TAU * 0.25
-    };
-    let rotation = remap(openness, 0.0..=1.0, collapsed_rotation..=0.0);
+    // In a right-to-left interface the closed triangle points left, the reading-start
+    // direction; the open triangle points down in both directions.
+    let closed_rotation = if ui.is_rtl() { TAU * 0.25 } else { -TAU * 0.25 };
+    let rotation = remap(openness, 0.0..=1.0, closed_rotation..=0.0);
 
     ui.painter().add(epaint::Shape::rotated_triangle(
         rect,

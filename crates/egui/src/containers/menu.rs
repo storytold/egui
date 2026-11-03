@@ -738,18 +738,24 @@ impl SubMenu {
         let expand = Vec2::new(0.0, measurement_frame.total_margin().sum().y * 0.5);
         response.interact_rect = response.interact_rect.expand2(expand);
 
-        let align = if ui.style().right_to_left {
-            RectAlign::LEFT_START
-        } else {
-            RectAlign::RIGHT_START
-        };
+        // In a right-to-left interface the submenu opens at the reading-end (left)
+        // side of its button, with rows justified from the reading start.
+        let rtl = ui.is_rtl();
 
         let popup_response = Popup::from_response(&response)
             .id(id)
             .kind(PopupKind::Menu)
             .open(is_open)
-            .align(align)
-            .layout(Layout::top_down_justified(Align::Min))
+            .align(if rtl {
+                RectAlign::LEFT_START
+            } else {
+                RectAlign::RIGHT_START
+            })
+            .layout(if rtl {
+                Layout::top_down_justified(Align::Max)
+            } else {
+                Layout::top_down_justified(Align::Min)
+            })
             .gap(gap)
             .style(menu_config.style.clone())
             // The close behavior is handled by the menu (see below)
