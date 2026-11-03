@@ -351,7 +351,6 @@ impl Resize {
             state,
             content_ui,
             sizing_pass: needs_sizing_pass,
-            anchor,
         }
     }
 
