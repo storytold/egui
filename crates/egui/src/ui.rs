@@ -2526,8 +2526,9 @@ impl Ui {
         CollapsingHeader::new(heading).show(self, add_contents)
     }
 
-    /// Create a child ui which is indented to the right
-    /// (to the left with [`crate::Style::right_to_left`]).
+    /// Create a child ui which is indented from the reading edge (to the right in
+    /// left-to-right layouts; mirrored under right-to-left, see
+    /// [`crate::Style::right_to_left`]).
     ///
     /// The `id_salt` here be anything at all.
     // TODO(emilk): remove `id_salt` argument?
@@ -2552,9 +2553,11 @@ impl Ui {
         );
 
         let indent = self.spacing().indent;
-        let right_to_left = self.style().right_to_left;
+        // Follow the reading direction: the same settled predicate the mirrored `horizontal*`
+        // constructors and Grid use.
+        let rtl = self.placer.prefer_right_to_left(self.is_rtl());
         let mut child_rect = self.placer.available_rect_before_wrap();
-        if right_to_left {
+        if rtl {
             child_rect.max.x -= indent;
         } else {
             child_rect.min.x += indent;
@@ -2572,29 +2575,31 @@ impl Ui {
             }
 
             let stroke = self.visuals().widgets.noninteractive.bg_stroke;
-            // The line sits in the middle of the indent, on the start side.
-            let line_x = if right_to_left {
+            // In left-to-right layouts the line runs through the disclosure-icon column, half an
+            // indent left of the child contents; mirrored, it runs through the mirrored icon column
+            // at the reading edge. (`child_rect` has already been shrunk above.)
+            let vline_x = if rtl {
                 child_rect.max.x + 0.5 * indent
             } else {
                 child_rect.min.x - 0.5 * indent
             };
-            let line_top = pos2(line_x, child_rect.min.y);
-            let line_bottom = pos2(line_x, child_ui.min_rect().bottom() - 2.0);
+            let vline_top = pos2(vline_x, child_rect.top());
+            let vline_bottom = pos2(vline_x, child_ui.min_rect().bottom() - 2.0);
 
             if left_vline {
-                // draw a faint line to mark the indented section
-                self.painter.line_segment([line_top, line_bottom], stroke);
+                // draw a faint line on the reading edge to mark the indented section
+                self.painter.line_segment([vline_top, vline_bottom], stroke);
             }
 
             if end_with_horizontal_line {
                 let fudge = 2.0; // looks nicer with button rounding in collapsing headers
-                let end_x = if right_to_left {
+                let stub_x = if rtl {
                     child_ui.min_rect().left() + fudge
                 } else {
                     child_ui.min_rect().right() - fudge
                 };
                 self.painter
-                    .line_segment([line_bottom, pos2(end_x, line_bottom.y)], stroke);
+                    .line_segment([vline_bottom, pos2(stub_x, vline_bottom.y)], stroke);
             }
         }
 
