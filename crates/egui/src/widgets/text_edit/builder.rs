@@ -1,7 +1,7 @@
 use alloc::sync::Arc;
 
 use emath::{Rect, TSTransform};
-use epaint::text::{Galley, LayoutJob, TextWrapMode, cursor::CCursor};
+use epaint::text::{CharIndex, Galley, LayoutJob, TextWrapMode, cursor::CCursor};
 
 use crate::{
     Align, Align2, AsIdSalt, AtomExt as _, AtomKind, Atoms, Color32, Context, CursorIcon, Event,
@@ -1497,8 +1497,13 @@ fn events(
                 }
 
                 match ime_event {
+                    // `RequestSurroundingText` carries no payload: the
+                    // surrounding-text report is refreshed in the IME-output
+                    // block below.
                     #[expect(deprecated)]
-                    ImeEvent::Enabled | ImeEvent::Disabled => None,
+                    ImeEvent::Enabled | ImeEvent::Disabled | ImeEvent::RequestSurroundingText => {
+                        None
+                    }
                     // Ignore `Preedit`/`Commit` events with empty text when
                     // there is no active IME composition.
                     //
