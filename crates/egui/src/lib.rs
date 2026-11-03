@@ -516,7 +516,10 @@ pub use self::{
         CommittedText, ImeContextTracker, ImeContextUpdate, ImeMutationStamp, ImeObservation,
         ImeResetId, ImeTarget,
     },
-    input_state::{InputOptions, InputState, MultiTouchInfo, PointerState, SurrenderFocusOn},
+    input_state::{
+        InputOptions, InputState, MAX_TEXT_EVENT_CHARS, MultiTouchInfo, PointerState,
+        SurrenderFocusOn,
+    },
     layers::{LayerId, Order},
     layout::Layout,
     load::SizeHint,
