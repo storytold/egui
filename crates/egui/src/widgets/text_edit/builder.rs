@@ -585,6 +585,7 @@ impl<'t> TextEdit<'t> {
             layout_job.language = ui.language();
             // We want to keep the trailing whitespace, since hiding it feels really weird when typing
             layout_job.keep_trailing_whitespace = true;
+            layout_job.language = ui.language();
 
             for section in &mut layout_job.sections {
                 section.format.line_height = Some(line_height);

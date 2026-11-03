@@ -837,8 +837,9 @@ impl WidgetText {
         text_wrapping: TextWrapping,
         fallback_font: FontSelection,
         default_valign: Align,
+        language: Option<String>,
     ) -> Arc<Galley> {
-        let language = ctx.language();
+        let language = language.or_else(|| ctx.language());
         self.layout_with_language(
             ctx,
             style,

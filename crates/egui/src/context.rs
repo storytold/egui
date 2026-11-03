@@ -2694,6 +2694,20 @@ impl Context {
         self.global_style().right_to_left
     }
 
+    /// The language text in this UI should be laid out in, as a BCP 47 tag, e.g. `"ar-EG"`.
+    ///
+    /// Widgets stamp this onto their text [`LayoutJob`]s so that
+    /// line-breaking and shaping can be locale-aware.
+    ///
+    /// Takes effect from the next frame (galleys re-layout because the cache key changed).
+    ///
+    /// Example:
+    /// ```
+    /// # let mut ctx = egui::Context::default();
+    /// assert!(ctx.language().is_none());
+    /// ctx.set_language("ar-EG");
+    /// assert_eq!(ctx.language(), Some("ar-EG".to_owned()));
+    /// ```
     /// The currently active [`Style`] used by all subsequent popups, menus, etc.
     pub fn global_style(&self) -> Arc<Style> {
         self.options(|opt| Arc::clone(opt.style()))
