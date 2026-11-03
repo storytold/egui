@@ -31,15 +31,19 @@ pub enum ImeEvent {
         after_chars: usize,
     },
 
-    /// Notifies when the text surrounding the cursor should be deleted, counted in bytes of
-    /// UTF-8 text, as winit reports it.
+    /// Notifies when the text surrounding the cursor should be deleted,
+    /// counted in UTF-8 bytes, the unit IMEs and windowing systems actually report
+    /// (winit's `Ime::DeleteSurrounding { before_bytes, after_bytes }` and Wayland's
+    /// `zwp_text_input_v3::delete_surrounding_text` are both byte-counted).
     ///
     /// `before_bytes` ends where the selection or pre-edit text starts, and `after_bytes` starts
     /// where it ends. Integrations send it right before the [`Self::Commit`] it goes with, which
-    /// may be empty.
+    /// may be empty, so the delete and the commit stay in one undo step.
     ///
-    /// The range is deleted exactly, not extended to whole grapheme clusters: an input method
-    /// can replace the combining accent of a letter, or a letter typed after an emoji sequence.
+    /// Counts saturate at the text bounds and are snapped to UTF-8 character boundaries.
+    /// Within a character the range is deleted exactly, not extended to whole grapheme
+    /// clusters: an input method can replace the combining accent of a letter, or a letter
+    /// typed after an emoji sequence.
     DeleteSurroundingBytes {
         before_bytes: usize,
         after_bytes: usize,
