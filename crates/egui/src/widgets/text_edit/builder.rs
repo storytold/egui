@@ -1,7 +1,7 @@
 use alloc::sync::Arc;
 
 use emath::{Rect, TSTransform};
-use epaint::text::{CharIndex, Galley, LayoutJob, TextWrapMode, cursor::CCursor};
+use epaint::text::{Galley, LayoutJob, TextWrapMode, cursor::CCursor};
 
 use crate::{
     Align, Align2, AsIdSalt, AtomExt as _, AtomKind, Atoms, Color32, Context, CursorIcon, Event,
@@ -17,7 +17,7 @@ use crate::{
     text_edit::state::TextEditCursorPurpose,
     text_selection::{
         self, CCursorRange,
-        text_cursor_state::{byte_index_from_char_index, cursor_rect},
+        text_cursor_state::cursor_rect,
         visuals::paint_text_selection,
     },
     vec2,
