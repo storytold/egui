@@ -340,11 +340,14 @@ pub struct Style {
     /// Use a more compact style for menus.
     pub compact_menu_style: bool,
 
-    /// Mirror egui's own chrome for right-to-left interfaces.
+    /// Mirror egui-owned widget chrome and default placements for a right-to-left interface
+    /// language (Arabic, Hebrew, Persian, Urdu).
     ///
     /// When `true`, submenus open to the left, vertical scroll bars sit on the left,
     /// collapsed collapsing-header triangles point left,
     /// and window title bars put the close button on the left and the collapse button on the right.
+    /// Set it through [`crate::Context::set_right_to_left`];
+    /// content geometry (canvases, sliders, numeric fields) stays left-to-right.
     ///
     /// This does not change how [`crate::Ui`] lays out widgets; use a right-to-left [`crate::Layout`] for that.
     ///
@@ -2035,6 +2038,14 @@ impl Style {
                     .speed(0.02)
                     .suffix(" s"),
             );
+            ui.end_row();
+
+            ui.label("Right-to-left");
+            ui.checkbox(right_to_left, "Mirror widget chrome")
+                .on_hover_text(
+                    "Mirror egui-owned widget chrome (triangles, icons, title bars, menus) \
+                     for right-to-left interface languages",
+                );
             ui.end_row();
         });
 
