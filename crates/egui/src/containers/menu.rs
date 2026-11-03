@@ -258,6 +258,14 @@ impl MenuState {
         if index.is_none() && !entering && !from_empty && !focus_first {
             return;
         }
+        // The reading-backward arrow returns focus to the anchor, closing the submenu:
+        // ArrowLeft in LTR, ArrowRight in RTL. SubMenu handles the reading-forward arrow
+        // on its own button before we get here.
+        let close_direction = if ui.is_rtl() {
+            FocusDirection::Right
+        } else {
+            FocusDirection::Left
+        };
         let next = if focus_first {
             entries.first().copied()
         } else {
@@ -271,8 +279,7 @@ impl MenuState {
                     .and_then(|index| entries.get(index))
                     .or_else(|| entries.last())
                     .copied(),
-                // SubMenu handles the key towards its submenu on its own button before we get here.
-                direction if direction == submenu_close_direction(ui) => anchor_widget,
+                _ if direction == close_direction => anchor_widget,
                 _ => None,
             }
         };
@@ -574,17 +581,6 @@ impl<'a> SubMenuButton<'a> {
     }
 }
 
-/// The arrow key that moves focus from a submenu back to its button.
-///
-/// The opposite key opens the submenu.
-fn submenu_close_direction(ui: &Ui) -> FocusDirection {
-    if ui.style().right_to_left {
-        FocusDirection::Right
-    } else {
-        FocusDirection::Left
-    }
-}
-
 /// Show a submenu in a menu.
 ///
 /// Useful if you want to make custom menu buttons.
@@ -683,7 +679,8 @@ impl SubMenu {
         let clicked_by_pointer = button_response.clicked_by(PointerButton::Primary);
         let clicked_by_keyboard_or_access = clicked && !clicked_by_pointer;
         let focused = button_response.enabled() && button_response.has_focus();
-        let open_direction = if ui.style().right_to_left {
+        // The reading-forward arrow opens the submenu: ArrowRight in LTR, ArrowLeft in RTL.
+        let open_direction = if ui.is_rtl() {
             FocusDirection::Left
         } else {
             FocusDirection::Right
