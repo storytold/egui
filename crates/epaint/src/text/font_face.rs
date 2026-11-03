@@ -64,7 +64,7 @@ struct DependentFontData<'a> {
     #[cfg(feature = "color_fonts")]
     index: u32,
 
-    /// Does the font have a `COLR`, `sbix`, `CBDT`, or `EBDT` table?
+    /// Does the font have a `COLR`, `sbix`, or `CBDT` table? (`EBDT` bitmaps are not color.)
     #[cfg(feature = "color_fonts")]
     has_color_glyphs: bool,
 
@@ -418,13 +418,7 @@ impl FontFace {
                 .flatten();
 
             #[cfg(feature = "color_fonts")]
-            let has_color_glyphs = {
-                use skrifa::raw::TableProvider as _;
-                skrifa_font.colr().is_ok()
-                    || skrifa_font.sbix().is_ok()
-                    || skrifa_font.cbdt().is_ok()
-                    || skrifa_font.ebdt().is_ok()
-            };
+            let has_color_glyphs = has_color_tables(&skrifa_font);
 
             Ok::<DependentFontData<'_>, Box<dyn core::error::Error>>(DependentFontData {
                 skrifa: skrifa_font,
@@ -769,6 +763,17 @@ pub(crate) struct ShapedCluster<'a> {
     pub is_cjk: bool,
 }
 
+/// Does the font have color glyphs: a `COLR`, `sbix` or `CBDT` table?
+///
+/// `EBDT` is left out on purpose: its embedded bitmaps are monochrome or grayscale renderings for
+/// small sizes (Windows' Calibri has them for ASCII), not color glyphs. Treating them as color drew
+/// them untinted, in white, so text in such a font vanished on light backgrounds.
+#[cfg(feature = "color_fonts")]
+fn has_color_tables(font: &skrifa::FontRef<'_>) -> bool {
+    use skrifa::raw::TableProvider as _;
+    font.colr().is_ok() || font.sbix().is_ok() || font.cbdt().is_ok()
+}
+
 /// A single-threaded vello context for one glyph.
 ///
 /// `RenderContext::new` uses worker threads when another crate in the build turns on `vello_cpu`'s
@@ -783,4 +788,67 @@ fn glyph_render_context(width: u16, height: u16) -> vello_cpu::RenderContext {
             ..Default::default()
         },
     )
+}
+
+#[cfg(all(test, feature = "color_fonts", feature = "default_fonts"))]
+mod color_table_tests {
+    use super::has_color_tables;
+
+    /// `font` with one more table, `tag` holding `data`: the table directory grows by a record
+    /// (kept sorted by tag, as the spec asks) and every existing table moves down by 16 bytes.
+    fn with_table(font: &[u8], tag: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let be16 = |at: usize| u16::from_be_bytes([font[at], font[at + 1]]);
+        let be32 =
+            |at: usize| u32::from_be_bytes([font[at], font[at + 1], font[at + 2], font[at + 3]]);
+        let num = be16(4) as usize;
+        let mut records: Vec<([u8; 4], u32, u32, u32)> = (0..num)
+            .map(|i| {
+                let r = 12 + 16 * i;
+                let tag = [font[r], font[r + 1], font[r + 2], font[r + 3]];
+                (tag, be32(r + 4), be32(r + 8) + 16, be32(r + 12))
+            })
+            .collect();
+        let mut out = font[..12].to_vec();
+        out[4..6].copy_from_slice(&((num + 1) as u16).to_be_bytes());
+        let body = &font[12 + 16 * num..];
+        let mut end = 12 + 16 * (num + 1) + body.len();
+        end += (4 - end % 4) % 4;
+        records.push((*tag, 0, end as u32, data.len() as u32));
+        records.sort_by_key(|r| r.0);
+        for (tag, sum, offset, len) in &records {
+            out.extend_from_slice(tag);
+            out.extend_from_slice(&sum.to_be_bytes());
+            out.extend_from_slice(&offset.to_be_bytes());
+            out.extend_from_slice(&len.to_be_bytes());
+        }
+        out.extend_from_slice(body);
+        out.resize(end, 0);
+        out.extend_from_slice(data);
+        out
+    }
+
+    fn color(font: &[u8]) -> bool {
+        has_color_tables(&skrifa::FontRef::new(font).expect("a valid font"))
+    }
+
+    #[test]
+    fn ebdt_bitmaps_are_not_color_glyphs() {
+        let hack = epaint_default_fonts::HACK_REGULAR;
+        assert!(!color(hack));
+        // A monochrome/grayscale bitmap table (version 2.0), as in Windows' Calibri.
+        let ebdt = with_table(hack, b"EBDT", &[0, 2, 0, 0]);
+        {
+            use skrifa::raw::TableProvider as _;
+            assert!(
+                skrifa::FontRef::new(&ebdt)
+                    .expect("a valid font")
+                    .ebdt()
+                    .is_ok(),
+                "the test font has its EBDT"
+            );
+        }
+        assert!(!color(&ebdt), "EBDT bitmaps were taken for color glyphs");
+        // A color bitmap table (CBDT 3.0) still is one.
+        assert!(color(&with_table(hack, b"CBDT", &[0, 3, 0, 0])));
+    }
 }
