@@ -240,7 +240,10 @@ fn anchored_rect(anchor: Pos2, size: Vec2, grip_on_left: bool) -> Rect {
 impl Resize {
     fn begin(&self, ui: &mut Ui) -> Prepared {
         // With the grip at the bottom-left, the right edge stays put while resizing.
-        let grip_on_left = ui.style().right_to_left && self.resizable.any();
+        // Every container anchors on its reading-start edge under RTL — including the
+        // window interior, whose container is `resizable(false)` because a window is
+        // resized through its edge strips.
+        let grip_on_left = ui.style().right_to_left;
         let available = ui.available_rect_before_wrap();
         let anchor = if grip_on_left {
             available.right_top()
@@ -253,6 +256,7 @@ impl Resize {
         });
 
         let mut state = State::load(ui.ctx(), id).unwrap_or_else(|| {
+
             ui.request_repaint(); // counter frame delay
 
             let default_size = self
