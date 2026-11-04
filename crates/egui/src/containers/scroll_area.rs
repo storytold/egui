@@ -1004,9 +1004,12 @@ impl ScrollArea {
                 if direction_enabled[d] {
                     content_clip_rect.min[d] = inner_rect.min[d];
                     content_clip_rect.max[d] = inner_rect.max[d];
-                } else if !(d == 0 && vertical_bar_on_left) {
+                } else if d == 0 && vertical_bar_on_left {
+                    // Vertical scroll bar on the left edge: crop the bar strip from the
+                    // clip's left side instead of the right.
+                    content_clip_rect.min[d] = ui.clip_rect().min[d] + current_bar_use[d];
+                } else {
                     // Nice handling of forced resizing beyond the possible.
-                    // (A vertical bar on the left is never in the way of content that overflows to the right.)
                     content_clip_rect.max[d] = ui.clip_rect().max[d] - current_bar_use[d];
                 }
             }
