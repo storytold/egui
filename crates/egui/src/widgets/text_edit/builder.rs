@@ -16,9 +16,7 @@ use crate::{
     response,
     text_edit::state::TextEditCursorPurpose,
     text_selection::{
-        self, CCursorRange,
-        text_cursor_state::cursor_rect,
-        visuals::paint_text_selection,
+        self, CCursorRange, text_cursor_state::cursor_rect, visuals::paint_text_selection,
     },
     vec2,
     widget_style::TextEditStyle,

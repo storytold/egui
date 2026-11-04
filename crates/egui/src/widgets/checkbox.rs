@@ -93,9 +93,7 @@ impl Widget for Checkbox<'_> {
 
         let text = atoms.text().map(String::from);
 
-        let layout = WidgetAtom::new(atoms)
-            .sense(Sense::click())
-            .direction(ui.style().chrome_direction());
+        let layout = WidgetAtom::new(atoms).sense(Sense::click());
         let mut prepared = atom_layout.apply(layout).min_size(min_size).allocate(ui);
 
         if prepared.response.clicked() {

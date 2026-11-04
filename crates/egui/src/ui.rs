@@ -71,7 +71,6 @@ pub struct Ui {
     /// This is an optimization, so we don't call [`Ui::remember_min_rect`] multiple times at the
     /// end of a [`Ui::scope`].
     min_rect_already_remembered: bool,
-
 }
 
 /// Allow using [`Ui`] like a [`Context`].

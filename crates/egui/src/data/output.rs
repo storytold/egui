@@ -1,6 +1,5 @@
 //! All the data egui returns to the backend at the end of each frame.
 
-
 use core::ops::Range;
 
 use epaint::text::CharIndex;

@@ -38,7 +38,6 @@ pub use {
     index::{ByteIndex, ByteRange, ByteRangeExt, CharIndex, CharRange, CharRangeExt},
     line_break::{LineBreak, LineBreakKind, LineBreaker, SimpleLineBreaker},
     line_breaker::SeaLineBreaker,
-
     text_layout_types::*,
 };
 

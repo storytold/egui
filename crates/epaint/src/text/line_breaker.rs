@@ -102,7 +102,7 @@ impl SeaLineBreaker {
     ///
     /// Ranges start and end on `char` boundaries. Ranges outside the scripts
     /// the breaker handles are simply not reported.
-    pub fn word_boundaries(&self, text: &str) -> Vec<core::ops::Range<usize>> {
+    pub fn word_boundaries(text: &str) -> Vec<core::ops::Range<usize>> {
         let mut words = Vec::new();
         for (range, is_sea) in sea_script_runs(text) {
             if !is_sea {
@@ -153,7 +153,7 @@ impl super::LineBreaker for SeaLineBreaker {
         // The generic rules still apply (whitespace, CJK, hyphens, …):
         super::SimpleLineBreaker.line_breaks(text, language, out);
         // A row may also end at a dictionary word end:
-        for range in self.word_boundaries(text) {
+        for range in Self::word_boundaries(text) {
             out.push(super::LineBreak::soft(range.end));
         }
     }
@@ -197,7 +197,7 @@ mod tests {
     }
 
     fn words(text: &str) -> Vec<&str> {
-        let ranges = SeaLineBreaker.word_boundaries(text);
+        let ranges = SeaLineBreaker::word_boundaries(text);
         assert_ranges_wellformed(text, &ranges);
         ranges.iter().map(|r| &text[r.start..r.end]).collect()
     }
@@ -234,7 +234,7 @@ mod tests {
     #[test]
     fn closing_punctuation_joins_the_preceding_word() {
         let text = "កម្ពុជាមានប្រជាជនច្រើន។ខ្មែរជាភាសា។";
-        let ranges = SeaLineBreaker.word_boundaries(text);
+        let ranges = SeaLineBreaker::word_boundaries(text);
         assert_ranges_wellformed(text, &ranges);
         for range in &ranges {
             assert_ne!(
@@ -279,8 +279,14 @@ mod tests {
     /// never reports an empty or out-of-bounds range.
     #[test]
     fn hostile_input_is_safe() {
-        for text in ["", "\u{0E33}", "\u{0E01}\u{0E33}\u{0E01}", "\u{FFFD}", "\u{200D}"] {
-            let ranges = SeaLineBreaker.word_boundaries(text);
+        for text in [
+            "",
+            "\u{0E33}",
+            "\u{0E01}\u{0E33}\u{0E01}",
+            "\u{FFFD}",
+            "\u{200D}",
+        ] {
+            let ranges = SeaLineBreaker::word_boundaries(text);
             assert_ranges_wellformed(text, &ranges);
         }
     }

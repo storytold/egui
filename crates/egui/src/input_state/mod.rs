@@ -570,7 +570,6 @@ impl InputState {
         self.raw.viewport()
     }
 
-
     /// Returns the region of the screen that is safe for content rendering
     ///
     /// Returns the `viewport_rect` with the `safe_area_insets` removed.

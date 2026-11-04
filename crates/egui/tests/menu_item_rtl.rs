@@ -336,7 +336,7 @@ fn layout_job_label_flows_through_the_row_surface() {
         egui::Color32::PLACEHOLDER,
         f32::INFINITY,
     );
-    job.direction = Some(egui::epaint::text::TextDirection::RightToLeft);
+    job.direction = egui::epaint::text::TextDirection::RightToLeft;
     let output = popup_output(true, &mut |ui: &mut Ui| {
         ui.add(menu_item_button(
             ui,
@@ -407,13 +407,13 @@ fn rtl_rows_pin_the_paragraph_direction() {
     let layer = painted_galley(&output, "Layer عام").expect("the label should paint");
     assert_eq!(
         layer.job.direction,
-        Some(egui::text::TextDirection::RightToLeft),
+        egui::text::TextDirection::RightToLeft,
         "a Latin-first label must be pinned to RTL under the flag"
     );
     let digits = painted_galley(&output, "12 layers").expect("the label should paint");
     assert_eq!(
         digits.job.direction,
-        Some(egui::text::TextDirection::RightToLeft),
+        egui::text::TextDirection::RightToLeft,
         "a digits-then-Latin label must be pinned to RTL under the flag"
     );
 }
@@ -492,9 +492,11 @@ fn ltr_rows_paint_like_a_plain_button_label() {
         row.1.job.direction, plain.1.job.direction,
         "the row should resolve the same direction as a plain button label"
     );
+    // The fork's LayoutJob keeps the job's own direction on the galley: an
+    // unpinned job stays `Auto` and infers first-strong per paragraph at layout.
     assert_eq!(
         row.1.job.direction,
-        Some(egui::text::TextDirection::LeftToRight),
+        egui::text::TextDirection::Auto,
         "an LTR row keeps first-strong inference"
     );
     assert_eq!(
@@ -604,10 +606,7 @@ fn digit_first_arabic_label_reads_rtl_under_rtl() {
     });
 
     let galley = painted_galley(&output, "12 عام").expect("the label should paint");
-    assert_eq!(
-        galley.job.direction,
-        Some(egui::text::TextDirection::RightToLeft)
-    );
+    assert_eq!(galley.job.direction, egui::text::TextDirection::RightToLeft);
     assert_eq!(galley.rows.len(), 1, "expected a single-row galley");
     let pos = |chr: char| {
         galley.rows[0]

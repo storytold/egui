@@ -4153,6 +4153,7 @@ mod tests {
     }
 
     /// The chars of the advancing glyphs of a row, left to right as drawn.
+    #[cfg(feature = "default_fonts")]
     fn drawn(row: &Row) -> String {
         let mut glyphs: Vec<&Glyph> = row
             .glyphs
