@@ -1463,7 +1463,7 @@ impl Prepared {
                 };
             }
 
-            let inner_rect = if rtl {
+            if rtl {
                 // Keep the reading-start (right) edge anchored when the area shrinks.
                 Rect::from_min_max(
                     pos2(inner_rect.max.x - inner_size.x, inner_rect.min.y),
@@ -1471,9 +1471,7 @@ impl Prepared {
                 )
             } else {
                 Rect::from_min_size(inner_rect.min, inner_size)
-            };
-
-            inner_rect
+            }
         };
 
         let outer_min = if vertical_bar_on_left {
