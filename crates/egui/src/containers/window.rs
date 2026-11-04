@@ -1476,6 +1476,12 @@ fn title_ui(
 
     atoms.push_right(Atom::grow());
 
+    // The container below is forced LTR and mirrors only the top-level list, so the
+    // internals of a multi-atom title must be reversed here to read right-to-left.
+    if rtl {
+        title.reverse();
+    }
+
     if !auto_sized
         && !title.any_shrink()
         && let Some(first_text) = title
