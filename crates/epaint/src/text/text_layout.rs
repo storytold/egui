@@ -2380,8 +2380,50 @@ mod tests {
     use crate::{ColorImage, text::cursor::CCursor};
     use emath::Rangef;
 
+    /// The bundled fonts, installed exactly as `FontDefinitions::default` does
+    /// with the `default_fonts` feature (a no-op when the feature is on), so
+    /// the text tests exercise real shaping in every configuration.
+    fn test_font_definitions() -> FontDefinitions {
+        let mut definitions = FontDefinitions::default();
+        if definitions.families.values().all(Vec::is_empty) {
+            // The `default_fonts` feature is off (a plain `cargo test -p epaint`),
+            // so `FontDefinitions::default` installed nothing. Install the bundled
+            // fonts exactly as it does with the feature (see `font_definitions.rs`).
+            definitions.font_data.insert(
+                "Hack".to_owned(),
+                Arc::new(FontData::from_static(epaint_default_fonts::HACK_REGULAR)),
+            );
+            definitions.font_data.insert(
+                "Ubuntu-Light".to_owned(),
+                Arc::new(FontData::from_static(epaint_default_fonts::UBUNTU_LIGHT)),
+            );
+            definitions.font_data.insert(
+                "egui-icons".to_owned(),
+                Arc::new(
+                    FontData::from_static(epaint_default_fonts::EGUI_ICONS).tweak(FontTweak {
+                        scale: 0.90, // Make smaller
+                        ..Default::default()
+                    }),
+                ),
+            );
+            definitions.families.insert(
+                FontFamily::Monospace,
+                vec![
+                    "Hack".to_owned(),
+                    "Ubuntu-Light".to_owned(), // fallback for √ etc
+                    "egui-icons".to_owned(),
+                ],
+            );
+            definitions.families.insert(
+                FontFamily::Proportional,
+                vec!["Ubuntu-Light".to_owned(), "egui-icons".to_owned()],
+            );
+        }
+        definitions
+    }
+
     fn test_fonts() -> FontsImpl {
-        FontsImpl::new(TextOptions::default(), FontDefinitions::default())
+        FontsImpl::new(TextOptions::default(), test_font_definitions())
     }
 
     fn layout_without_fonts(text: &str, policy: MissingGlyphPolicy) -> Arc<Galley> {
@@ -3908,7 +3950,7 @@ mod tests {
         }
 
         // `Fonts` lays out each paragraph on its own, then joins them:
-        let joined = Fonts::new(TextOptions::default(), FontDefinitions::default())
+        let joined = Fonts::new(TextOptions::default(), test_font_definitions())
             .with_pixels_per_point(1.0)
             .layout_job(job(Align::LEFT, true));
         let joined_ranges: Vec<Rangef> = joined.rows.iter().map(visible_x_range).collect();
@@ -3960,20 +4002,17 @@ mod tests {
 
             let ellipsis = row.glyphs.last().unwrap();
             let others = &row.glyphs[..row.glyphs.len() - 1];
-            // Without fonts the overflow character has no width, and goes along with
-            // the glyph before it:
-            let visible = 0.0 < ellipsis.advance_width;
-            assert_eq!(visible, cfg!(feature = "default_fonts"));
-            if visible {
-                let at_visual_end = |g: &Glyph| {
-                    if rtl {
-                        ellipsis.max_x() <= g.pos.x
-                    } else {
-                        g.max_x() <= ellipsis.pos.x
-                    }
-                };
-                assert!(others.iter().all(at_visual_end), "{kept:?}");
-            }
+            // The bundled fonts installed by `test_font_definitions` include the
+            // overflow character, so it always has width:
+            assert!(0.0 < ellipsis.advance_width, "{kept:?}");
+            let at_visual_end = |g: &Glyph| {
+                if rtl {
+                    ellipsis.max_x() <= g.pos.x
+                } else {
+                    g.max_x() <= ellipsis.pos.x
+                }
+            };
+            assert!(others.iter().all(at_visual_end), "{kept:?}");
         }
     }
 
