@@ -394,6 +394,23 @@ pub enum TextDirection {
     RightToLeft,
 }
 
+impl TextDirection {
+    /// First-strong-character inference (UAX #9 `dir=auto`): the first character with a
+    /// strong bidi class decides; `None` if the text has no strong character.
+    ///
+    /// Unlike [`Self::Auto`] resolution this asks about the text itself, without
+    /// the "paragraph before it" fallback — callers use it to tell text with a
+    /// strong opinion from direction-agnostic runs (like a check mark).
+    pub fn infer(text: &str) -> Option<Self> {
+        text.chars()
+            .find_map(|c| match unicode_bidi::bidi_class(c) {
+                unicode_bidi::BidiClass::L => Some(Self::LeftToRight),
+                unicode_bidi::BidiClass::R | unicode_bidi::BidiClass::AL => Some(Self::RightToLeft),
+                _ => None,
+            })
+    }
+}
+
 // ----------------------------------------------------------------------------
 
 /// A contiguous range of [`LayoutJob::text`] that shares the same [`TextFormat`].

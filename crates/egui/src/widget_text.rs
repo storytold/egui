@@ -840,8 +840,13 @@ impl WidgetText {
 
     /// Layout with the given wrapping.
     ///
-    /// Text without a [`LayoutJob::language`] gets the language of the user interface
-    /// ([`crate::Context::language`]).
+    /// `language` is the BCP 47 language tag the text should be laid out in, if known;
+    /// it is stamped onto the job unless the job carries an explicit one.
+    ///
+    /// The reading direction is stamped from [`Style::right_to_left`] the same way:
+    /// in a right-to-left interface the job gets a right-to-left base direction even
+    /// when the text starts with a left-to-right character, unless the job carries an
+    /// explicit one.
     pub fn into_galley_impl(
         self,
         ctx: &crate::Context,
@@ -872,6 +877,10 @@ impl WidgetText {
         default_valign: Align,
         language: Option<String>,
     ) -> Arc<Galley> {
+        // Stamp the reading direction from the style, mirroring the language stamp
+        // below: an explicit per-job direction still wins.
+        let direction = ambient_direction(style, self.text());
+
         match self {
             Self::Text(text) => {
                 let color = style
@@ -896,6 +905,11 @@ impl WidgetText {
                 );
                 layout_job.wrap = text_wrapping;
                 layout_job.language = layout_job.language.or(language);
+                // An explicit per-job direction still wins over the ambient
+                // stamp (`Auto` is the "not specified" marker).
+                if layout_job.direction == epaint::text::TextDirection::Auto {
+                    layout_job.direction = direction.unwrap_or(layout_job.direction);
+                }
                 ctx.fonts_mut(|f| f.layout_job(layout_job))
             }
             Self::RichText(text) => {
@@ -906,17 +920,39 @@ impl WidgetText {
                 );
                 layout_job.wrap = text_wrapping;
                 layout_job.language = layout_job.language.or(language);
+                // An explicit per-job direction still wins over the ambient
+                // stamp (`Auto` is the "not specified" marker).
+                if layout_job.direction == epaint::text::TextDirection::Auto {
+                    layout_job.direction = direction.unwrap_or(layout_job.direction);
+                }
                 ctx.fonts_mut(|f| f.layout_job(layout_job))
             }
             Self::LayoutJob(job) => {
                 let mut job = Arc::unwrap_or_clone(job);
                 job.wrap = text_wrapping;
                 job.language = job.language.or(language);
+                // An explicit per-job direction still wins over the ambient
+                // stamp (`Auto` is the "not specified" marker).
+                if job.direction == epaint::text::TextDirection::Auto {
+                    job.direction = direction.unwrap_or(job.direction);
+                }
                 ctx.fonts_mut(|f| f.layout_job(job))
             }
             Self::Galley(galley) => galley,
         }
     }
+}
+
+/// The ambient base direction for widget text in a right-to-left interface:
+/// right-to-left, but only for text first-strong has an opinion about. For
+/// direction-agnostic runs (like the menu check mark) the ambient direction
+/// has no bidi effect, and first-strong's fallback keeps their anchoring
+/// unchanged. An explicit per-job direction still wins everywhere.
+fn ambient_direction(style: &Style, text: &str) -> Option<epaint::text::TextDirection> {
+    style
+        .right_to_left
+        .then_some(epaint::text::TextDirection::RightToLeft)
+        .filter(|_| epaint::text::TextDirection::infer(text).is_some())
 }
 
 impl From<&str> for WidgetText {
