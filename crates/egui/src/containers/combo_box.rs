@@ -3,7 +3,7 @@ use core::cell::RefCell;
 use epaint::Shape;
 
 use crate::{
-    Align2, AsIdSalt, Atom, AtomExt as _, Atoms, Context, Id, IdSalt, InnerResponse, IntoAtoms,
+    AsIdSalt, Atom, AtomExt as _, Atoms, Context, Id, IdSalt, InnerResponse, IntoAtoms,
     NumExt as _, Painter, Popup, PopupCloseBehavior, Rect, Response, Role, ScrollArea, Sense,
     TextStyle, TextWrapMode, Ui, Vec2, WidgetAtom, WidgetInfo,
     class::{ClassName, Classes, HasClasses},
@@ -397,13 +397,9 @@ fn combo_box_dyn<'c, R>(
         }
     })
     // Grow (instead of a separate `Atom::grow()`, which would add an extra gap),
-    // and stick to the end edge:
+    // and anchor at the row's far end, whichever side the reading direction puts it on:
     .atom_grow(true)
-    .atom_align(if ui.style().right_to_left {
-        Align2::LEFT_CENTER
-    } else {
-        Align2::RIGHT_CENTER
-    });
+    .atom_main_axis_end(true);
     let direction = ui.style().chrome_direction();
 
     let accessible_text = selected_text.text().map(String::from).unwrap_or_default();
