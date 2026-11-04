@@ -17,6 +17,8 @@ mod glyph_rasterizer;
 pub mod grapheme;
 mod index;
 mod line_break;
+mod line_breaker;
+mod line_breaker_dict;
 mod styled_metrics;
 mod text_layout;
 mod text_layout_types;
@@ -35,6 +37,8 @@ pub use {
     },
     index::{ByteIndex, ByteRange, ByteRangeExt, CharIndex, CharRange, CharRangeExt},
     line_break::{LineBreak, LineBreakKind, LineBreaker, SimpleLineBreaker},
+    line_breaker::SeaLineBreaker,
+
     text_layout_types::*,
 };
 

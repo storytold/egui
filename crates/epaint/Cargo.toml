@@ -11,7 +11,13 @@ readme = "README.md"
 repository = "https://github.com/emilk/egui/tree/main/crates/epaint"
 categories = ["graphics", "gui"]
 keywords = ["graphics", "gui", "egui"]
-include = ["../../LICENSE-APACHE", "../../LICENSE-MIT", "**/*.rs", "Cargo.toml"]
+include = [
+  "../../LICENSE-APACHE",
+  "../../LICENSE-MIT",
+  "**/*.rs",
+  "src/text/dictionaries/*.txt",
+  "Cargo.toml",
+]
 
 [lints]
 workspace = true
@@ -57,6 +63,15 @@ mint = ["emath/mint"]
 ## (monochrome) emoji on every platform, instead of the platform's own color emoji
 ## (see [`text::GlyphRasterizer`] and [`text::FontProvider`]).
 monochrome_emoji_fonts = ["default_fonts", "epaint_default_fonts/monochrome_emoji_fonts"]
+
+## Bundle the Thai, Lao, Khmer and Myanmar line-break dictionaries (about 2 MB of
+## `include_str!` data) and make [`text::SeaLineBreaker`] the default line breaker, so
+## text in those scripts wraps at word boundaries.
+##
+## The data files in `src/text/dictionaries/` carry their copyright/license headers.
+## Without the feature — or for any script, with your own segmenter — install a
+## [`text::LineBreaker`] implementation via `Fonts::set_line_breaker`.
+sea_dictionary = []
 
 ## Enable parallel tessellation using [`rayon`](https://docs.rs/rayon).
 ##
