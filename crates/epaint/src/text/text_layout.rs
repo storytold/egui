@@ -1304,6 +1304,11 @@ fn halign_and_justify_row(
         return;
     }
 
+    // The natural width of the row, whitespace included. Alignment trims the
+    // ink below, but the row keeps this size so the space after (or before,
+    // in right-to-left rows) the text is allocated like in a left-aligned row.
+    let natural_width = row.size.x;
+
     let num_leading_spaces = row
         .glyphs
         .iter()
@@ -1398,8 +1403,17 @@ fn halign_and_justify_row(
         }
     }
 
-    // Note we ignore the leading/trailing whitespace here!
-    row.size.x = target_max_x - target_min_x;
+    // The ink range above is only for positioning: centered and right-anchored
+    // rows align around their ink, so trailing whitespace must not skew them.
+    // The row's allocated size keeps counting the whitespace (except for
+    // justified rows, which fill the wrap width, and rows that
+    // `keep_trailing_whitespace`, whose aligned span is their size), so
+    // inter-widget spacing is the same in both reading directions.
+    row.size.x = if justify || keep_trailing_whitespace {
+        target_max_x - target_min_x
+    } else {
+        natural_width
+    };
 }
 
 /// Is `row` aligned to the right because its start is there?
@@ -1412,10 +1426,34 @@ fn starts_on_the_right(job: &LayoutJob, row: &Row) -> bool {
         && !row.glyphs.is_empty()
 }
 
+/// The right edge of a row's aligned ink, in the row's own coordinates.
+///
+/// [`halign_and_justify_row`] anchors the kept ink at `[0.0, right]`;
+/// whitespace that the alignment trimmed (see
+/// [`LayoutJob::keep_trailing_whitespace`], and leading whitespace, which a
+/// right-to-left row renders at its right edge) sits outside it. A row that
+/// hangs from its reading start must therefore hang from this edge, not from
+/// its allocated width, which keeps counting the whitespace.
+fn aligned_ink_right(row: &Row) -> f32 {
+    let ink_right = row
+        .glyphs
+        .iter()
+        .filter(|glyph| !glyph.chr.is_whitespace())
+        .map(Glyph::max_x)
+        .fold(f32::NEG_INFINITY, f32::max);
+    if ink_right.is_finite() {
+        ink_right
+    } else {
+        // Only whitespace: the whole row is the ink.
+        row.size.x
+    }
+}
+
 /// Puts each row that [`starts_on_the_right`] flush with the right edge of the widest row.
 ///
-/// Such a row has been aligned as `Align::RIGHT`, with its size in `row.size.x`;
-/// the other rows stay where they are. Returns `true` if any row moved.
+/// Such a row has been aligned as `Align::RIGHT`, with its ink anchored at the
+/// right edge of its `row.size.x`; the other rows stay where they are.
+/// Returns `true` if any row moved.
 pub(crate) fn align_rtl_rows_to_start(
     job: &LayoutJob,
     rows: &mut [PlacedRow],
@@ -1431,7 +1469,7 @@ pub(crate) fn align_rtl_rows_to_start(
         .iter()
         .map(|placed_row| {
             if starts_on_the_right(job, &placed_row.row) {
-                placed_row.size.x
+                aligned_ink_right(&placed_row.row)
             } else {
                 placed_row.pos.x + placed_row.size.x
             }
@@ -1440,7 +1478,8 @@ pub(crate) fn align_rtl_rows_to_start(
     let point_scale = PointScale::new(pixels_per_point);
     for placed_row in rows {
         if starts_on_the_right(job, &placed_row.row) {
-            placed_row.pos.x = point_scale.round_to_pixel(width - placed_row.size.x);
+            let ink_right = aligned_ink_right(&placed_row.row);
+            placed_row.pos.x = point_scale.round_to_pixel(width - ink_right);
         }
     }
     true
@@ -3516,6 +3555,129 @@ mod tests {
         assert!(xs.is_sorted(), "{xs:?}");
     }
 
+    /// A row ending in whitespace allocates the same width in both reading
+    /// directions: the ink is trimmed for alignment, but the row's size keeps
+    /// counting the whitespace, so a widget following at zero item spacing
+    /// keeps its gap under right-to-left layout too.
+    #[test]
+    fn rtl_row_allocates_trailing_whitespace_like_its_ltr_twin() {
+        let mut fonts = tofu_fonts(Arc::new(SimpleLineBreaker));
+        let pixels_per_point = 2.0;
+        let font_id = FontId::proportional(14.0);
+        // Half a physical pixel: glyph positions are pixel-rounded.
+        let tol = 0.5 / pixels_per_point;
+
+        let mut ltr_job =
+            LayoutJob::simple_singleline("abc ".into(), font_id.clone(), Color32::WHITE);
+        ltr_job.direction = TextDirection::LeftToRight;
+        let ltr = layout(&mut fonts, pixels_per_point, ltr_job.into());
+
+        let mut rtl_job = LayoutJob::simple_singleline("abc ".into(), font_id, Color32::WHITE);
+        rtl_job.direction = TextDirection::RightToLeft;
+        let rtl = layout(&mut fonts, pixels_per_point, rtl_job.into());
+
+        assert_eq!(ltr.rows.len(), 1);
+        assert_eq!(rtl.rows.len(), 1);
+        assert_eq!(
+            rtl.size().x,
+            ltr.size().x,
+            "the rtl row must allocate the same width as its ltr twin"
+        );
+        // The ink is the same in both directions: the trailing whitespace sits
+        // outside it, but the row still allocates room for it. A single row
+        // hangs from its own reading start, so both rows anchor at x = 0:
+        let ltr_ink = ink_rect(&ltr);
+        let rtl_ink = ink_rect(&rtl);
+        assert!(
+            (rtl_ink.left() - ltr_ink.left()).abs() <= tol,
+            "{rtl_ink:?}"
+        );
+        assert!(
+            (rtl_ink.right() - ltr_ink.right()).abs() <= tol,
+            "{rtl_ink:?}"
+        );
+        assert!(
+            (rtl_ink.left() - rtl.rect.left()).abs() <= tol,
+            "the row rect starts at the ink: {:?} vs {:?}",
+            rtl_ink,
+            rtl.rect
+        );
+        assert!(
+            rtl.size().x > rtl_ink.width(),
+            "the whitespace must be allocated: {:?} vs {rtl_ink:?}",
+            rtl.size()
+        );
+    }
+
+    /// The bounding rect of the non-whitespace glyphs ("the ink"), in galley
+    /// space.
+    fn ink_rect(galley: &Galley) -> Rect {
+        galley
+            .rows
+            .iter()
+            .map(|row| {
+                row.glyphs
+                    .iter()
+                    .filter(|glyph| !glyph.chr.is_whitespace())
+                    .map(|glyph| glyph.logical_rect())
+                    .fold(Rect::NOTHING, Rect::union)
+                    .translate(row.pos.to_vec2())
+            })
+            .fold(Rect::NOTHING, Rect::union)
+    }
+
+    /// Trailing whitespace never skews the ink of centered or right-anchored
+    /// rows: they align around their ink (whitespace excluded), while the
+    /// allocated width still includes it.
+    #[test]
+    fn trailing_whitespace_does_not_skew_center_or_right_ink() {
+        let mut fonts = tofu_fonts(Arc::new(SimpleLineBreaker));
+        let pixels_per_point = 2.0;
+        let font_id = FontId::proportional(14.0);
+        // Half a physical pixel: glyph positions are pixel-rounded.
+        let tol = 0.5 / pixels_per_point;
+
+        let mut left_job =
+            LayoutJob::simple_singleline("abc ".into(), font_id.clone(), Color32::WHITE);
+        left_job.direction = TextDirection::LeftToRight;
+        let ink_width = ink_rect(&layout(&mut fonts, pixels_per_point, left_job.into())).width();
+
+        for halign in [Align::Center, Align::RIGHT] {
+            let mut job =
+                LayoutJob::simple_singleline("abc ".into(), font_id.clone(), Color32::WHITE);
+            job.direction = TextDirection::LeftToRight;
+            job.halign = halign;
+            let galley = layout(&mut fonts, pixels_per_point, job.into());
+            assert_eq!(galley.rows.len(), 1);
+
+            // The ink, in galley space: the non-whitespace glyphs, offset by
+            // the row position.
+            let ink = ink_rect(&galley);
+            match halign {
+                Align::Center => {
+                    assert!(
+                        (ink.center().x).abs() <= tol,
+                        "center ink skewed: {:?}",
+                        ink.center().x
+                    );
+                }
+                Align::RIGHT => {
+                    assert!(
+                        ink.right().abs() <= tol,
+                        "right ink skewed: {:?}",
+                        ink.right()
+                    );
+                }
+                Align::LEFT => unreachable!(),
+            }
+            assert!(
+                (ink.width() - ink_width).abs() <= tol,
+                "ink width changed: {:?} vs {ink_width:?}",
+                ink.width()
+            );
+        }
+    }
+
     #[test]
     fn rtl_cursor_sits_on_the_right_side_of_its_glyph() {
         let mut fonts = test_fonts();
@@ -4287,12 +4449,14 @@ mod tests {
                 ));
             }
         }
-        // As laid out by egui 0.37.0, before bidi:
+        // As laid out by egui 0.37.0, before bidi. Since the trailing-whitespace
+        // fix, centered rows keep their natural whitespace-included size (their
+        // ink is unchanged, and so are all glyph positions):
         let expected = [
             "0.00,0.00 233.75x16.00: 0.00 9.00 17.00 21.00 24.00 32.00 36.00 39.00 50.00 58.00 63.00 67.00 75.00 79.00 82.00 91.00 90.00 94.00 108.00 108.00 108.00 111.00 119.00 127.00 134.00 138.00 142.00 149.00 153.00 156.00 170.00 174.00 182.00 189.00 201.00 210.00 218.00 226.00",
-            "-18.00,0.00 35.44x16.00: 0.00 9.00 17.00 21.00 24.00 32.00 36.00",
-            "-35.00,16.00 69.00x16.00: 0.00 11.00 19.00 24.00 28.00 36.00 40.00 43.00 52.00 51.00 55.00 69.00 69.00 69.00",
-            "-29.00,32.00 58.94x16.00: 0.00 8.00 16.00 23.00 27.00 31.00 38.00 42.00 45.00 59.00",
+            "-18.00,0.00 39.19x16.00: 0.00 9.00 17.00 21.00 24.00 32.00 36.00",
+            "-35.00,16.00 72.19x16.00: 0.00 11.00 19.00 24.00 28.00 36.00 40.00 43.00 52.00 51.00 55.00 69.00 69.00 69.00",
+            "-29.00,32.00 62.19x16.00: 0.00 8.00 16.00 23.00 27.00 31.00 38.00 42.00 45.00 59.00",
             "-30.00,48.00 59.69x16.00: 0.00 8.00 15.00 27.00 36.00 44.00 52.00",
             "0.00,0.00 80.00x16.00: 0.00 18.00 35.00 48.00 60.00 77.00 89.00",
             "0.00,16.00 80.00x16.00: 0.00 11.00 19.00 24.00 28.00 36.00 40.00 49.00 58.00 57.00 66.00 80.00 80.00 80.00",
