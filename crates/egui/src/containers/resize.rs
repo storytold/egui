@@ -361,7 +361,7 @@ impl Resize {
         // Under RTL the container's content is measured from its reading-start
         // corner, so the container's reported size hugs right-anchored content,
         // mirroring the window-body seeding in the window container.
-        if rtl && !needs_sizing_pass {
+        if ui.is_rtl() && !needs_sizing_pass {
             crate::containers::window::seed_min_rect_at_reading_start(&mut content_ui);
         }
 
