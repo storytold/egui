@@ -910,8 +910,41 @@ fn paint_resize_corner(
 ) {
     let cr = window_frame.corner_radius;
 
+    // The selection below always prefers the bottom-right corner, where the grip
+    // sits in LTR. Under RTL the grip mirrors to the bottom-left corner (like
+    // the `Resize` container's grip), so mirror the horizontal sides of
+    // everything the selection looks at, and flip the chosen corner back
+    // afterwards — the radius and interaction response then come out mirrored
+    // for the real corner too.
+    let (possible, i, cr) = if ui.is_rtl() {
+        (
+            PossibleInteractions {
+                resize_left: possible.resize_right,
+                resize_right: possible.resize_left,
+                resize_top: possible.resize_top,
+                resize_bottom: possible.resize_bottom,
+            },
+            ResizeInteraction {
+                outer_rect: i.outer_rect,
+                window_frame: i.window_frame,
+                left: i.right,
+                right: i.left,
+                top: i.top,
+                bottom: i.bottom,
+            },
+            CornerRadius {
+                nw: cr.ne,
+                ne: cr.nw,
+                sw: cr.se,
+                se: cr.sw,
+            },
+        )
+    } else {
+        (*possible, i, cr)
+    };
+
     // Corners in order of preference, with whether they can resize horizontally and vertically.
-    let mut corners = [
+    let corners = [
         (
             Align2::RIGHT_BOTTOM,
             cr.se,
@@ -941,10 +974,6 @@ fn paint_resize_corner(
             possible.resize_top,
         ),
     ];
-    if ui.style().right_to_left {
-        // The bottom corner at the end side comes first.
-        corners.swap(0, 1);
-    }
 
     // If we can't resize in two directions, it is still nice to tell the user
     // we're resizable by painting the resize corner in the expected place
@@ -956,6 +985,13 @@ fn paint_resize_corner(
         .copied()
     else {
         return;
+    };
+
+    // The corner was chosen in mirrored space; map it back to the real layout:
+    let corner = if ui.is_rtl() {
+        corner.flipped_x()
+    } else {
+        corner
     };
 
     // Adjust the corner offset to accommodate for window rounding
