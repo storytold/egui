@@ -612,7 +612,15 @@ impl<'t> TextEdit<'t> {
                 section.format.line_height = Some(line_height);
             }
 
-            ui.fonts_mut(|f| f.layout_job(layout_job))
+            let galley = ui.fonts_mut(|f| f.layout_job(layout_job));
+            if ui.is_rtl() {
+                debug_assert_eq!(
+                    galley.job.direction,
+                    epaint::text::TextDirection::RightToLeft,
+                    "a field value must keep the interface's stamped base direction"
+                );
+            }
+            galley
         };
 
         let layouter = layouter.unwrap_or(&mut default_layouter);
@@ -809,9 +817,22 @@ impl<'t> TextEdit<'t> {
                         FontSelection::default(),
                         ui.text_valign(),
                     ));
+                    // An explicit per-job direction still wins everywhere, so
+                    // only a freshly laid-out (`Auto` = unstamped on this
+                    // port) job was stamped by the merge below — scope the
+                    // assert to those:
+                    let stamped = job.direction == epaint::text::TextDirection::Auto;
                     // Only pin jobs that don't carry an explicit direction of their own.
                     if job.direction == epaint::text::TextDirection::Auto {
                         job.direction = direction;
+                    }
+                    if ui.is_rtl() && stamped {
+                        debug_assert_eq!(
+                            job.direction,
+                            epaint::text::TextDirection::RightToLeft,
+                            "a freshly laid-out field hint must keep the interface's \
+                             stamped base direction"
+                        );
                     }
                     WidgetText::LayoutJob(Arc::new(job))
                 });
