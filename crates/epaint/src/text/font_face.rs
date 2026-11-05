@@ -634,6 +634,11 @@ impl FontFace {
         let line_gap = (font_data.metrics.leading * pt_scale_factor).round_ui();
 
         let scale = font_size * self.tweak.scale * pixels_per_point;
+        let scale = if self.tweak.snap_size_to_pixels {
+            scale.round().max(1.0)
+        } else {
+            scale
+        };
         let px_scale_factor = self.font.px_scale_factor(scale);
 
         let y_offset_in_points = ((font_size * self.tweak.scale * self.tweak.y_offset_factor)
@@ -670,6 +675,12 @@ impl FontFace {
 
     pub(crate) fn shaper_data(&self) -> &harfrust::ShaperData {
         &self.shaper_data
+    }
+
+    /// This face's own coverage curve, if it has one.
+    #[inline]
+    pub(crate) fn color_transfer_function(&self) -> Option<crate::FontColorTransferFunction> {
+        self.tweak.color_transfer_function
     }
 
     /// Whether to render this face at up to four sub-pixel offsets.

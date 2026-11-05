@@ -932,6 +932,70 @@ fn synthetic_tofu(font_size_px: f32) -> RasterizedGlyph {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::FontColorTransferFunction;
+    use crate::text::FontTweak;
+
+    fn tweaked(tweak: impl Fn(&mut FontTweak)) -> FontDefinitions {
+        let mut definitions = FontDefinitions::default();
+        for data in definitions.font_data.values_mut() {
+            tweak(&mut Arc::make_mut(data).tweak);
+        }
+        definitions
+    }
+
+    /// How much ink the glyphs of `text` leave in the atlas, without what a new atlas already holds.
+    fn ink(options: TextOptions, definitions: FontDefinitions, text: &str) -> u64 {
+        let total =
+            |fonts: &Fonts| -> u64 { fonts.image().pixels.iter().map(|c| u64::from(c.a())).sum() };
+        let mut fonts = Fonts::new(options, definitions);
+        let before = total(&fonts);
+        fonts
+            .with_pixels_per_point_for_viewport(1.0, ViewportKey::new(1))
+            .layout_no_wrap(text.to_owned(), FontId::proportional(20.0), Color32::WHITE);
+        total(&fonts) - before
+    }
+
+    #[test]
+    fn a_font_can_have_its_own_color_transfer_function() {
+        let off = TextOptions {
+            color_transfer_function: FontColorTransferFunction::Off,
+            ..Default::default()
+        };
+        let dark = TextOptions {
+            color_transfer_function: FontColorTransferFunction::TwoCoverageMinusCoverageSq,
+            ..Default::default()
+        };
+        let plain = ink(off, FontDefinitions::default(), "Hamburg");
+        let thick = ink(dark, FontDefinitions::default(), "Hamburg");
+        assert!(plain < thick, "the curve thickens text: {plain} {thick}");
+        let own = tweaked(|t| t.color_transfer_function = Some(FontColorTransferFunction::Off));
+        assert_eq!(
+            ink(dark, own, "Hamburg"),
+            plain,
+            "the font's own curve wins over the global one"
+        );
+    }
+
+    #[test]
+    fn a_font_can_snap_its_size_to_whole_pixels() {
+        let first_glyph = |definitions: FontDefinitions, size: f32| {
+            let mut fonts = Fonts::new(TextOptions::default(), definitions);
+            let galley = fonts
+                .with_pixels_per_point_for_viewport(1.25, ViewportKey::new(1))
+                .layout_no_wrap("M".to_owned(), FontId::proportional(size), Color32::WHITE);
+            galley.rows[0].glyphs[0].uv_rect
+        };
+        let snapped = || tweaked(|t| t.snap_size_to_pixels = true);
+        // 16.1 and 16.4 pixels both draw at 16, and 16.6 at 17.
+        assert_eq!(
+            first_glyph(snapped(), 12.88).size,
+            first_glyph(snapped(), 13.12).size
+        );
+        assert_ne!(
+            first_glyph(snapped(), 12.88).size,
+            first_glyph(snapped(), 13.28).size
+        );
+    }
 
     #[test]
     fn viewport_passes_do_not_evict_each_others_galleys() {
