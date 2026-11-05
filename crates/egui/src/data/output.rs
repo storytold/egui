@@ -373,6 +373,20 @@ pub struct IMEOutput {
     /// Skipped from serialization because the text is transient editor state.
     #[cfg_attr(feature = "serde", serde(skip))]
     pub surrounding_text: IMESurroundingText,
+
+    /// The language the text is being composed in, as a BCP 47 tag, when
+    /// known (the laid-out text's [`crate::text::LayoutJob::language`]).
+    ///
+    /// Platform IME APIs that take a language hint (TSF/UIA, macOS) can use
+    /// it; Wayland's `text-input-v3` cannot (best effort).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub language: Option<String>,
+
+    /// The resolved base reading direction of the text being composed into,
+    /// when known. The IME composes *content*, not UI chrome, so this is the
+    /// text's own direction — not the interface's.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub base_direction: Option<crate::text::TextDirection>,
 }
 
 impl core::fmt::Debug for IMEOutput {
@@ -390,13 +404,14 @@ impl core::fmt::Debug for IMEOutput {
             .field("reset_request", &self.reset_request)
             .field("change_cause", &self.change_cause)
             .field("surrounding_text", &self.surrounding_text)
+            .field("language", &self.language)
+            .field("base_direction", &self.base_direction)
             .finish()
     }
 }
 
 impl IMEOutput {
     /// Create an IME descriptor without surrounding text.
-    ///
     /// Callers that can provide surrounding text should assign
     /// [`Self::surrounding_text`] from [`IMESurroundingText::from_text`]. An explicit
     /// [`IMESurroundingText::Unavailable`] (the default here) is not the same as no IME
@@ -441,6 +456,8 @@ impl IMEOutput {
             reset_request: None,
             change_cause: ImeChangeCause::Other,
             surrounding_text: IMESurroundingText::Unavailable,
+            language: None,
+            base_direction: None,
         }
     }
 }

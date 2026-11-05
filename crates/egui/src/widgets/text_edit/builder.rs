@@ -1246,6 +1246,14 @@ impl<'t> TextEdit<'t> {
                                 reset_request: None,
                                 change_cause,
                                 surrounding_text,
+                                // The IME composes content, not UI chrome: report
+                                // the laid-out text's own language and resolved
+                                // base direction (the galley's rows carry it):
+                                language: galley.job.language.clone(),
+                                base_direction: galley
+                                    .rows
+                                    .first()
+                                    .map(|row| row.base_direction),
                             });
                         });
                     }
