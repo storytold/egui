@@ -1043,22 +1043,21 @@ impl<'t> TextEdit<'t> {
 
         // Visual clipping for singleline text editor with text larger than width.
         //
-        // A right-to-left galley is anchored on its reading-start (right) edge,
-        // so its `align_offset.x` is never zero when it overflows — engage the
+        // A right-to-left galley anchored on its reading start (the right edge
+        // the interface halign resolves under a right-to-left interface) is
+        // never at `align_offset.x == 0.0` when it overflows — engage the
         // scroll for it as well, measuring the cursor from the reading start
-        // and sliding the galley the other way.
+        // and sliding the galley the other way. The stored-offset algebra
+        // below assumes that reading-start anchoring, so a galley with any
+        // other anchor (a left-to-right interface, or an explicit center)
+        // keeps the generic anchoring below — where pointer hit-testing stays
+        // the exact inverse of the painted position — like its left-to-right
+        // twin.
         let galley_is_rtl = galley.rows.first().is_some_and(|row| row.rtl_paragraph);
-        // The galley is anchored by the interface halign: an RTL galley under a
-        // right-to-left interface is anchored on its reading-start (right) edge
-        // (`align_offset.x` never zero when it overflows) — engage the scroll
-        // for it as well, measuring the cursor from the reading start and
-        // sliding the galley the other way. An RTL galley under a
-        // left-to-right interface is physically left-anchored; the plain
-        // offset scroll below already keeps its caret visible.
-        let reading_start_anchored_rtl = galley_is_rtl && align_offset.x != 0.0;
-        let rtl_overflows =
-            reading_start_anchored_rtl && galley.size().x > inner_rect.width();
-        if clip_text && (align_offset.x == 0.0 || rtl_overflows) {
+        let rtl_reading_start_overflows = galley_is_rtl
+            && galley.job.halign == Align::Max
+            && galley.size().x > inner_rect.width();
+        if clip_text && (align_offset.x == 0.0 || rtl_reading_start_overflows) {
             let galley_width = galley.size().x;
             let cursor_pos = match (cursor_range, ui.memory(|mem| mem.has_focus(id))) {
                 (Some(cursor_range), true) => galley.pos_from_cursor(cursor_range.primary).min.x,
@@ -1068,7 +1067,7 @@ impl<'t> TextEdit<'t> {
             // Distance of the cursor from the reading-start edge: for a
             // right-to-left galley the painted x runs the other way (and is
             // offset by the galley's own `rect.left()`), so mirror it:
-            let cursor_reading_pos = if reading_start_anchored_rtl {
+            let cursor_reading_pos = if rtl_reading_start_overflows {
                 galley_width - (cursor_pos - galley.rect.left())
             } else {
                 cursor_pos
@@ -1077,7 +1076,7 @@ impl<'t> TextEdit<'t> {
             // The stored offset is the (unshifted) galley offset relative to
             // the field; for right-to-left galleys that runs from the reading
             // end, so convert it to the scroll distance:
-            let mut offset_x = if reading_start_anchored_rtl {
+            let mut offset_x = if rtl_reading_start_overflows {
                 (galley_width - inner_rect.width()) - state.text_offset.x
             } else {
                 state.text_offset.x
@@ -1096,7 +1095,7 @@ impl<'t> TextEdit<'t> {
                 .at_most(galley_width - inner_rect.width())
                 .at_least(0.0);
 
-            if reading_start_anchored_rtl {
+            if rtl_reading_start_overflows {
                 // Scroll toward the reading end: slide the galley rightward to
                 // reveal its visually-left overflow:
                 galley_pos += vec2(offset_x, 0.0);
