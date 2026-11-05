@@ -412,6 +412,7 @@ pub mod introspection;
 pub mod layers;
 mod layout;
 pub mod load;
+mod locale;
 mod memory;
 pub mod os;
 mod painter;
@@ -523,7 +524,7 @@ pub use self::{
     layers::{LayerId, Order},
     layout::Layout,
     load::SizeHint,
-    memory::{FocusDirection, Memory, Options, Theme, ThemePreference},
+    memory::{DirectionPreference, FocusDirection, Memory, Options, Theme, ThemePreference},
     painter::Painter,
     plugin::Plugin,
     response::{InnerResponse, Response},
