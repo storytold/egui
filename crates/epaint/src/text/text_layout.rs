@@ -6128,4 +6128,317 @@ mod tests {
         .collect();
         assert_glyphs_close(&glyphs, &expected);
     }
+
+    // -------------------------------------------------------------------------
+    // NG9 mixed-direction wrapped oracles (mission commit 2de73ffd3). The
+    // mission generalized its logical wrap path to every RTL-containing
+    // overflowing paragraph and reordered each produced row from recorded
+    // runs; this fork's per-glyph bidi levels already express that per row
+    // (see the C1/C2 notes above), so the mechanism is superseded and the
+    // oracles are ported adapted to pin the per-row UAX #9 L1/L2 contract.
+
+    /// Build a two-section job: `section_texts` are concatenated in order;
+    /// the byte ranges are derived from the concatenation.
+    fn two_section_job(
+        section_texts: &[&str],
+        formats: &[TextFormat; 2],
+        wrap_width: f32,
+        direction: TextDirection,
+    ) -> LayoutJob {
+        let mut text = String::new();
+        let mut sections = Vec::new();
+        for (i, section_text) in section_texts.iter().enumerate() {
+            let start = ByteIndex(text.len());
+            text.push_str(section_text);
+            sections.push(LayoutSection {
+                leading_space: 0.0,
+                byte_range: start..ByteIndex(text.len()),
+                format: formats[i].clone(),
+            });
+        }
+        let mut job = LayoutJob {
+            sections,
+            text,
+            wrap: TextWrapping {
+                max_width: wrap_width,
+                ..Default::default()
+            },
+            break_on_newline: true,
+            ..Default::default()
+        };
+        job.direction = direction;
+        job.round_output_to_gui = false;
+        job
+    }
+
+    /// B — a wrapped mixed-direction RTL-base paragraph keeps UAX #9 L1/L2
+    /// per rendered line: `عربي aaa bbb` (RTL-pinned) breaks at the logical
+    /// space after `aaa`, and row 1 must render `aaa يبرع` (the latin island
+    /// at the visual left, the Arabic word at its reading position), not a
+    /// geometric slicing of the whole-segment visual stream (`aaa bbb يبرع`),
+    /// which would strand the Arabic word alone on the last row.
+    #[test]
+    fn wrapped_mixed_rtl_base_keeps_uax9_per_row() {
+        let text = "عربي aaa bbb";
+
+        // Wrap width measured from the LTR twin: its visual stream is
+        // `يبرع ␣ aaa ␣ bbb` (the RTL run reverses to the front), so
+        // run 0 = يبرع, run 1 = aaa, run 2 = bbb. The intended row 1 is
+        // `عربي aaa ␣` (content + trailing break space); the `aaa`→`bbb`
+        // gap's space sits at an even level in both bases (level 0 in the
+        // twin, level 2 inside the island in the oracle job), so its shaping
+        // — and hence its advance — is identical in both.
+        let twin = layout_unwrapped(text, TextDirection::LeftToRight);
+        let (spans, gaps) = visible_runs(&twin);
+        assert_eq!(spans.len(), 3, "spans {spans:?}");
+        assert_eq!(gaps.len(), 2, "spans {spans:?} gaps {gaps:?}");
+        let (w_arabi, w_aaa, w_bbb) = (spans[0], spans[1], spans[2]);
+        let s = gaps[1];
+        let wrap_width = w_arabi + s + w_aaa + s + 0.5;
+        // Per-boundary asserts: row 1's content + break space fits W, the
+        // next word (bbb) overflows, and the final row's bare content fits:
+        assert!(
+            w_arabi + s + w_aaa + s <= wrap_width && w_arabi + s + w_aaa + s + w_bbb > wrap_width,
+            "spans {spans:?} gaps {gaps:?} W {wrap_width}"
+        );
+        assert!(w_bbb <= wrap_width, "W {wrap_width}");
+
+        let galley = layout_wrapped(text, TextDirection::RightToLeft, wrap_width);
+        assert_eq!(
+            galley.rows.len(),
+            2,
+            "rows: {rows:?}",
+            rows = visible_chars_per_row(&galley)
+        );
+        let chars = visible_chars_per_row(&galley);
+        assert_eq!(chars[0], ['a', 'a', 'a', 'ي', 'ب', 'ر', 'ع'], "{chars:?}");
+        assert_eq!(chars[1], ['b', 'b', 'b'], "{chars:?}");
+        for glyphs in visible_glyphs_per_row(&galley) {
+            assert_visual_x_nondecreasing(&glyphs);
+        }
+        // One glyph slot per char of each row's logical slice (row 1 =
+        // `عربي aaa ␣`, row 2 = `bbb`):
+        let counts: Vec<usize> = galley
+            .rows
+            .iter()
+            .map(|placed| placed.row.glyphs.len())
+            .collect();
+        assert_eq!(counts, vec![9, 3], "glyph slots per row: {counts:?}");
+        assert_eq!(logical_text_per_row(&galley), ["عربي aaa ", "bbb"]);
+
+        // Trailing-space pin: the kept break-candidate space survives, is
+        // L1-reset to the base level, and renders at the row's visual
+        // reading end — the visually-LEFT slot of an RTL-base row (its
+        // `pos.x` is at or before every non-space glyph's x). On the fork
+        // the row's glyphs are stored logically, so the kept space is the
+        // row's LAST stored glyph (the mission's copy read the stored
+        // stream, which was visual there). At an under-sized wrap width
+        // this pin fails by design (the kept space becomes the row-internal
+        // one).
+        let row0 = &galley.rows[0].row;
+        assert_eq!(
+            row0.glyphs.last().map(|glyph| glyph.chr),
+            Some(' '),
+            "the break space trails the row's logical vector"
+        );
+        let min_visible_x = row0
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.advance_width > 0.0 && !glyph.chr.is_whitespace())
+            .map(|glyph| glyph.pos.x)
+            .fold(f32::INFINITY, f32::min);
+        let space_x = row0.glyphs.last().map(|glyph| glyph.pos.x).unwrap_or(0.0);
+        assert!(
+            space_x <= min_visible_x,
+            "the L1-reset break space must sit at the visual reading end: {space_x} vs {min_visible_x}"
+        );
+    }
+
+    /// C — an LTR-base paragraph with embedded RTL wraps correctly: the
+    /// Hebrew word renders visually reordered (`םולש`) inside whichever row
+    /// it lands, the surrounding latin words keep their logical order, and
+    /// every row keeps the visual-x invariant. The wrap width anchors on the
+    /// job's own single-row galley (an LTR-pinned job's first `w` glyph sits
+    /// at the exact logical offset of the intended break).
+    #[test]
+    fn wrapped_ltr_base_embedded_rtl_stays_uax9() {
+        let text = "Hello שלום world wrapped again";
+
+        // Break after `שלום `: the first `w` glyph of the stream (of
+        // "world") starts after 12 chars (`Hello שלום `):
+        let single = layout_unwrapped(text, TextDirection::LeftToRight);
+        let first_world_x = single.rows[0]
+            .row
+            .visual_order()
+            .find(|&i| single.rows[0].row.glyphs[i].chr == 'w')
+            .map(|i| single.rows[0].row.glyphs[i].pos.x)
+            .unwrap_or_default();
+        let wrap_width = first_world_x + 0.5;
+        // The intended row 1 (`Hello שלום `) fits, the next word overflows,
+        // and the final row's content fits (uniform tofu advances):
+        let w = first_world_x / 12.0;
+        assert!(first_world_x <= wrap_width && first_world_x + 5.0 * w > wrap_width);
+
+        let galley = layout_wrapped(text, TextDirection::LeftToRight, wrap_width);
+        assert!(galley.rows.len() >= 2);
+        let chars = visible_chars_per_row(&galley);
+        // Row 0 carries the pinned boundary: `Hello שלום ` — the Hebrew word
+        // visually reordered:
+        assert_eq!(
+            chars[0],
+            ['H', 'e', 'l', 'l', 'o', 'ם', 'ו', 'ל', 'ש'],
+            "{chars:?}"
+        );
+        // The remaining latin words keep their logical order, in whichever
+        // rows they land (the remainder is wider than W, so the partition is
+        // deliberately loose beyond row 0):
+        let words: [&[char]; 3] = [
+            &['w', 'o', 'r', 'l', 'd'],
+            &['w', 'r', 'a', 'p', 'p', 'e', 'd'],
+            &['a', 'g', 'a', 'i', 'n'],
+        ];
+        for word in words {
+            assert!(
+                chars
+                    .iter()
+                    .any(|row| row.windows(word.len()).any(|w| w == word)),
+                "{word:?} must appear in logical order in some row: {chars:?}"
+            );
+        }
+        for glyphs in visible_glyphs_per_row(&galley) {
+            assert_visual_x_nondecreasing(&glyphs);
+        }
+    }
+
+    /// D — a paragraph spanning several `LayoutSection`s wraps jointly: an
+    /// RTL word SPLIT by a color change (two sections, `عر` + `بي`) reorders
+    /// as ONE run on its row (the row's per-glyph levels are computed over
+    /// the whole text, so the section boundary does not split the run), and
+    /// the rows follow the reading order.
+    #[test]
+    fn wrapped_multi_section_rtl_reorders_jointly() {
+        let text = "عربي aaa bbb ccc ddd eee";
+        let formats = [
+            TextFormat::simple(FontId::proportional(14.0), Color32::RED),
+            TextFormat::simple(FontId::proportional(14.0), Color32::WHITE),
+        ];
+        // `عر` in the red section, the rest in the white one — the word
+        // عربي is split across the boundary:
+        assert_eq!(&text[..4], "عر");
+        let w = visible_glyphs_per_row(&layout_unwrapped("a", TextDirection::Auto))[0][0].2;
+        let job = two_section_job(
+            &[&text[..4], &text[4..]],
+            &formats,
+            (4 + 1 + 3 + 1) as f32 * w + 0.5,
+            TextDirection::RightToLeft,
+        );
+        let mut fonts = tofu_fonts(Arc::new(SimpleLineBreaker));
+        let galley = layout(&mut fonts, 1.0, job.into());
+
+        // Rows partition logically (عربي aaa / bbb ccc / ddd eee):
+        assert_eq!(galley.rows.len(), 3);
+        let chars = visible_chars_per_row(&galley);
+        // Row 0 renders `عربي aaa`: the split word as ONE run in visual
+        // order (يبرع at the right, jointly across the section boundary),
+        // the latin island at the visual left:
+        assert_eq!(chars[0], ['a', 'a', 'a', 'ي', 'ب', 'ر', 'ع'], "{chars:?}");
+        assert_eq!(chars[1], ['b', 'b', 'b', 'c', 'c', 'c'], "{chars:?}");
+        assert_eq!(chars[2], ['d', 'd', 'd', 'e', 'e', 'e'], "{chars:?}");
+        assert_eq!(
+            logical_text_per_row(&galley),
+            ["عربي aaa ", "bbb ccc ", "ddd eee"]
+        );
+        // Both sections' glyphs appear (no drops):
+        assert_eq!(
+            galley
+                .rows
+                .iter()
+                .map(|placed| placed.row.glyphs.len())
+                .sum::<usize>(),
+            text.chars().count(),
+            "one glyph slot per char across both sections"
+        );
+        for glyphs in visible_glyphs_per_row(&galley) {
+            assert_visual_x_nondecreasing(&glyphs);
+        }
+    }
+
+    /// D (unrecorded edge) — a paragraph mixing a pure-LTR lead with a
+    /// wrapped RTL section keeps every glyph and reads in order. LTR-first
+    /// order (the LTR stretch is the paragraph's head).
+    #[test]
+    fn wrapped_unrecorded_edge_ltr_first_keeps_all_glyphs() {
+        let formats = [
+            TextFormat::simple(FontId::proportional(14.0), Color32::RED),
+            TextFormat::simple(FontId::proportional(14.0), Color32::WHITE),
+        ];
+        let w = visible_glyphs_per_row(&layout_unwrapped("a", TextDirection::Auto))[0][0].2;
+        let job = two_section_job(
+            &["abcd", " عربي aaa bbb"],
+            &formats,
+            (4 + 1 + 4 + 1) as f32 * w + 0.5,
+            TextDirection::RightToLeft,
+        );
+        let mut fonts = tofu_fonts(Arc::new(SimpleLineBreaker));
+        let galley = layout(&mut fonts, 1.0, job.into());
+
+        assert_eq!(galley.rows.len(), 2);
+        let chars = visible_chars_per_row(&galley);
+        // Row 0 reads `abcd عربي `: visually ␣ يبرع ␣ abcd — the LTR word
+        // kept, the Arabic word reordered as one run:
+        assert_eq!(chars[0], ['ي', 'ب', 'ر', 'ع', 'a', 'b', 'c', 'd'], "{chars:?}");
+        assert_eq!(chars[1], ['a', 'a', 'a', 'b', 'b', 'b'], "{chars:?}");
+        assert_eq!(logical_text_per_row(&galley), ["abcd عربي ", "aaa bbb"]);
+        // No dropped glyphs:
+        assert_eq!(
+            galley
+                .rows
+                .iter()
+                .map(|placed| placed.row.glyphs.len())
+                .sum::<usize>(),
+            "abcd عربي aaa bbb".chars().count(),
+        );
+        for glyphs in visible_glyphs_per_row(&galley) {
+            assert_visual_x_nondecreasing(&glyphs);
+        }
+    }
+
+    /// D (unrecorded edge, mirrored) — the pure-LTR stretch is the
+    /// paragraph's TAIL: the trailing section's glyphs still land in their
+    /// logical row, in logical order.
+    #[test]
+    fn wrapped_unrecorded_edge_ltr_last_keeps_all_glyphs() {
+        let formats = [
+            TextFormat::simple(FontId::proportional(14.0), Color32::RED),
+            TextFormat::simple(FontId::proportional(14.0), Color32::WHITE),
+        ];
+        let w = visible_glyphs_per_row(&layout_unwrapped("a", TextDirection::Auto))[0][0].2;
+        let job = two_section_job(
+            &["عربي aaa ", "abcd"],
+            &formats,
+            (4 + 1 + 3 + 1) as f32 * w + 0.5,
+            TextDirection::RightToLeft,
+        );
+        let mut fonts = tofu_fonts(Arc::new(SimpleLineBreaker));
+        let galley = layout(&mut fonts, 1.0, job.into());
+
+        assert_eq!(galley.rows.len(), 2);
+        let chars = visible_chars_per_row(&galley);
+        // Row 0 reads `عربي aaa ` (visually ␣ aaa ␣ يبرع), row 1 the
+        // unrecorded tail in logical order:
+        assert_eq!(chars[0], ['a', 'a', 'a', 'ي', 'ب', 'ر', 'ع'], "{chars:?}");
+        assert_eq!(chars[1], ['a', 'b', 'c', 'd'], "{chars:?}");
+        assert_eq!(logical_text_per_row(&galley), ["عربي aaa ", "abcd"]);
+        assert_eq!(
+            galley
+                .rows
+                .iter()
+                .map(|placed| placed.row.glyphs.len())
+                .sum::<usize>(),
+            "عربي aaa abcd".chars().count(),
+        );
+        for glyphs in visible_glyphs_per_row(&galley) {
+            assert_visual_x_nondecreasing(&glyphs);
+        }
+    }
 }

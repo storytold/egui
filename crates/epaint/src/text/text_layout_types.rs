@@ -952,15 +952,13 @@ pub struct Row {
     /// exact per glyph, so also inside runs that counteract the base (e.g.
     /// embedded left-to-right words in a right-to-left row).
     ///
-    /// Known gap for right-to-left text: the visual reordering happens
-    /// per newline-split segment, and wrapping afterwards slices the already
-    /// reordered glyph stream at geometric wrap points, so for *any* RTL text
-    /// that wraps — pure RTL included, not just mixed-direction text — the
-    /// rows do not follow UAX #9 L1/L2 per rendered line: words can end up on
-    /// the wrong rows (e.g. an RTL-base `أول ثاني ثالث` can wrap with the
-    /// logically last word `ثالث` on the first row). Correct per-line
-    /// reordering needs logical wrapping before the visual reorder. Single-row
-    /// text is unaffected.
+    /// Wrapped right-to-left text follows the reading order: wrapping walks
+    /// the glyphs in logical order and each produced row is then placed per
+    /// UAX #9 L1/L2 (`reset_whitespace_levels` + `reorder_row_visually`), so
+    /// an RTL-base `أول ثاني ثالث` wraps with `أول` leading the first row,
+    /// and the break whitespace of a right-to-left row renders at its visual
+    /// reading end. Because the levels are per glyph, that placement is also
+    /// exact inside runs that counteract the base direction.
     pub glyphs: Vec<Glyph>,
 
     /// Is the paragraph this row belongs to right-to-left?
