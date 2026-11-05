@@ -463,7 +463,7 @@ impl ViewportLabelSelectionState {
                 "\n"
             };
             self.text_to_copy = format!("{new_text}{newlines}{}", self.text_to_copy);
-        } else if galley.is_rtl()
+        } else if galley.rows.first().is_some_and(|row| row.rtl_paragraph)
             && new_galley_rect.left() >= last_copied_galley_rect.right() - ROW_EPSILON
         {
             // Same row band, horizontally disjoint: under a right-to-left
@@ -698,7 +698,7 @@ impl ViewportLabelSelectionState {
                 // first frame, before the other endpoint's widget was laid
                 // out):
                 let secondary_first =
-                    reads_before(&selection.secondary, &selection.primary, galley.is_rtl())
+                    reads_before(&selection.secondary, &selection.primary, galley.rows.first().is_some_and(|row| row.rtl_paragraph))
                         .unwrap_or(self.has_reached_secondary);
                 let secondary = if secondary_first {
                     // The secondary reads before the primary.
@@ -724,7 +724,7 @@ impl ViewportLabelSelectionState {
                 // first frame, before the other endpoint's widget was laid
                 // out):
                 let primary_first =
-                    reads_before(&selection.primary, &selection.secondary, galley.is_rtl())
+                    reads_before(&selection.primary, &selection.secondary, galley.rows.first().is_some_and(|row| row.rtl_paragraph))
                         .unwrap_or(self.has_reached_primary);
                 let primary = if primary_first {
                     // The primary reads before the secondary.
@@ -851,7 +851,7 @@ impl ViewportLabelSelectionState {
                     // this stores the double-clicked widget's direction rather than the
                     // true anchor's — the same mixed-direction approximation the cursor
                     // mapping makes:
-                    anchor_rtl: galley.is_rtl(),
+                    anchor_rtl: galley.rows.first().is_some_and(|row| row.rtl_paragraph),
                 });
             }
         }
