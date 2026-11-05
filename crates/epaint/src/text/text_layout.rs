@@ -6441,4 +6441,352 @@ mod tests {
             assert_visual_x_nondecreasing(&glyphs);
         }
     }
+
+    /// Wrapped RTL elision is directed at the READING end: the `…` replaces
+    /// the logically-last row's trailing glyphs — including the L1-reset
+    /// break space, which must be dropped with them instead of stranding the
+    /// `…` behind it. The LTR mirror keeps the historic trailing `…`. (On the
+    /// fork the row's glyphs are stored in logical order, so the `…` is the
+    /// last STORED glyph in both directions and the direction shows in its
+    /// visual x: at the reading end — visual left — on a right-to-left row,
+    /// trailing on the visual right of a left-to-right one.)
+    #[test]
+    fn wrapped_rtl_elision_lands_at_the_reading_end() {
+        let text = "أول ثاني ثالث";
+        // The one-word-per-row width from test A:
+        let twin = layout_unwrapped(text, TextDirection::LeftToRight);
+        let (spans, gaps) = visible_runs(&twin);
+        let wrap_width = (spans[0] + gaps[0]).max(spans[1] + gaps[0]).max(spans[2]) + 0.5;
+
+        for direction in [
+            TextDirection::RightToLeft,
+            TextDirection::Auto,
+            TextDirection::LeftToRight,
+        ] {
+            let mut fonts = tofu_fonts(Arc::new(SimpleLineBreaker));
+            let mut job = LayoutJob::simple(
+                text.to_owned(),
+                FontId::proportional(14.0),
+                Color32::WHITE,
+                wrap_width,
+            );
+            job.direction = direction;
+            job.wrap.max_rows = 2;
+            job.wrap.overflow_character = Some('…');
+            let galley = layout(&mut fonts, 1.0, job.into());
+            assert!(
+                galley.elided,
+                "max_rows 2 must elide the third row (direction {direction:?})"
+            );
+            assert_eq!(galley.rows.len(), 2);
+            let last = &galley.rows[1].row;
+            let is_rtl = direction != TextDirection::LeftToRight;
+
+            // The `…` is appended after the row's surviving glyphs, so it is
+            // the last STORED glyph either way:
+            let ellipsis = last.glyphs.last().map(|glyph| glyph.chr);
+            assert_eq!(
+                ellipsis,
+                Some('…'),
+                "glyphs: {:?} (direction {direction:?})",
+                last.glyphs.iter().map(|g| g.chr).collect::<Vec<_>>()
+            );
+
+            // Visual direction, measured against the kept text (whitespace
+            // excluded): the `…` sits at the reading end of a right-to-left
+            // row (visual left, at or before every kept glyph's x), and
+            // trails the visual right edge of the LTR mirror.
+            let ellipsis_x = last.glyphs.last().map(|glyph| glyph.pos.x).unwrap_or(0.0);
+            let kept_x: Vec<f32> = last.glyphs[..last.glyphs.len() - 1]
+                .iter()
+                .filter(|glyph| glyph.advance_width > 0.0 && !glyph.chr.is_whitespace())
+                .map(|glyph| glyph.pos.x)
+                .collect();
+            if is_rtl {
+                assert!(
+                    kept_x.iter().all(|x| ellipsis_x <= *x),
+                    "the ellipsis must sit at the row's reading end (direction {direction:?}): \
+                     {ellipsis_x} vs kept {kept_x:?}"
+                );
+            } else {
+                assert!(
+                    kept_x.iter().all(|x| *x <= ellipsis_x),
+                    "the LTR mirror keeps the trailing ellipsis (direction {direction:?}): \
+                     {ellipsis_x} vs kept {kept_x:?}"
+                );
+            }
+        }
+
+        // Known tofu residual (documented, not fixed here): the fork's tofu
+        // fonts serve the overflow character with a ZERO advance, so it fits
+        // without popping and the L1-reset break space survives at the row's
+        // visual reading end (upstream-faithful for a zero-advance ellipsis;
+        // the mission's tofu gave the `…` a full advance and so never saw
+        // this). With a real font the space is popped with the replaced
+        // glyphs — pinned below.
+        {
+            let mut fonts = tofu_fonts(Arc::new(SimpleLineBreaker));
+            let mut job = LayoutJob::simple(
+                text.to_owned(),
+                FontId::proportional(14.0),
+                Color32::WHITE,
+                wrap_width,
+            );
+            job.direction = TextDirection::RightToLeft;
+            job.wrap.max_rows = 2;
+            job.wrap.overflow_character = Some('…');
+            let galley = layout(&mut fonts, 1.0, job.into());
+            let last = &galley.rows[1].row;
+            let ellipsis_advance = last
+                .glyphs
+                .last()
+                .map(|glyph| glyph.advance_width)
+                .unwrap_or(0.0);
+            if ellipsis_advance <= 0.0 {
+                assert_eq!(
+                    last.glyphs.last().map(|glyph| glyph.chr),
+                    Some('…'),
+                    "the zero-advance tofu ellipsis still trails the row"
+                );
+            }
+        }
+    }
+
+    /// The wrapped elision contract with a real font: the `…` has a positive
+    /// advance, so popping reaches the L1-reset break space and drops it with
+    /// the replaced glyphs; the `…` lands at the row's visual reading end
+    /// (visual left) on a right-to-left row and trails the LTR mirror.
+    #[test]
+    fn wrapped_rtl_elision_drops_the_break_space_with_a_real_font() {
+        let text = "אבגד הוזח טיכל";
+        let mut fonts = test_fonts();
+
+        // Wrap width measured from the LTR-pinned twin of the same text (its
+        // stored order is its visual order): rows read `אבגד הוזח ` and
+        // `טיכל`.
+        let twin = {
+            let mut fonts = test_fonts();
+            let mut job = LayoutJob::simple(
+                text.to_owned(),
+                FontId::proportional(14.0),
+                Color32::WHITE,
+                f32::INFINITY,
+            );
+            job.direction = TextDirection::LeftToRight;
+            job.round_output_to_gui = false;
+            layout(&mut fonts, 1.0, job.into())
+        };
+        assert_eq!(twin.rows.len(), 1);
+        let glyphs: Vec<(char, f32, f32)> = twin.rows[0]
+            .row
+            .glyphs
+            .iter()
+            .filter(|g| g.advance_width > 0.0)
+            .map(|g| (g.chr, g.pos.x, g.advance_width))
+            .collect();
+        // The intended first row is `אבגד הוזח ` (content + break space);
+        // its width is the x of the first glyph of `טיכל`:
+        let first_row_end = glyphs
+            .iter()
+            .find(|(chr, _, _)| *chr == 'ט')
+            .map(|(_, x, _)| *x)
+            .unwrap_or_default();
+        let last_word_width = glyphs
+            .iter()
+            .filter(|(chr, _, _)| "טיכל".contains(*chr))
+            .map(|(_, x, a)| x + a)
+            .fold(0.0_f32, f32::max)
+            - glyphs
+                .iter()
+                .find(|(chr, _, _)| *chr == 'ט')
+                .map(|(_, x, _)| *x)
+                .unwrap_or_default();
+        let wrap_width = first_row_end.max(last_word_width) + 0.5;
+
+        for direction in [TextDirection::RightToLeft, TextDirection::LeftToRight] {
+            let mut fonts = test_fonts();
+            let mut job = LayoutJob::simple(
+                text.to_owned(),
+                FontId::proportional(14.0),
+                Color32::WHITE,
+                wrap_width,
+            );
+            job.direction = direction;
+            job.wrap.max_rows = 2;
+            job.wrap.overflow_character = Some('…');
+            let galley = layout(&mut fonts, 1.0, job.into());
+            assert!(
+                galley.elided,
+                "max_rows 2 must elide (direction {direction:?})"
+            );
+            assert_eq!(galley.rows.len(), 2);
+            let last = &galley.rows[1].row;
+
+            // The `…` is the last stored glyph and no whitespace survives
+            // next to it: the L1-reset break space was dropped with the
+            // replaced glyphs:
+            assert_eq!(
+                last.glyphs.last().map(|glyph| glyph.chr),
+                Some('…'),
+                "glyphs: {:?} (direction {direction:?})",
+                last.glyphs.iter().map(|g| g.chr).collect::<Vec<_>>()
+            );
+            assert!(
+                !last.glyphs.iter().any(|glyph| glyph.chr.is_whitespace()),
+                "no break space may survive next to the ellipsis (direction {direction:?}): {:?}",
+                last.glyphs.iter().map(|g| g.chr).collect::<Vec<_>>()
+            );
+
+            // Visual direction against the kept text:
+            let ellipsis_x = last.glyphs.last().map(|glyph| glyph.pos.x).unwrap_or(0.0);
+            let kept_x: Vec<f32> = last.glyphs[..last.glyphs.len() - 1]
+                .iter()
+                .filter(|glyph| glyph.advance_width > 0.0 && !glyph.chr.is_whitespace())
+                .map(|glyph| glyph.pos.x)
+                .collect();
+            if direction == TextDirection::RightToLeft {
+                assert!(
+                    kept_x.iter().all(|x| ellipsis_x <= *x),
+                    "the ellipsis must sit at the row's reading end: {ellipsis_x} vs {kept_x:?}"
+                );
+            } else {
+                assert!(
+                    kept_x.iter().all(|x| *x <= ellipsis_x),
+                    "the LTR mirror keeps the trailing ellipsis: {ellipsis_x} vs {kept_x:?}"
+                );
+            }
+        }
+    }
+
+    /// Hostile wrapped shapes must not panic and must keep one glyph slot per
+    /// char whenever the wrap produced all the rows (no truncation): the
+    /// digit-mixed wrapped shape and an isolate-soup wrapped at width 100
+    /// (the shapes the mission's commit grew its T6 hostile sweep with), plus
+    /// two-section wrapped RTL jobs in both section orders through the same
+    /// wrap + elision gauntlet. (The fork never ported the mission's whole T6
+    /// sweep, so this is the commit's delta as a self-contained sweep; the
+    /// cursor paths are smoked on every galley.)
+    #[test]
+    fn bidi_wrapped_hostile_input_does_not_panic() {
+        let mut fonts = tofu_fonts(Arc::new(SimpleLineBreaker));
+        let directions = [
+            TextDirection::Auto,
+            TextDirection::LeftToRight,
+            TextDirection::RightToLeft,
+        ];
+        let wrapped_shapes = [
+            "أول ٢٠٢٦ ثالث".to_owned(),
+            "\u{2066}أول\u{2069} \u{2067}ثاني\u{2069} ثالث \u{200F}\u{200E}".repeat(6),
+        ];
+
+        for text in &wrapped_shapes {
+            for direction in directions {
+                // Wrapped + elided at width 100 (exercises line_break and the
+                // elision path):
+                let mut job = LayoutJob::simple(
+                    text.clone(),
+                    FontId::proportional(14.0),
+                    Color32::WHITE,
+                    100.0,
+                );
+                job.direction = direction;
+                job.wrap.max_rows = 5;
+                job.wrap.overflow_character = Some('…');
+                let galley = layout(&mut fonts, 1.0, job.into());
+
+                // One glyph slot per char, preserved when the wrap produced
+                // all the rows (no truncation). The bidi format characters
+                // (LRI/PDI/RLM/LRE) are kept as zero-width glyphs on this
+                // fork, so they count; there are no Cc controls in these
+                // shapes:
+                if !galley.elided {
+                    let total: usize = galley
+                        .rows
+                        .iter()
+                        .map(|placed| placed.row.glyphs.len())
+                        .sum();
+                    assert_eq!(
+                        total,
+                        text.chars().count(),
+                        "glyph slots must equal the char count for {text:?} (direction {direction:?})"
+                    );
+                }
+
+                // Smoke the cursor paths on the elided galley:
+                let _ = galley.end();
+                let _ = galley.cursor_from_pos(vec2(0.0, 0.0));
+                let _ = galley.pos_from_cursor(galley.end());
+
+                // The same shape wide enough to never elide: the totals
+                // assert above then bites on the untruncated rows.
+                let mut job = LayoutJob::simple(
+                    text.clone(),
+                    FontId::proportional(14.0),
+                    Color32::WHITE,
+                    10_000.0,
+                );
+                job.direction = direction;
+                job.wrap.max_rows = 5;
+                let galley = layout(&mut fonts, 1.0, job.into());
+                assert!(!galley.elided, "10_000 px must not elide {text:?}");
+                let total: usize = galley
+                    .rows
+                    .iter()
+                    .map(|placed| placed.row.glyphs.len())
+                    .sum();
+                assert_eq!(
+                    total,
+                    text.chars().count(),
+                    "glyph slots must equal the char count for {text:?} (direction {direction:?})"
+                );
+                let _ = galley.cursor_from_pos(vec2(0.0, 0.0));
+                let _ = galley.pos_from_cursor(galley.end());
+            }
+        }
+
+        // Two-section wrapped RTL jobs (both section orders, mixed with a
+        // pure-LTR section) through the same wrap + elision gauntlet:
+        let formats = [
+            TextFormat::simple(FontId::proportional(14.0), Color32::RED),
+            TextFormat::simple(FontId::proportional(14.0), Color32::WHITE),
+        ];
+        for section_texts in [
+            ["تقرير ٢٠٢٦", " aaa bbb الأول ثاني"],
+            ["abcd", " عربي aaa \u{2066}שלום\u{2069} pdf"],
+        ] {
+            let mut text = String::new();
+            let mut sections = Vec::new();
+            for (i, section_text) in section_texts.iter().enumerate() {
+                let start = ByteIndex(text.len());
+                text.push_str(section_text);
+                sections.push(LayoutSection {
+                    leading_space: 0.0,
+                    byte_range: start..ByteIndex(text.len()),
+                    format: formats[i].clone(),
+                });
+            }
+            for direction in directions {
+                let mut job = LayoutJob {
+                    sections: sections.clone(),
+                    text: text.clone(),
+                    wrap: TextWrapping {
+                        max_width: 100.0,
+                        max_rows: 5,
+                        break_anywhere: true,
+                        ..Default::default()
+                    },
+                    break_on_newline: true,
+                    ..Default::default()
+                };
+                job.direction = direction;
+                job.round_output_to_gui = false;
+                job.wrap.overflow_character = Some('…');
+                let mut fonts = tofu_fonts(Arc::new(SimpleLineBreaker));
+                let galley = layout(&mut fonts, 1.0, job.into());
+                let _ = galley.end();
+                let _ = galley.cursor_from_pos(vec2(0.0, 0.0));
+                let _ = galley.pos_from_cursor(galley.end());
+            }
+        }
+    }
 }
