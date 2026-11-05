@@ -1890,6 +1890,10 @@ impl Ui {
     ///
     /// See also [`Self::add`] and [`Self::add_sized`] and [`Self::put`].
     pub fn place(&mut self, max_rect: Rect, widget: impl Widget) -> Response {
+        // Direction-safe by construction: `centered_and_justified` crosses on
+        // `Align::Center`, which never mirrors, and the vertical main axis
+        // never mirrors. Prefer deriving direction via `new_child`/`scope_builder`
+        // (which apply the RTL mirror) when a new helper needs one.
         self.new_child(
             UiBuilder::new()
                 .max_rect(max_rect)
@@ -1903,6 +1907,8 @@ impl Ui {
     ///
     /// See also [`Self::add`], [`Self::add_sized`], and [`Self::place`].
     pub fn put(&mut self, max_rect: Rect, widget: impl Widget) -> Response {
+        // Direction-safe: `Align::Center` cross never mirrors and the vertical
+        // main axis never mirrors (see `place`).
         self.scope_builder(
             UiBuilder::new()
                 .max_rect(max_rect)
@@ -2831,6 +2837,8 @@ impl Ui {
         &mut self,
         add_contents: impl FnOnce(&mut Self) -> R,
     ) -> InnerResponse<R> {
+        // Direction-safe: `Align::Center` cross never mirrors and the vertical
+        // main axis never mirrors (see `place`).
         self.scope_builder(
             UiBuilder::new().layout(Layout::centered_and_justified(Direction::TopDown)),
             add_contents,
@@ -2912,7 +2920,12 @@ impl Ui {
                 let mut column_ui = self.new_child(
                     UiBuilder::new()
                         .max_rect(child_rect)
-                        .layout(Layout::top_down_justified(Align::LEFT)),
+                        // Direction-safe: `Align::LEFT` is `Align::Min`, and
+                        // `new_child` re-maps vertical `Align::Min` to
+                        // `Align::Max` under RTL, so column content is
+                        // reading-start aligned alongside the mirrored
+                        // enumeration above.
+                        .layout(Layout::top_down_justified(Align::Min)),
                 );
                 column_ui.set_width(column_width);
                 column_ui
@@ -2990,7 +3003,10 @@ impl Ui {
             let mut column_ui = self.new_child(
                 UiBuilder::new()
                     .max_rect(child_rect)
-                    .layout(Layout::top_down_justified(Align::LEFT)),
+                    // Direction-safe: `Align::Min` is re-mapped to `Align::Max`
+                    // by `new_child` under RTL (see the mirrored enumeration
+                    // above).
+                    .layout(Layout::top_down_justified(Align::Min)),
             );
             column_ui.set_width(column_width);
             column_ui
