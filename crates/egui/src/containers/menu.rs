@@ -927,7 +927,10 @@ mod tests {
     impl MenuTest {
         fn new(right_to_left: bool) -> Self {
             let ctx = Context::default();
-            ctx.all_styles_mut(|style| style.right_to_left = right_to_left);
+            // Set the direction through the preference-recording setter: `begin_pass`
+            // re-applies the resolved direction, so a bare style mutation would be
+            // overwritten on the next pass.
+            ctx.set_right_to_left(right_to_left);
             let test = Self {
                 ctx,
                 menu_button: Cell::new(Rect::NOTHING),

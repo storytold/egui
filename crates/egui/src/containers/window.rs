@@ -1844,7 +1844,10 @@ mod title_bar_tests {
     /// Clicks the leftmost title-bar button of a window and reports what happened.
     fn click_leftmost_title_bar_button(right_to_left: bool) -> Outcome {
         let ctx = Context::default();
-        ctx.all_styles_mut(|style| style.right_to_left = right_to_left);
+        // Set the direction through the preference-recording setter: `begin_pass`
+        // re-applies the resolved direction, so a bare style mutation would be
+        // overwritten on the next pass.
+        ctx.set_right_to_left(right_to_left);
         let window_id = Id::unique("window");
         let open = Cell::new(true);
         let collapsed = Cell::new(false);

@@ -2470,10 +2470,11 @@ mod tests {
     /// and returns the rects of its viewport and its vertical scroll bar.
     fn vertical_scroll_bar(right_to_left: bool, scroll_style: ScrollStyle) -> (Rect, Rect) {
         let ctx = Context::default();
-        ctx.all_styles_mut(|style| {
-            style.right_to_left = right_to_left;
-            style.spacing.scroll = scroll_style;
-        });
+        // Set the direction through the preference-recording setter: `begin_pass`
+        // re-applies the resolved direction, so a bare style mutation would be
+        // overwritten on the next pass.
+        ctx.set_right_to_left(right_to_left);
+        ctx.all_styles_mut(|style| style.spacing.scroll = scroll_style);
         let mut output = None;
         let input = RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 400.0))),

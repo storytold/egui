@@ -34,8 +34,8 @@ fn run(ctx: &Context, input: RawInput, run_ui: impl FnMut(&mut Ui)) -> egui::Ful
 }
 
 /// (text, job direction) for every text shape painted this pass.
-fn painted_directions(output: &egui::FullOutput) -> Vec<(String, Option<TextDirection>)> {
-    fn collect(shape: &egui::epaint::Shape, out: &mut Vec<(String, Option<TextDirection>)>) {
+fn painted_directions(output: &egui::FullOutput) -> Vec<(String, TextDirection)> {
+    fn collect(shape: &egui::epaint::Shape, out: &mut Vec<(String, TextDirection)>) {
         match shape {
             egui::epaint::Shape::Text(text) => {
                 out.push((text.galley.job.text.clone(), text.galley.job.direction));
@@ -55,11 +55,12 @@ fn painted_directions(output: &egui::FullOutput) -> Vec<(String, Option<TextDire
     out
 }
 
-fn painted_edit_direction(output: &egui::FullOutput) -> Option<TextDirection> {
+fn painted_edit_direction(output: &egui::FullOutput) -> TextDirection {
     painted_directions(output)
         .iter()
         .find(|(painted, _)| painted == MIXED)
-        .and_then(|(_, direction)| *direction)
+        .map(|(_, direction)| *direction)
+        .expect("the edited text should be painted every pass")
 }
 
 /// A right-to-left keyboard layout stamps a right-to-left base direction on
@@ -73,13 +74,14 @@ fn text_edit_follows_a_rtl_keyboard_layout() {
     });
     assert_eq!(
         painted_edit_direction(&output),
-        Some(TextDirection::RightToLeft),
+        TextDirection::RightToLeft,
         "the TextEdit default layouter should follow the RTL keyboard layout"
     );
 }
 
 /// Without the signal the edited text stays first-strong (an LTR-first string
-/// lays out left-to-right) — today's behavior, unchanged.
+/// lays out left-to-right) — today's behavior, unchanged. (Fork API: the job
+/// keeps the default `Auto` base direction instead of an unstamped `None`.)
 #[test]
 fn text_edit_stays_first_strong_without_the_signal() {
     let ctx = Context::default();
@@ -89,7 +91,7 @@ fn text_edit_stays_first_strong_without_the_signal() {
     });
     assert_eq!(
         painted_edit_direction(&output),
-        Some(TextDirection::LeftToRight),
+        TextDirection::Auto,
         "without the signal the TextEdit default layouter must not change"
     );
 }
@@ -107,7 +109,7 @@ fn interface_direction_wins_over_the_keyboard_layout() {
         });
         assert_eq!(
             painted_edit_direction(&output),
-            Some(TextDirection::RightToLeft),
+            TextDirection::RightToLeft,
             "the interface direction must win (layout = {layout_direction:?})"
         );
     }

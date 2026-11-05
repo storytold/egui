@@ -57,7 +57,7 @@ fn run(ctx: &Context, input: RawInput, run_ui: impl FnMut(&mut Ui)) {
 fn layout_single_row(
     ctx: &Context,
     text: &str,
-    direction: Option<TextDirection>,
+    direction: TextDirection,
 ) -> (Vec<(char, f32)>, Rect) {
     let mut out = None;
     run(ctx, input(SCREEN), |ui| {
@@ -112,7 +112,7 @@ fn rtl_paragraph_keeps_a_symbol_shortcut_left_to_right() {
     let shortcut = KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::Minus);
     let text = format!("عنوان {}", shortcut.format(&ModifierNames::SYMBOLS, false));
 
-    let (glyphs, _) = layout_single_row(&ctx, &text, Some(TextDirection::RightToLeft));
+    let (glyphs, _) = layout_single_row(&ctx, &text, TextDirection::RightToLeft);
 
     assert!(
         x_of(&glyphs, MINUS) > x_of(&glyphs, '⌃'),
@@ -130,21 +130,29 @@ fn rtl_paragraph_keeps_a_names_shortcut_one_ltr_block() {
     let shortcut = KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::Minus);
     let text = format!("عنوان {}", ctx.format_shortcut(&shortcut));
 
-    let (glyphs, _) = layout_single_row(&ctx, &text, Some(TextDirection::RightToLeft));
+    let (glyphs, _) = layout_single_row(&ctx, &text, TextDirection::RightToLeft);
 
-    // The Arabic label contributes no Latin glyphs, so the shortcut's chars
-    // lead the visible stream, in logical (left-to-right) order.
+    // The Arabic label contributes no Latin glyphs. Under the fork's visual-
+    // order glyph storage the RTL paragraph reads from its right edge, so the
+    // isolated shortcut block follows the Arabic run in the stream — but it
+    // must still be one contiguous left-to-right block in logical char order.
     let visible = visible_glyphs(&glyphs);
-    let expected = "Ctrl+Shift+Minus";
+    let expected: Vec<char> = "Ctrl+Shift+Minus".chars().collect();
     assert!(
-        visible.len() >= expected.chars().count(),
+        visible.len() >= expected.len(),
         "the shortcut should be painted in full, got {visible:?}"
     );
+    let start = visible
+        .iter()
+        .position(|(chr, _)| *chr == expected[0])
+        .unwrap_or_else(|| panic!("the shortcut block should be painted: {visible:?}"));
     let mut prev_x: Option<f32> = None;
-    for (i, (chr, x)) in visible.iter().enumerate().take(expected.chars().count()) {
-        let want = expected.chars().nth(i).unwrap_or_else(|| panic!("ascii"));
+    for (i, want) in expected.iter().enumerate() {
+        let Some((chr, x)) = visible.get(start + i) else {
+            panic!("the shortcut block must be contiguous; glyphs: {visible:?}");
+        };
         assert_eq!(
-            *chr, want,
+            chr, want,
             "the shortcut block must render in logical char order; glyphs: {visible:?}"
         );
         if let Some(prev) = prev_x {
@@ -178,8 +186,8 @@ fn ltr_wrapping_leaves_visible_glyphs_unchanged() {
         .trim_end_matches(ISOLATES[1]);
     assert_eq!(raw, "Ctrl+Shift+Minus");
 
-    let (raw_glyphs, _) = layout_single_row(&ctx, raw, None);
-    let (wrapped_glyphs, _) = layout_single_row(&ctx, &wrapped, None);
+    let (raw_glyphs, _) = layout_single_row(&ctx, raw, TextDirection::Auto);
+    let (wrapped_glyphs, _) = layout_single_row(&ctx, &wrapped, TextDirection::Auto);
 
     // Compare per visible char, not per glyph: the isolates add glyph slots.
     let raw_visible = visible_glyphs(&raw_glyphs);

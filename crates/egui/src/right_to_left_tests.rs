@@ -12,7 +12,10 @@ use crate::{
 
 fn context(right_to_left: bool) -> Context {
     let ctx = Context::default();
-    ctx.all_styles_mut(|style| style.right_to_left = right_to_left);
+    // The interface direction is managed as a preference (`Options::direction_preference`,
+    // resolved and re-applied by `begin_pass`), so it must be set through the public
+    // setter: a bare style mutation would be overwritten on the next pass.
+    ctx.set_right_to_left(right_to_left);
     ctx
 }
 

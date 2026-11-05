@@ -790,7 +790,10 @@ mod tests {
     /// Which way the triangle of a collapsed header points: `1.0` right, `-1.0` left.
     fn collapsed_triangle_direction(right_to_left: bool) -> f32 {
         let ctx = Context::default();
-        ctx.all_styles_mut(|style| style.right_to_left = right_to_left);
+        // Set the direction through the preference-recording setter: `begin_pass`
+        // re-applies the resolved direction, so a bare style mutation would be
+        // overwritten on the next pass.
+        ctx.set_right_to_left(right_to_left);
         let mut output = ctx.run_ui(RawInput::default(), |ui| {
             CollapsingHeader::new("Header").show(ui, |ui| ui.label("Body"));
         });
