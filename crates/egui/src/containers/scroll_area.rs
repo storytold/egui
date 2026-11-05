@@ -966,6 +966,18 @@ impl ScrollArea {
         } else {
             Vec2::ZERO
         };
+        // NOTE: the full-width begin-time rects are deliberate (see above); the end
+        // side shrinks `inner_size` per `auto_shrink` and re-anchors at the reading
+        // start when this predicate holds, so a vertical-only rtl area with
+        // `auto_shrink` reserves the same content-hugging span as its ltr twin,
+        // anchored at the reading start, bar strip on the reading-end edge or not.
+        // (Two residuals this note used to document — bar-driven right-anchoring
+        // of auto-shrunk windows, and a direction asymmetry where the rtl window
+        // stayed full-width where the ltr one hugged its content — are healed;
+        // pinned in `crates/egui/tests/scroll_area_rtl.rs` by
+        // `vertical_auto_shrink_hugs_the_content_width_in_both_directions` and
+        // `vertical_auto_shrink_window_width_is_direction_symmetric`.)
+
         let inner_rect = if rtl && parent_seeds_reading_start && current_bar_use.x == 0.0 {
             // Anchor on the parent's reading-start seed edge (right under RTL).
             Rect::from_min_size(
