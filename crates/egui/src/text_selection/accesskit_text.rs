@@ -232,6 +232,8 @@ pub fn update_accesskit_for_text_widget(
 #[cfg(test)]
 mod tests {
     use accesskit::{Node, NodeId, Role, TextDirection, TreeUpdate};
+
+    use super::MAX_CHARS_PER_TEXT_RUN;
     use epaint::text::cursor::CCursor;
 
     use super::{row_text_runs, text_run_position};
@@ -402,5 +404,160 @@ mod tests {
                 }
             }
         });
+    }
+
+    /// AccessKit's implicit first word start: `word_starts` lists the words of
+    /// each run's value after the first, in logical order (the fork's runs are
+    /// logical, so the run order here is the logical one).
+    #[test]
+    fn word_starts_follow_the_logical_text() {
+        let ctx = Context::default();
+        let mixed = "Hello שלום world";
+        let update = accesskit_update(&ctx, |ui| {
+            ui.label(mixed);
+        });
+
+        let ids = label(&update, mixed).children();
+        assert_eq!(ids.len(), 3, "{:?}", runs(&update, mixed));
+
+        // Logical text "Hello שלום world": words at logical chars 6 and 11
+        // (the paragraph's first word start is implicit in AccessKit, see the
+        // `was_at_word_end` seeding). Run 0 = logical [0..6) = "Hello " (no
+        // word starts), run 1 = [6..10) = "שלום" (word at its local 0), run
+        // 2 = [10..16) = " world" (the word starts after its leading space,
+        // at local 1):
+        let word_starts = |id: NodeId| node(&update, id).word_starts();
+        assert_eq!(word_starts(ids[0]), &[][..]);
+        assert_eq!(
+            word_starts(ids[1]),
+            &[0u8][..],
+            "שלום starts its own run value"
+        );
+        assert_eq!(word_starts(ids[2]), &[1u8][..], "'world' follows the space");
+    }
+
+    /// An RTL-base row's runs carry their own directions and map logical
+    /// columns back and forth exactly (what an AT-driven `SetTextSelection`
+    /// uses). The fork's runs are logical, so the tree lists the Arabic run
+    /// first.
+    #[test]
+    fn rtl_base_row_maps_logical_columns_through_the_right_runs() {
+        let ctx = Context::default();
+        let id = Id::unique("rtl_text");
+        let arabic = "عربي 123";
+        let mut galley_slot = None;
+        let update = accesskit_update(&ctx, |ui| {
+            let galley = ui.painter().layout_no_wrap(
+                arabic.to_owned(),
+                FontId::proportional(14.0),
+                Color32::WHITE,
+            );
+            assert!(
+                galley.rows.first().is_some_and(|row| row.rtl_paragraph),
+                "the label must resolve RTL"
+            );
+            assert_eq!(galley.rows.len(), 1);
+            assert_eq!(row_text_runs(&galley.rows[0]).len(), 2, "digits and arabic split");
+            galley_slot = Some(galley);
+            ui.label(arabic);
+        });
+
+        // `(value, direction)` per run, in the tree's (logical) order:
+        let run_values: Vec<(String, TextDirection)> = runs(&update, arabic);
+        assert_eq!(
+            run_values,
+            vec![
+                ("عربي ".to_owned(), TextDirection::RightToLeft),
+                ("123".to_owned(), TextDirection::LeftToRight),
+            ],
+            "{run_values:?}"
+        );
+
+        // The runs joined in the tree's logical order read back the original
+        // string:
+        assert_eq!(
+            format!("{}{}", run_values[0].0, run_values[1].0),
+            arabic,
+            "the logical run order reconstructs the text"
+        );
+
+        // Every logical column of the row maps to a run node + character
+        // index, and round-trips back to the same column through the
+        // reverse mapping:
+        let galley = galley_slot.expect("galley");
+        let n = arabic.chars().count();
+        for column in 0..=n {
+            for prefer_next_row in [false, true] {
+                let cursor = CCursor {
+                    index: epaint::text::CharIndex(column),
+                    prefer_next_row,
+                };
+                let layout = galley.layout_from_cursor(cursor);
+                let position =
+                    text_run_position(id, &galley, layout.row, layout.column, prefer_next_row);
+                let back = crate::text_selection::cursor_range::ccursor_from_accesskit_text_position(
+                    id, &galley, &position,
+                )
+                .expect("position maps back");
+                assert_eq!(back.index, cursor.index, "{cursor:?} -> {position:?}");
+                // The caret stays put (a TextPosition cannot carry the
+                // `prefer_next_row` flag; the reverse mapping re-derives it):
+                assert_eq!(
+                    galley.pos_from_cursor(back),
+                    galley.pos_from_cursor(cursor),
+                    "{cursor:?} {position:?}"
+                );
+            }
+        }
+
+        // Column 0 (logical start) is the START of the logically-first run
+        // (the Arabic one, run index 0 in the fork's logical order); the row
+        // end is the END of the digits run (index 1):
+        let start = text_run_position(id, &galley, 0, epaint::text::CharIndex(0), false);
+        assert_eq!(
+            start.node,
+            id.with(0usize).with(0usize).accesskit_id(),
+            "column 0 must map to the logically-first (Arabic) run"
+        );
+        assert_eq!(start.character_index, 0);
+        let end = text_run_position(id, &galley, 0, epaint::text::CharIndex(n), false);
+        assert_eq!(end.node, id.with(0usize).with(1usize).accesskit_id());
+        assert_eq!(end.character_index, 3);
+    }
+
+    /// A long single-run row splits into 255-char chunks (AccessKit's
+    /// `word_starts` indices are `u8`), chained `next_on_line`/`previous_on_line`,
+    /// with word starts as indices into each chunk's value.
+    #[test]
+    fn long_ltr_rows_chunk_every_255_chars() {
+        let ctx = Context::default();
+        let text = "ab ".repeat(100); // 300 chars, words at every multiple of 3
+        let update = accesskit_update(&ctx, |ui| {
+            ui.add(crate::Label::new(text.clone()).wrap_mode(crate::TextWrapMode::Extend));
+        });
+
+        let ids = label(&update, &text).children();
+        assert_eq!(
+            ids.len(),
+            400usize.div_ceil(MAX_CHARS_PER_TEXT_RUN),
+            "two 255-capped chunks"
+        );
+        let values: Vec<String> = ids
+            .iter()
+            .map(|&id| node(&update, id).value().expect("value").to_owned())
+            .collect();
+        assert_eq!(values.concat(), text);
+        assert_eq!(values[0].chars().count(), MAX_CHARS_PER_TEXT_RUN);
+        assert_eq!(node(&update, ids[0]).next_on_line(), Some(ids[1]));
+        assert_eq!(node(&update, ids[1]).previous_on_line(), Some(ids[0]));
+        // Word starts are indices into each chunk's value. The paragraph's
+        // first word start is implicit in AccessKit (not pushed), so chunk 0
+        // holds the words at 3, 6, …, 252 (84 of them); the word at logical
+        // char 255 opens chunk 1 at its own char 0 (15 more to the end):
+        let chunk0 = node(&update, ids[0]).word_starts();
+        let chunk1 = node(&update, ids[1]).word_starts();
+        assert_eq!(chunk0.len(), 84);
+        assert_eq!(&chunk0[..3], &[3u8, 6, 9]);
+        assert_eq!(chunk1.len(), 15);
     }
 }
