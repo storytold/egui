@@ -5819,7 +5819,9 @@ mod tests {
             // No reordering happened: the stored (logical) order is the
             // visual order.
             assert!(
-                row.visual_order().enumerate().all(|(position, index)| position == index),
+                row.visual_order()
+                    .enumerate()
+                    .all(|(position, index)| position == index),
                 "{text:?} must not be reordered"
             );
             assert!(row.glyphs.iter().all(|glyph| !glyph.is_rtl()));
@@ -5891,11 +5893,7 @@ mod tests {
 
     /// The stored (logical) text of every row.
     fn logical_text_per_row(galley: &Galley) -> Vec<String> {
-        galley
-            .rows
-            .iter()
-            .map(|placed| placed.row.text())
-            .collect()
+        galley.rows.iter().map(|placed| placed.row.text()).collect()
     }
 
     /// The glyphs of `row` in visual order, filtered to advancing ones.
@@ -5953,8 +5951,8 @@ mod tests {
         let mut gaps = Vec::new();
         let mut run_first = 0usize;
         for i in 1..=glyphs.len() {
-            let boundary = i == glyphs.len()
-                || glyphs[i].1 - (glyphs[i - 1].1 + glyphs[i - 1].2) > 0.5;
+            let boundary =
+                i == glyphs.len() || glyphs[i].1 - (glyphs[i - 1].1 + glyphs[i - 1].2) > 0.5;
             if boundary {
                 spans.push(glyphs[i - 1].1 + glyphs[i - 1].2 - glyphs[run_first].1);
                 if i < glyphs.len() {
@@ -5969,7 +5967,11 @@ mod tests {
     /// Assert two glyph vectors agree within half a pixel.
     #[track_caller]
     fn assert_glyphs_close(got: &[(char, f32, f32)], expected: &[(char, f32, f32)]) {
-        assert_eq!(got.len(), expected.len(), "glyph counts: {got:?} vs {expected:?}");
+        assert_eq!(
+            got.len(),
+            expected.len(),
+            "glyph counts: {got:?} vs {expected:?}"
+        );
         for (i, ((gc, gx, ga), (ec, ex, ea))) in core::iter::zip(got, expected).enumerate() {
             assert_eq!(gc, ec, "glyph {i}: {got:?} vs {expected:?}");
             assert!(
@@ -6004,7 +6006,11 @@ mod tests {
         // run 1 = ثاني, run 2 = ثالث.
         let twin = layout_unwrapped(text, TextDirection::LeftToRight);
         let (spans, gaps) = visible_runs(&twin);
-        assert_eq!(spans.len(), 3, "the twin's stream is three words: {spans:?}");
+        assert_eq!(
+            spans.len(),
+            3,
+            "the twin's stream is three words: {spans:?}"
+        );
         assert_eq!(gaps.len(), 2, "spans {spans:?} gaps {gaps:?}");
         let (w_awwal, w_thani, w_thalith) = (spans[0], spans[1], spans[2]);
         let s = gaps[0];
@@ -6031,8 +6037,16 @@ mod tests {
             assert_eq!(galley.rows.len(), 3, "one word per row");
             let chars = visible_chars_per_row(&galley);
             assert_eq!(chars[0], ['ل', 'و', 'أ'], "row 0 renders أول: {chars:?}");
-            assert_eq!(chars[1], ['ي', 'ن', 'ا', 'ث'], "row 1 renders ثاني: {chars:?}");
-            assert_eq!(chars[2], ['ث', 'ل', 'ا', 'ث'], "row 2 renders ثالث: {chars:?}");
+            assert_eq!(
+                chars[1],
+                ['ي', 'ن', 'ا', 'ث'],
+                "row 1 renders ثاني: {chars:?}"
+            );
+            assert_eq!(
+                chars[2],
+                ['ث', 'ل', 'ا', 'ث'],
+                "row 2 renders ثالث: {chars:?}"
+            );
             // Rows are produced in logical (reading) order:
             assert_eq!(
                 logical_text_per_row(&galley),
@@ -6083,7 +6097,8 @@ mod tests {
         // An RTL-base paragraph (strong Arabic resolves Auto to RTL): the
         // visual order is the logically-last word first, positions the
         // exact multiples of the uniform advance:
-        let glyphs = visual_glyphs(&layout_unwrapped("أول ثاني ثالث", TextDirection::Auto).rows[0].row);
+        let glyphs =
+            visual_glyphs(&layout_unwrapped("أول ثاني ثالث", TextDirection::Auto).rows[0].row);
         let expected: Vec<(char, f32, f32)> = [
             ('ث', 0.0),
             ('ل', 1.0),
@@ -6386,7 +6401,11 @@ mod tests {
         let chars = visible_chars_per_row(&galley);
         // Row 0 reads `abcd عربي `: visually ␣ يبرع ␣ abcd — the LTR word
         // kept, the Arabic word reordered as one run:
-        assert_eq!(chars[0], ['ي', 'ب', 'ر', 'ع', 'a', 'b', 'c', 'd'], "{chars:?}");
+        assert_eq!(
+            chars[0],
+            ['ي', 'ب', 'ر', 'ع', 'a', 'b', 'c', 'd'],
+            "{chars:?}"
+        );
         assert_eq!(chars[1], ['a', 'a', 'a', 'b', 'b', 'b'], "{chars:?}");
         assert_eq!(logical_text_per_row(&galley), ["abcd عربي ", "aaa bbb"]);
         // No dropped glyphs:
@@ -6559,7 +6578,6 @@ mod tests {
     #[test]
     fn wrapped_rtl_elision_drops_the_break_space_with_a_real_font() {
         let text = "אבגד הוזח טיכל";
-        let mut fonts = test_fonts();
 
         // Wrap width measured from the LTR-pinned twin of the same text (its
         // stored order is its visual order): rows read `אבגד הוזח ` and
