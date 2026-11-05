@@ -602,10 +602,10 @@ impl<'t> TextEdit<'t> {
                     Some(direction) => direction,
                     None => layout_job.direction,
                 };
-            if ui.input(|i| i.keyboard_layout_direction()) == Some(ReadingDirection::Rtl) {
-                if layout_job.direction == epaint::text::TextDirection::Auto {
-                    layout_job.direction = epaint::text::TextDirection::RightToLeft;
-                }
+            if ui.input(|i| i.keyboard_layout_direction()) == Some(ReadingDirection::Rtl)
+                && layout_job.direction == epaint::text::TextDirection::Auto
+            {
+                layout_job.direction = epaint::text::TextDirection::RightToLeft;
             }
 
             for section in &mut layout_job.sections {
