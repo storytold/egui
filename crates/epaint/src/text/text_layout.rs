@@ -331,15 +331,11 @@ fn layout_shaped_run(
                 (Some(_), _) if raw.start < raw.end => raw,
                 // Descending transition: end at the previous larger start,
                 // or the run text at the first transition:
-                (Some(_), previous) => {
-                    raw.start..previous.unwrap_or(shaped.text.len())
-                }
+                (Some(_), previous) => raw.start..previous.unwrap_or(shaped.text.len()),
                 // The logically-last cluster of an ascending run runs to the
                 // end of the run text; a descending vector's last cluster
                 // ends at the previous larger start:
-                (None, Some(previous)) if raw.start < previous => {
-                    raw.start..previous
-                }
+                (None, Some(previous)) if raw.start < previous => raw.start..previous,
                 (None, _) => raw,
             }
         };

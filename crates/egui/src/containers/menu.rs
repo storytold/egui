@@ -904,9 +904,10 @@ mod tests {
 
     use super::SubMenuButton;
     use crate::{
-        Color32, Context, Event, Id, Key, Modifiers, PointerButton, Pos2, RawInput, Rect, UiBuilder,
+        Color32, Context, Event, Id, Key, Modifiers, PointerButton, Pos2, RawInput, Rect,
+        UiBuilder, Vec2,
         epaint::{ClippedShape, Shape},
-        pos2, vec2, Vec2,
+        pos2, vec2,
     };
 
     /// A menu in the middle of the screen with one submenu.

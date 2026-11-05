@@ -3,7 +3,9 @@
 use alloc::sync::Arc;
 
 use super::*;
-use crate::text::{FallbackAlign, Galley, Glyph, LayoutJob, PlacedRow, Row, RowVisuals, TextDirection};
+use crate::text::{
+    FallbackAlign, Galley, Glyph, LayoutJob, PlacedRow, Row, RowVisuals, TextDirection,
+};
 
 const BACKGROUND: Color32 = Color32::from_rgba_premultiplied(60, 20, 10, 128);
 const DECORATION: Color32 = Color32::from_rgba_premultiplied(20, 100, 40, 150);

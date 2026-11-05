@@ -529,7 +529,11 @@ mod tests {
                 "the label must resolve RTL"
             );
             assert_eq!(galley.rows.len(), 1);
-            assert_eq!(row_text_runs(&galley.rows[0]).len(), 2, "digits and arabic split");
+            assert_eq!(
+                row_text_runs(&galley.rows[0]).len(),
+                2,
+                "digits and arabic split"
+            );
             galley_slot = Some(galley);
             ui.label(arabic);
         });
@@ -567,10 +571,11 @@ mod tests {
                 let layout = galley.layout_from_cursor(cursor);
                 let position =
                     text_run_position(id, &galley, layout.row, layout.column, prefer_next_row);
-                let back = crate::text_selection::cursor_range::ccursor_from_accesskit_text_position(
-                    id, &galley, &position,
-                )
-                .expect("position maps back");
+                let back =
+                    crate::text_selection::cursor_range::ccursor_from_accesskit_text_position(
+                        id, &galley, &position,
+                    )
+                    .expect("position maps back");
                 assert_eq!(back.index, cursor.index, "{cursor:?} -> {position:?}");
                 // The caret stays put (a TextPosition cannot carry the
                 // `prefer_next_row` flag; the reverse mapping re-derives it):

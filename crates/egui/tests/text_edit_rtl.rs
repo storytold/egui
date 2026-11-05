@@ -567,8 +567,6 @@ fn singleline_overflow_scrolls_to_the_caret() {
     }
 }
 
-
-
 /// Run one ui pass with pointer events at the given time, discarding the
 /// texture deltas (these tests never render).
 fn run_at(ctx: &Context, time: f64, events: Vec<Event>, run_ui: impl FnMut(&mut Ui)) -> FullOutput {
@@ -999,8 +997,7 @@ fn digits_only_value_direction_follows_the_interface() {
         let mut text = String::from("3.14");
         let (field, ink, direction) = value_geometry(rtl, &mut text, None);
         assert_eq!(
-            direction,
-            expected,
+            direction, expected,
             "the digits-only value's base direction should follow the interface (rtl = {rtl})"
         );
         let start_hug = if rtl {

@@ -697,9 +697,12 @@ impl ViewportLabelSelectionState {
                 // flags when the stored geometry is inconclusive (e.g. the
                 // first frame, before the other endpoint's widget was laid
                 // out):
-                let secondary_first =
-                    reads_before(&selection.secondary, &selection.primary, galley.rows.first().is_some_and(|row| row.rtl_paragraph))
-                        .unwrap_or(self.has_reached_secondary);
+                let secondary_first = reads_before(
+                    &selection.secondary,
+                    &selection.primary,
+                    galley.rows.first().is_some_and(|row| row.rtl_paragraph),
+                )
+                .unwrap_or(self.has_reached_secondary);
                 let secondary = if secondary_first {
                     // The secondary reads before the primary.
                     // Select everything up to the cursor.
@@ -723,9 +726,12 @@ impl ViewportLabelSelectionState {
                 // flags when the stored geometry is inconclusive (e.g. the
                 // first frame, before the other endpoint's widget was laid
                 // out):
-                let primary_first =
-                    reads_before(&selection.primary, &selection.secondary, galley.rows.first().is_some_and(|row| row.rtl_paragraph))
-                        .unwrap_or(self.has_reached_primary);
+                let primary_first = reads_before(
+                    &selection.primary,
+                    &selection.secondary,
+                    galley.rows.first().is_some_and(|row| row.rtl_paragraph),
+                )
+                .unwrap_or(self.has_reached_primary);
                 let primary = if primary_first {
                     // The primary reads before the secondary.
                     // Select everything up to the cursor.

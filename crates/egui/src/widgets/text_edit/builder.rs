@@ -1250,10 +1250,7 @@ impl<'t> TextEdit<'t> {
                                 // the laid-out text's own language and resolved
                                 // base direction (the galley's rows carry it):
                                 language: galley.job.language.clone(),
-                                base_direction: galley
-                                    .rows
-                                    .first()
-                                    .map(|row| row.base_direction),
+                                base_direction: galley.rows.first().map(|row| row.base_direction),
                             });
                         });
                     }
