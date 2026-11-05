@@ -1558,7 +1558,7 @@ impl Ui {
     /// Returns where to put the widget.
     fn allocate_space_impl(&mut self, desired_size: Vec2) -> Rect {
         let item_spacing = self.spacing().item_spacing;
-        let frame_rect = self.placer.next_space(desired_size, item_spacing);
+        let frame_rect = self.placer.next_space(desired_size, item_spacing, self.reading_rtl());
         debug_assert!(!frame_rect.any_nan(), "frame_rect is nan in allocate_space");
         let widget_rect = self.placer.justify_and_align(frame_rect, desired_size);
 
@@ -1568,6 +1568,14 @@ impl Ui {
         register_rect(self, widget_rect);
 
         widget_rect
+    }
+
+    /// The resolved reading-direction term: `true` when content should be
+    /// placed from the right edge — the settled predicate
+    /// ([`Placer::prefer_right_to_left`]) that mirrors nested rows, wrap
+    /// columns, grid cells and the mirrored `horizontal*` constructors.
+    fn reading_rtl(&self) -> bool {
+        self.placer.prefer_right_to_left(self.is_rtl())
     }
 
     /// Allocate a specific part of the [`Ui`].
@@ -1659,7 +1667,7 @@ impl Ui {
             "Negative desired size: {desired_size:?}"
         );
         let item_spacing = self.spacing().item_spacing;
-        let frame_rect = self.placer.next_space(desired_size, item_spacing);
+        let frame_rect = self.placer.next_space(desired_size, item_spacing, self.reading_rtl());
         let child_rect = self.placer.justify_and_align(frame_rect, desired_size);
         self.scope_dyn(
             UiBuilder::new().max_rect(child_rect).layout(layout),
