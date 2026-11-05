@@ -346,9 +346,25 @@ impl Resize {
         // In those cases we don't want the clip_rect to be smaller, because
         // then we will clip the contents of the region even thought the result gets larger. This is simply ugly!
         // So we use the memory of last_content_size to make the clip rect large enough.
-        content_clip_rect.max = content_clip_rect
+        // The growth mirrors the anchor: a left-to-right container grows
+        // rightward from its left edge, a right-to-left one grows leftward from
+        // its fixed right edge (the reading-start anchor). The y growth is
+        // direction-neutral (the container is top-anchored).
+        if grip_on_left {
+            content_clip_rect.min.x = content_clip_rect
+                .min
+                .x
+                .min(inner_rect.max.x - state.last_content_size.x);
+        } else {
+            content_clip_rect.max.x = content_clip_rect
+                .max
+                .x
+                .max(inner_rect.min.x + state.last_content_size.x);
+        }
+        content_clip_rect.max.y = content_clip_rect
             .max
-            .max(inner_rect.min + state.last_content_size);
+            .y
+            .max(inner_rect.min.y + state.last_content_size.y);
 
         content_clip_rect = content_clip_rect.intersect(ui.clip_rect()); // Respect parent region
 
@@ -532,6 +548,10 @@ impl Resize {
 
         #[cfg(debug_assertions)]
         if ui.global_style().debug.show_resize {
+            // Build both outlines from the reading-start corner, mirroring the
+            // container itself: under a right-to-left interface the container
+            // grows leftward from its fixed right edge, so a rightward-growing
+            // outline would sit offset. `anchor` is that corner.
             ui.debug_painter().debug_rect(
                 anchored_rect(anchor, state.desired_size, grip_on_left),
                 Color32::GREEN,
