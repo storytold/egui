@@ -328,7 +328,12 @@ impl GlyphAtlas {
             ..
         } = self;
         let allocation = *outline_glyphs.entry(key).or_insert_with(|| {
-            Self::insert_bitmap(atlas, metrics, face.rasterize_glyph(metrics, glyph_id, bin))
+            Self::insert_bitmap(
+                atlas,
+                metrics,
+                face.color_transfer_function(),
+                face.rasterize_glyph(metrics, glyph_id, bin),
+            )
         });
 
         OutlineGlyph { allocation, x_px }
@@ -376,7 +381,12 @@ impl GlyphAtlas {
             ..
         } = self;
         let allocation = *outline_glyphs.entry(key).or_insert_with(|| {
-            Self::insert_bitmap(atlas, metrics, face.rasterize_cluster(metrics, glyphs, bin))
+            Self::insert_bitmap(
+                atlas,
+                metrics,
+                face.color_transfer_function(),
+                face.rasterize_cluster(metrics, glyphs, bin),
+            )
         });
 
         Some(OutlineGlyph { allocation, x_px })
@@ -386,11 +396,16 @@ impl GlyphAtlas {
     fn insert_bitmap(
         atlas: &mut TextureAtlas,
         metrics: &StyledMetrics,
+        face_transfer: Option<FontColorTransferFunction>,
         bitmap: Option<GlyphBitmap>,
     ) -> GlyphAllocation {
         bitmap
             .and_then(|bitmap| {
-                let transfer = Self::transfer_function(atlas, bitmap.is_color);
+                let transfer = if bitmap.is_color {
+                    FontColorTransferFunction::Off
+                } else {
+                    face_transfer.unwrap_or_else(|| Self::transfer_function(atlas, false))
+                };
                 let mut uv_rect =
                     Self::allocate_bitmap(atlas, &bitmap, metrics.pixels_per_point, transfer)?;
                 uv_rect.offset.y += metrics.y_offset_in_points;

@@ -44,6 +44,17 @@ pub struct FontTweak {
     /// `None` means use the global setting in [`TextOptions::subpixel_binning`](crate::text::TextOptions::subpixel_binning).
     pub subpixel_binning: Option<bool>,
 
+    /// How this font's coverage becomes alpha in the atlas, for text in a font that sits on a
+    /// different background from the rest (dark ink on paper in a dark interface).
+    ///
+    /// `None` means use the global setting in
+    /// [`TextOptions::color_transfer_function`](crate::text::TextOptions::color_transfer_function).
+    pub color_transfer_function: Option<crate::FontColorTransferFunction>,
+
+    /// Draw this font at the nearest whole pixel size, for steadier stems at fractional display
+    /// scales. Advances follow the rounded size; ascent, descent and row height don't.
+    pub snap_size_to_pixels: bool,
+
     /// Override the font's default variation coordinates for its axes ("wght", etc.).
     pub coords: VariationCoords,
 
@@ -76,6 +87,8 @@ impl Default for FontTweak {
             hinting: None,
             hinting_target: HintingTarget::default(),
             subpixel_binning: None,
+            color_transfer_function: None,
+            snap_size_to_pixels: false,
             coords: VariationCoords::default(),
             thin_space_width: 0.5,
             tab_size: 4.0,
