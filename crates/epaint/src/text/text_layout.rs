@@ -89,6 +89,16 @@ impl Paragraph {
             rtl: false,
         }
     }
+
+    /// The paragraph's resolved base reading direction (UAX #9 P2/P3),
+    /// as computed by [`BidiLevels`] when the paragraphs were split.
+    pub fn base_direction(&self) -> TextDirection {
+        if self.rtl {
+            TextDirection::RightToLeft
+        } else {
+            TextDirection::LeftToRight
+        }
+    }
 }
 
 /// Layout text into a [`Galley`].
@@ -916,6 +926,7 @@ fn rows_from_paragraphs(
                 pos: pos2(0.0, f32::NAN),
                 row: Arc::new(Row {
                     section_index_at_start: paragraph.section_index_at_start,
+                    base_direction: paragraph.base_direction(),
                     glyphs: vec![],
                     rtl_paragraph: paragraph.rtl,
                     visual_order: Vec::new(),
@@ -945,6 +956,7 @@ fn rows_from_paragraphs(
                     pos: pos2(0.0, f32::NAN),
                     row: Arc::new(Row {
                         section_index_at_start: paragraph.section_index_at_start,
+                        base_direction: paragraph.base_direction(),
                         glyphs: paragraph.glyphs,
                         rtl_paragraph: paragraph.rtl,
                         visual_order: Vec::new(),
@@ -1034,6 +1046,7 @@ fn row_of_glyphs(paragraph: &Paragraph, range: Range<usize>, row_start_x: f32) -
         pos: pos2(0.0, f32::NAN),
         row: Arc::new(Row {
             section_index_at_start,
+            base_direction: paragraph.base_direction(),
             glyphs,
             rtl_paragraph: paragraph.rtl,
             visual_order: Vec::new(),
@@ -1081,6 +1094,7 @@ fn line_break(
                     pos: pos2(0.0, f32::NAN),
                     row: Arc::new(Row {
                         section_index_at_start: paragraph.section_index_at_start,
+                        base_direction: paragraph.base_direction(),
                         glyphs: vec![],
                         rtl_paragraph: paragraph.rtl,
                         visual_order: Vec::new(),
@@ -1146,6 +1160,7 @@ fn line_break(
                 pos: pos2(paragraph_min_x, 0.0),
                 row: Arc::new(Row {
                     section_index_at_start,
+                    base_direction: paragraph.base_direction(),
                     glyphs,
                     rtl_paragraph: paragraph.rtl,
                     visual_order: Vec::new(),
@@ -2386,7 +2401,7 @@ mod tests {
     use core::iter;
 
     use super::{super::*, *};
-    use crate::{ColorImage, text::cursor::CCursor};
+    use crate::{ColorImage, text::cursor::CCursor, text::cursor::LayoutCursor};
     use emath::Rangef;
 
     /// The bundled fonts, installed exactly as `FontDefinitions::default` does
@@ -4269,6 +4284,231 @@ mod tests {
         }
     }
 
+    /// T5 — the cursor layer maps *logical* columns over the bidi-reordered
+    /// row: under a right-to-left base direction the text-start caret (logical
+    /// column 0) sits at the visual RIGHT edge and the text-end caret in the
+    /// visual left half, clicks map visual x back to the logical column
+    /// (clicking the visual middle of the Arabic word lands on the right
+    /// grapheme boundary), and every column round-trips through its caret x.
+    #[test]
+    fn bidi_cursor_hit_test_follows_logical_order() {
+        let mut fonts = test_fonts();
+        let galley = layout_with_direction(&mut fonts, "عربي 123", TextDirection::Auto);
+        assert_eq!(galley.rows.len(), 1);
+        let row = &galley.rows[0];
+        let n = row.row.char_count_excluding_newline().0;
+        assert_eq!(n, 8, "one cursor column per character");
+        let mid_y = (row.min_y() + row.max_y()) * 0.5;
+
+        // Text start (logical column 0) sits at the visual RIGHT edge, the text
+        // end (logical column n) in the visual left half:
+        let pos = |column: usize| {
+            galley
+                .pos_from_layout_cursor(&LayoutCursor {
+                    row: 0,
+                    column: CharIndex(column),
+                })
+                .min
+                .x
+        };
+        assert!(
+            pos(0) > galley.rect.center().x,
+            "the text-start caret must sit in the visual right half, got {} (rect {:?})",
+            pos(0),
+            galley.rect
+        );
+        assert!(
+            pos(n) < galley.rect.center().x,
+            "the text-end caret must sit in the visual left half, got {} (rect {:?})",
+            pos(n),
+            galley.rect
+        );
+
+        // Caret x decreases as the logical column advances through the
+        // right-to-left run (reading right to left). Inside an embedded
+        // left-to-right run the caret reads forward with that run — the
+        // per-glyph caret mapping follows each glyph's own direction — so the
+        // strict decrease is pinned for the Arabic prefix only:
+        for column in 0..4 {
+            assert!(
+                pos(column) > pos(column + 1),
+                "caret x must decrease from column {column} to {}: {} vs {}",
+                column + 1,
+                pos(column),
+                pos(column + 1)
+            );
+        }
+
+        // Clicking the visual middle of the Arabic word: the center of the `ب`
+        // glyph (logical column 2) snaps the caret onto `ب`'s reading-start
+        // (right) edge, between `ر` and `ب`:
+        let ba = &row.row.glyphs[2];
+        assert_eq!(ba.chr, 'ب');
+        let ba_center = ba.pos.x + ba.advance_width * 0.5 + row.pos.x;
+        let clicked = galley.cursor_from_pos(vec2(ba_center, mid_y));
+        assert_eq!(
+            clicked.index.0, 2,
+            "clicking the visual center of `ب` must put the caret at its reading-start edge"
+        );
+
+        // x round-trip: every caret position maps back to its own column:
+        for column in 0..=n {
+            let back = galley.cursor_from_pos(vec2(pos(column), mid_y));
+            assert_eq!(
+                back.index.0, column,
+                "clicking the caret x of column {column} must return that column"
+            );
+        }
+    }
+
+    /// One glyph slot per character: the continuation-glyph bookkeeping of RTL
+    /// runs (whose shaper output is in descending cluster order) used to
+    /// over-emit zero-advance duplicates for every character but the first,
+    /// breaking the `glyphs.len() == char_count` invariant that all cursor
+    /// code relies on.
+    #[test]
+    fn rtl_rows_have_one_glyph_slot_per_char() {
+        let mut fonts = test_fonts();
+        for text in ["تقرير", "عربي 123", "سلام"] {
+            for direction in [TextDirection::Auto, TextDirection::RightToLeft] {
+                let galley = layout_with_direction(&mut fonts, text, direction);
+                assert_eq!(galley.rows.len(), 1);
+                let count = galley.rows[0].row.glyphs.len();
+                assert_eq!(
+                    count,
+                    text.chars().count(),
+                    "glyph slots must equal the char count for {text:?} (direction {direction:?})"
+                );
+            }
+        }
+    }
+
+    /// The caret boundaries of a pure-RTL row mirror the reading direction: the
+    /// first column sits at the ink's right edge, the last at the ink's left
+    /// edge, and the LTR twin keeps the historic left-to-right geometry.
+    #[test]
+    fn rtl_caret_positions_mirror_the_reading_direction() {
+        let mut fonts = test_fonts();
+        let rtl = layout_with_direction(&mut fonts, "تقرير", TextDirection::Auto);
+        assert_eq!(rtl.rows.len(), 1);
+        let row = &rtl.rows[0];
+        let n = row.row.char_count_excluding_newline().0;
+        let ink_min = row
+            .glyphs
+            .iter()
+            .map(|glyph| glyph.pos.x)
+            .fold(f32::INFINITY, f32::min);
+        let ink_max = row
+            .glyphs
+            .iter()
+            .map(|glyph| glyph.max_x())
+            .fold(f32::NEG_INFINITY, f32::max);
+
+        let x = |column: usize| row.row.x_offset(CharIndex(column));
+        assert!(
+            (x(0) - ink_max).abs() < 1.0,
+            "column 0 (reading start) at the ink right edge: {} vs {ink_max}",
+            x(0)
+        );
+        assert!(
+            (x(n) - ink_min).abs() < 1.0,
+            "column {n} (reading end) at the ink left edge: {} vs {ink_min}",
+            x(n)
+        );
+
+        // The LTR twin keeps the historic geometry: column 0 at the ink's left
+        // edge, column n at the row width:
+        let ltr = layout_with_direction(&mut fonts, "abcde", TextDirection::LeftToRight);
+        let ltr_row = &ltr.rows[0];
+        let ltr_n = ltr_row.row.char_count_excluding_newline().0;
+        let ltr_x = |column: usize| ltr_row.row.x_offset(CharIndex(column));
+        assert!(
+            (ltr_x(0) - ltr_row.glyphs[0].pos.x).abs() < 1e-3,
+            "LTR column 0 keeps its glyph-left caret"
+        );
+        assert!(
+            (ltr_x(ltr_n) - ltr_row.size.x).abs() < 1e-3,
+            "LTR column {ltr_n} keeps the end-of-row caret"
+        );
+    }
+
+    /// A mixed row under an RTL base direction keeps exact caret geometry at
+    /// the reading edges (the per-glyph caret mapping follows each glyph's own
+    /// bidi level), and clicks inside the Arabic run land on the right
+    /// grapheme boundary. This pins the edges.
+    #[test]
+    fn mixed_rtl_base_caret_edges() {
+        let mut fonts = test_fonts();
+        let galley = layout_with_direction(&mut fonts, "عربي abc", TextDirection::Auto);
+        assert_eq!(galley.rows.len(), 1);
+        let row = &galley.rows[0];
+        let n = row.row.char_count_excluding_newline().0;
+        assert_eq!(n, 8);
+        let mid_y = (row.min_y() + row.max_y()) * 0.5;
+
+        let pos = |column: usize| {
+            galley
+                .pos_from_layout_cursor(&LayoutCursor {
+                    row: 0,
+                    column: CharIndex(column),
+                })
+                .min
+                .x
+        };
+        assert!(
+            pos(0) > galley.rect.center().x,
+            "reading start at the visual right"
+        );
+        assert!(
+            pos(n) < galley.rect.center().x,
+            "reading end at the visual left"
+        );
+
+        // Clicking the visual center of `ب` (logical column 2) puts the caret
+        // at `ب`'s reading-start (right) edge, between `ر` and `ب`:
+        let ba = &row.glyphs[2];
+        assert_eq!(ba.chr, 'ب');
+        let ba_center = ba.pos.x + ba.advance_width * 0.5 + row.pos.x;
+        let clicked = galley.cursor_from_pos(vec2(ba_center, mid_y));
+        assert_eq!(
+            clicked.index.0, 2,
+            "the click inside the Arabic run must land on the right grapheme boundary"
+        );
+    }
+
+    /// Arrow-key movement is visual: under a right-to-left base direction,
+    /// moving toward the visual left steps to the logically NEXT character and
+    /// vice versa ([`Galley::cursor_left_visually`] /
+    /// [`Galley::cursor_right_visually`], what the arrow keys call). The
+    /// logical one-character step ([`Galley::cursor_left_one_character`])
+    /// keeps grapheme order for the Mac Cmd bindings.
+    #[test]
+    fn rtl_arrow_keys_move_visually() {
+        let mut fonts = test_fonts();
+        let rtl = layout_with_direction(&mut fonts, "تقرير", TextDirection::RightToLeft);
+        assert_eq!(rtl.rows.len(), 1);
+        assert_eq!(rtl.end().index.0, 5);
+        assert_eq!(
+            rtl.cursor_left_visually(&rtl.begin()).index.0,
+            1,
+            "visual left from the reading start enters the text"
+        );
+        assert_eq!(
+            rtl.cursor_right_visually(&rtl.begin()).index.0,
+            0,
+            "the reading start is the visual right edge"
+        );
+        assert_eq!(
+            rtl.cursor_right_visually(&rtl.end()).index.0,
+            4,
+            "visual right from the reading end steps back into the text"
+        );
+
+        let ltr = layout_with_direction(&mut fonts, "abcde", TextDirection::LeftToRight);
+        assert_eq!(ltr.cursor_left_visually(&ltr.begin()).index.0, 0);
+        assert_eq!(ltr.cursor_right_visually(&ltr.end()).index.0, 5);
+    }
+
     /// A right-to-left shaper puts a mark before its base. The base must still be drawn
     /// and carry the char index, and the mark move with it when the row is reordered.
     #[test]
@@ -5028,6 +5268,7 @@ mod tests {
                 pos: pos2(0.0, 0.0),
                 row: Arc::new(Row {
                     section_index_at_start: 0,
+                    base_direction: TextDirection::LeftToRight,
                     glyphs,
                     rtl_paragraph: false,
                     visual_order: Vec::new(),
@@ -5076,6 +5317,7 @@ mod tests {
         // do not bracket it. Sanity-check the premise:
         let (ink_min, ink_max) = ink_span(&Row {
             section_index_at_start: 0,
+            base_direction: TextDirection::LeftToRight,
             glyphs: shaped_arabic(),
             rtl_paragraph: false,
             visual_order: Vec::new(),

@@ -3,7 +3,7 @@
 use alloc::sync::Arc;
 
 use super::*;
-use crate::text::{FallbackAlign, Galley, Glyph, LayoutJob, PlacedRow, Row, RowVisuals};
+use crate::text::{FallbackAlign, Galley, Glyph, LayoutJob, PlacedRow, Row, RowVisuals, TextDirection};
 
 const BACKGROUND: Color32 = Color32::from_rgba_premultiplied(60, 20, 10, 128);
 const DECORATION: Color32 = Color32::from_rgba_premultiplied(20, 100, 40, 150);
@@ -55,6 +55,7 @@ fn fixture(color: bool, invisible_color: bool) -> TextShape {
     let bounds = mesh.calc_bounds();
     let row = Row {
         section_index_at_start: 0,
+        base_direction: TextDirection::LeftToRight,
         // The invisible glyph shares its first vertex with the next visible glyph.
         // The trailing invisible glyph shares the decoration's first vertex.
         glyphs: vec![

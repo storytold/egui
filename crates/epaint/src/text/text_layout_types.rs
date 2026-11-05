@@ -930,7 +930,37 @@ pub struct Row {
     /// adjust `section_index` when concatting.
     pub(crate) section_index_at_start: u32,
 
+    /// The paragraph's resolved base reading direction (UAX #9 P2/P3).
+    ///
+    /// This is what lets cursor columns — which are *logical* character
+    /// offsets — be mapped onto the laid-out glyphs ([`Self::x_offset`] /
+    /// [`Self::char_at`]), together with the per-glyph bidi levels and
+    /// [`Self::visual_order`].
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub base_direction: TextDirection,
+
     /// One for each `char`.
+    ///
+    /// The glyphs are laid out left-to-right (their `pos.x` increases along
+    /// the slice) and listed in *logical* string order; the visual placement
+    /// per UAX #9 rule L2 lives in their `pos.x` (rewritten by
+    /// `reorder_row_visually`) and in [`Self::visual_order`], which lists the
+    /// slice indices from left to right. Consequence for cursors: a cursor
+    /// column is a *logical* character offset, and mapping it onto the
+    /// laid-out glyphs uses the row's base direction
+    /// ([`Self::base_direction`]) plus the per-glyph bidi embedding levels —
+    /// exact per glyph, so also inside runs that counteract the base (e.g.
+    /// embedded left-to-right words in a right-to-left row).
+    ///
+    /// Known gap for right-to-left text: the visual reordering happens
+    /// per newline-split segment, and wrapping afterwards slices the already
+    /// reordered glyph stream at geometric wrap points, so for *any* RTL text
+    /// that wraps — pure RTL included, not just mixed-direction text — the
+    /// rows do not follow UAX #9 L1/L2 per rendered line: words can end up on
+    /// the wrong rows (e.g. an RTL-base `أول ثاني ثالث` can wrap with the
+    /// logically last word `ثالث` on the first row). Correct per-line
+    /// reordering needs logical wrapping before the visual reorder. Single-row
+    /// text is unaffected.
     pub glyphs: Vec<Glyph>,
 
     /// Is the paragraph this row belongs to right-to-left?
@@ -1395,9 +1425,17 @@ impl core::ops::Deref for Galley {
 /// ## Physical positions
 impl Galley {
     /// Zero-width rect past the last character.
+    ///
+    /// The past-the-end caret sits at the reading end: the row's visual right
+    /// edge for a left-to-right row, its visual left edge for a right-to-left
+    /// one.
     fn end_pos(&self) -> Rect {
         if let Some(row) = self.rows.last() {
-            let x = row.rect().right();
+            let x = if row.base_direction == TextDirection::RightToLeft {
+                row.rect().left()
+            } else {
+                row.rect().right()
+            };
             Rect::from_min_max(pos2(x, row.min_y()), pos2(x, row.max_y()))
         } else {
             // Empty galley
@@ -1581,6 +1619,9 @@ impl Galley {
 /// ## Cursor positions
 impl Galley {
     /// The cursor one grapheme cluster back, in logical order.
+    ///
+    /// (Mac Cmd bindings call this for `moveBackward:`-style logical motion;
+    /// the arrow keys move visually through [`Galley::cursor_left_visually`].)
     pub fn cursor_left_one_character(&self, cursor: &CCursor) -> CCursor {
         if cursor.index == CharIndex::ZERO {
             Default::default()
@@ -1593,6 +1634,9 @@ impl Galley {
     }
 
     /// The cursor one grapheme cluster forward, in logical order.
+    ///
+    /// (Mac Cmd bindings call this for `moveForward:`-style logical motion;
+    /// the arrow keys move visually through [`Galley::cursor_right_visually`].)
     pub fn cursor_right_one_character(&self, cursor: &CCursor) -> CCursor {
         CCursor {
             index: grapheme::next_boundary(self.text(), cursor.index).min(self.end().index),
