@@ -913,4 +913,107 @@ mod tests {
         let cursors = presses(&galley, galley.begin(), |c| galley.cursor_right_visually(c));
         assert_eq!(indices(&cursors), [0, 2, 3]);
     }
+
+    /// Mixed-direction rows step the caret visually by each embedded run's
+    /// own bidi level, not by the row's base direction (the local-level caret
+    /// stepping pin, ported to this fork's visual arrows): inside a maximal
+    /// run of one embedding level the caret moves one visual position per
+    /// press in the run's own direction, and crossing into the
+    /// visually-adjacent run continues from the shared edge, so each
+    /// edge-to-edge walk visits every stop of the row once, in on-screen
+    /// order, whatever the mix of levels.
+    ///
+    /// Oracles, hand-derived from the UAX #9 levels the shaper stamps on the
+    /// logical stream (sequences verified against this model before landing):
+    ///
+    /// * `"عربي abc"`, RTL base — on screen "abc يبرع", logical columns
+    ///   `ع=0 ر=1 ب=2 ي=3 ␣=4 a=5 b=6 c=7`: rightward from the visual left
+    ///   end walks the embedded LTR run (5, 6, 7, 8) and then the Arabic run
+    ///   right-to-left (4..0); leftward from the visual right end the mirror.
+    ///   First-strong resolution (`Auto`) produces the same row.
+    /// * `"abc عربي"`, LTR base — the exact vice-versa.
+    /// * `"تقرير"`, explicit LTR base — an all-odd row in an even base (only
+    ///   explicit-direction jobs produce this): the walks enter the mirrored
+    ///   row from its visual edges instead of clamping.
+    /// * `"Hello"`, RTL base — an all-even row in an odd base, the
+    ///   Latin-value-under-RTL-chrome shape every `TextEdit` field hits
+    ///   (task 467): `ArrowLeft` retreats one character from the end.
+    /// * `"اب١٢"`, LTR base — nested levels (Arabic-Indic digits continue at
+    ///   the higher even level inside the RTL run inside the even base):
+    ///   visual right from the shared ا|ب boundary lands on ا's right edge.
+    #[test]
+    fn explicit_base_rows_step_visually_by_local_level() {
+        assert_arrow_sequences(
+            &layout("عربي abc", TextDirection::RightToLeft, f32::INFINITY),
+            &[5, 6, 7, 8, 4, 3, 2, 1, 0],
+            &[0, 1, 2, 3, 4, 5, 7, 6, 5],
+        );
+        assert_arrow_sequences(
+            &auto("عربي abc"),
+            &[5, 6, 7, 8, 4, 3, 2, 1, 0],
+            &[0, 1, 2, 3, 4, 5, 7, 6, 5],
+        );
+        assert_arrow_sequences(
+            &layout("abc عربي", TextDirection::LeftToRight, f32::INFINITY),
+            &[0, 1, 2, 3, 4, 7, 6, 5, 4],
+            &[4, 5, 6, 7, 8, 3, 2, 1, 0],
+        );
+        assert_arrow_sequences(
+            &layout("تقرير", TextDirection::LeftToRight, f32::INFINITY),
+            &[5, 4, 3, 2, 1, 0],
+            &[0, 1, 2, 3, 4, 5],
+        );
+        assert_arrow_sequences(
+            &layout("Hello", TextDirection::RightToLeft, f32::INFINITY),
+            &[0, 1, 2, 3, 4, 5],
+            &[5, 4, 3, 2, 1, 0],
+        );
+        assert_arrow_sequences(
+            &layout("اب١٢", TextDirection::LeftToRight, f32::INFINITY),
+            &[2, 3, 4, 1, 0],
+            &[0, 1, 2, 3, 2],
+        );
+
+        // The named one-step contracts of the local-level stepping, on the
+        // visual arrows:
+        let galley = layout("عربي abc", TextDirection::RightToLeft, f32::INFINITY);
+        assert_eq!(
+            galley.cursor_left_visually(&CCursor::new(8)).index.0,
+            7,
+            "visual left from the reading end enters the embedded LTR run"
+        );
+        assert_eq!(
+            galley.cursor_right_visually(&CCursor::new(0)).index.0,
+            0,
+            "visual right from the reading start clamps at the row edge"
+        );
+
+        // Task-467 shape: ArrowLeft retreats one character from the end.
+        let galley = layout("Hello", TextDirection::RightToLeft, f32::INFINITY);
+        assert_eq!(galley.cursor_left_visually(&CCursor::new(5)).index.0, 4);
+        assert_eq!(galley.cursor_right_visually(&CCursor::new(4)).index.0, 5);
+
+        // Nested levels: visual right from the shared ا|ب boundary lands on
+        // ا's right edge.
+        let galley = layout("اب١٢", TextDirection::LeftToRight, f32::INFINITY);
+        assert_eq!(
+            galley.cursor_right_visually(&CCursor::new(1)).index.0,
+            0,
+            "visual right from the shared ا|ب boundary lands on ا's right edge"
+        );
+
+        // An all-odd row under an explicit LTR base: the arrows enter the
+        // row from its visual edges instead of clamping.
+        let galley = layout("تقرير", TextDirection::LeftToRight, f32::INFINITY);
+        assert_eq!(
+            galley.cursor_left_visually(&CCursor::new(0)).index.0,
+            1,
+            "visual left from the reading start enters the all-odd row"
+        );
+        assert_eq!(
+            galley.cursor_right_visually(&CCursor::new(5)).index.0,
+            4,
+            "visual right from the reading end steps back into the all-odd row"
+        );
+    }
 }

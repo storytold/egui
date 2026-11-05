@@ -6686,6 +6686,33 @@ mod tests {
     /// cursor paths are smoked on every galley.)
     #[test]
     fn bidi_wrapped_hostile_input_does_not_panic() {
+        // Stepping the caret one visual position (the fork's arrow keys,
+        // Galley::cursor_left/right_visually) must stay panic-free and
+        // clamped to the galley's end on hostile input: walk both arrow
+        // directions from both reading edges, max_steps + 2 presses. Row and
+        // galley edges clamp; none may ever exceed the galley's end.
+        fn assert_arrow_walk_stays_clamped(galley: &Galley, text: &str, direction: TextDirection) {
+            let end = galley.end().index;
+            let max_steps = text.chars().count().saturating_add(2).min(64);
+            let mut left_from_begin = galley.begin();
+            let mut left_from_end = galley.end();
+            let mut right_from_begin = galley.begin();
+            let mut right_from_end = galley.end();
+            for _ in 0..max_steps {
+                left_from_begin = galley.cursor_left_visually(&left_from_begin);
+                left_from_end = galley.cursor_left_visually(&left_from_end);
+                right_from_begin = galley.cursor_right_visually(&right_from_begin);
+                right_from_end = galley.cursor_right_visually(&right_from_end);
+                assert!(
+                    left_from_begin.index <= end
+                        && left_from_end.index <= end
+                        && right_from_begin.index <= end
+                        && right_from_end.index <= end,
+                    "arrow stepping must stay within the galley for {text:?} (direction {direction:?})"
+                );
+            }
+        }
+
         let mut fonts = tofu_fonts(Arc::new(SimpleLineBreaker));
         let directions = [
             TextDirection::Auto,
@@ -6734,6 +6761,7 @@ mod tests {
                 let _ = galley.end();
                 let _ = galley.cursor_from_pos(vec2(0.0, 0.0));
                 let _ = galley.pos_from_cursor(galley.end());
+                assert_arrow_walk_stays_clamped(&galley, text, direction);
 
                 // The same shape wide enough to never elide: the totals
                 // assert above then bites on the untruncated rows.
@@ -6759,6 +6787,7 @@ mod tests {
                 );
                 let _ = galley.cursor_from_pos(vec2(0.0, 0.0));
                 let _ = galley.pos_from_cursor(galley.end());
+                assert_arrow_walk_stays_clamped(&galley, text, direction);
             }
         }
 
@@ -6804,6 +6833,7 @@ mod tests {
                 let _ = galley.end();
                 let _ = galley.cursor_from_pos(vec2(0.0, 0.0));
                 let _ = galley.pos_from_cursor(galley.end());
+                assert_arrow_walk_stays_clamped(&galley, &text, direction);
             }
         }
     }
