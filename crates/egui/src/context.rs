@@ -2821,7 +2821,38 @@ impl Context {
         self.global_style().right_to_left
     }
 
-    /// The language text in this UI should be laid out in, as a BCP 47 tag, e.g. `"ar-EG"`.
+    /// The combined locale entry point: sets the UI language *and* derives the
+    /// reading direction from it in one call.
+    ///
+    /// For `"ar-EG"` this switches the text language to Arabic (Egypt) *and*
+    /// mirrors the interface right-to-left (see [`Self::set_right_to_left`]);
+    /// for `"en-US"` both resolve left-to-right. The direction is derived from
+    /// the locale's primary language subtag; apps with their own direction
+    /// policy should keep using the two finer-grained setters,
+    /// [`Self::set_language`] and [`Self::set_right_to_left`].
+    ///
+    /// Like [`Self::set_right_to_left`], this records an explicit direction
+    /// preference (which persists between runs with the `persistence`
+    /// feature). Both underlying writes are guarded on the value, so per-frame
+    /// callers are safe.
+    ///
+    /// The language itself is stored in [`Options::language`] and is not
+    /// persisted between runs (see [`Self::set_language`]).
+    ///
+    /// Example:
+    /// ```
+    /// # let mut ctx = egui::Context::default();
+    /// ctx.set_locale("he-IL");
+    /// assert_eq!(ctx.language(), Some("he-IL".to_owned()));
+    /// assert!(ctx.is_rtl());
+    /// ```
+    pub fn set_locale(&self, locale: impl Into<String>) {
+        let locale = locale.into();
+        let rtl = crate::locale::locale_direction(&locale).is_rtl();
+        self.set_language(Some(locale));
+        self.set_right_to_left(rtl);
+    }
+
     /// The currently active [`Style`] used by all subsequent popups, menus, etc.
     pub fn global_style(&self) -> Arc<Style> {
         self.options(|opt| Arc::clone(opt.style()))
