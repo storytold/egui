@@ -30,7 +30,7 @@ fn run(ctx: &Context, input: RawInput, run_ui: impl FnMut(&mut Ui)) -> FullOutpu
 
 /// `(resolved job direction, (chr, x) of the painted overlay text's glyphs)` for text
 /// painted with `Painter::text` under the given interface direction.
-fn overlay_glyphs(rtl: bool, text: &str) -> (Option<TextDirection>, Vec<(char, f32)>) {
+fn overlay_glyphs(rtl: bool, text: &str) -> (TextDirection, Vec<(char, f32)>) {
     let ctx = Context::default();
     if rtl {
         ctx.set_right_to_left(true);
@@ -80,7 +80,7 @@ fn painter_text_follows_the_interface_direction() {
     let (direction, glyphs) = overlay_glyphs(true, "Docs: الوثائق");
     assert_eq!(
         direction,
-        Some(TextDirection::RightToLeft),
+        TextDirection::RightToLeft,
         "RTL: the overlay galley should carry an explicit right-to-left base"
     );
     let latin_x = glyph_x(&glyphs, 'D').expect("the Latin run should paint");
@@ -92,12 +92,14 @@ fn painter_text_follows_the_interface_direction() {
     );
 
     // LTR twin: the stamp is inert, first-strong's fallback stays left-to-right and
-    // the Latin run stays left of the Arabic run:
+    // the Latin run stays left of the Arabic run (the fork resolves the base
+    // direction per paragraph at layout time, so the job keeps its unstamped
+    // `Auto`):
     let (direction, glyphs) = overlay_glyphs(false, "Docs: الوثائق");
     assert_eq!(
         direction,
-        Some(TextDirection::LeftToRight),
-        "LTR: the overlay galley should resolve left-to-right"
+        TextDirection::Auto,
+        "LTR: the overlay galley should keep an unstamped (fallback left-to-right) base"
     );
     let latin_x = glyph_x(&glyphs, 'D').expect("the Latin run should paint");
     let arabic_x = glyph_x(&glyphs, 'ا').expect("the Arabic run should paint");
@@ -117,14 +119,14 @@ fn painter_text_direction_agnostic_runs_stay_unchanged() {
     let (rtl_direction, rtl_glyphs) = overlay_glyphs(true, "42px");
     assert_eq!(
         rtl_direction,
-        Some(TextDirection::RightToLeft),
+        TextDirection::RightToLeft,
         "RTL: the stamped job carries an explicit right-to-left base"
     );
     let (ltr_direction, ltr_glyphs) = overlay_glyphs(false, "42px");
     assert_eq!(
         ltr_direction,
-        Some(TextDirection::LeftToRight),
-        "LTR: first-strong resolves left-to-right"
+        TextDirection::Auto,
+        "LTR: first-strong's fallback resolves left-to-right (the unstamped job keeps `Auto`)"
     );
 
     // The single left-to-right run renders identically under either base:

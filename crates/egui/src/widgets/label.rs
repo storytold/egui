@@ -2,7 +2,10 @@ use alloc::sync::Arc;
 
 use crate::{
     Align, Direction, FontSelection, Galley, Pos2, Response, Role, Sense, Stroke, TextWrapMode, Ui,
-    Widget, WidgetInfo, WidgetText, epaint, pos2, text_selection::LabelSelectionState, vec2,
+    Widget, WidgetInfo, WidgetText, epaint, pos2,
+    text_selection::LabelSelectionState,
+    vec2,
+    widget_text::{DirectionStamp, stamped_direction},
 };
 
 /// Static text.
@@ -196,17 +199,18 @@ impl Label {
         }
         // Stamp the interface reading direction, like
         // [`WidgetText::into_galley_impl`] does for the galley path, so a
-        // Latin-first label still reads as a right-to-left row. Skipped when the
-        // user pinned an explicit halign or job direction: epaint anchors
+        // Latin-first label still reads as a right-to-left row (first-strong
+        // gated — [`crate::widget_text::DirectionStamp::Label`]). Skipped when
+        // the user pinned an explicit halign or job direction: epaint anchors
         // right-to-left rows at their reading start (an `Align::Min` row hangs
         // from the right), which would re-anchor an explicit halign, and an
         // explicit direction already decides.
         if layout_job.direction == epaint::text::TextDirection::Auto
             && self.halign.is_none()
-            && ui.is_rtl()
-            && epaint::text::TextDirection::infer(&layout_job.text).is_some()
+            && let Some(direction) =
+                stamped_direction(ui.style(), &layout_job.text, DirectionStamp::Label)
         {
-            layout_job.direction = epaint::text::TextDirection::RightToLeft;
+            layout_job.direction = direction;
         }
 
         let available_width = ui.available_width();

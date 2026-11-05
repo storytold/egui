@@ -12,7 +12,7 @@ use crate::{
     TextStyle, TextureOptions, Ui, Vec2, Widget, WidgetInfo,
     load::{Bytes, SizeHint, SizedTexture, TextureLoadResult, TexturePoll},
     pos2,
-    widget_text::ambient_direction,
+    widget_text::{DirectionStamp, stamped_direction},
 };
 
 /// A widget which displays an image.
@@ -733,9 +733,16 @@ pub fn paint_texture_load_result(
             // right-to-left AND first-strong has an opinion about the text; an
             // explicit job direction still wins. Under a left-to-right interface the
             // helper returns `None` and the job is untouched.
-            job.direction = job
-                .direction
-                .or_else(|| ambient_direction(ui.style(), alt_text.unwrap_or(job.text.as_str())));
+            // Only pin jobs that don't carry an explicit direction of their own.
+            if job.direction == epaint::text::TextDirection::Auto
+                && let Some(direction) = stamped_direction(
+                    ui.style(),
+                    alt_text.unwrap_or(job.text.as_str()),
+                    DirectionStamp::Label,
+                )
+            {
+                job.direction = direction;
+            }
             let galley = ui.painter().layout_job(job);
             ui.painter().galley(
                 rect.center() - Vec2::Y * galley.size().y * 0.5,

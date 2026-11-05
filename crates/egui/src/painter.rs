@@ -10,7 +10,7 @@ use crate::{
     Color32, Context, FontId,
     emath::{Align2, Pos2, Rangef, Rect, Vec2, pos2, vec2},
     layers::{LayerId, PaintList, ShapeIdx},
-    widget_text::ambient_direction,
+    widget_text::{DirectionStamp, stamped_direction},
 };
 
 /// Helper to paint shapes and text to a specific region on a specific layer.
@@ -550,9 +550,16 @@ impl Painter {
     /// An explicit per-job direction still wins.
     fn stamp_ambient_direction(&self, job: &mut LayoutJob) {
         job.language = self.ctx.language();
-        job.direction = job
-            .direction
-            .or_else(|| ambient_direction(&self.ctx.global_style(), job.text.as_str()));
+        // Only pin jobs that don't carry an explicit direction of their own.
+        if job.direction == epaint::text::TextDirection::Auto
+            && let Some(direction) = stamped_direction(
+                &self.ctx.global_style(),
+                job.text.as_str(),
+                DirectionStamp::Label,
+            )
+        {
+            job.direction = direction;
+        }
     }
 
     /// Paint text that has already been laid out in a [`Galley`].

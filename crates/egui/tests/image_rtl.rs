@@ -37,7 +37,7 @@ const MIXED_ALT_TEXT: &str = "Docs: الوثائق";
 /// glyph)` of the error galley painted for a failed image load.
 ///
 /// The error galley is the only painted text of the pass.
-fn error_galley_glyphs(rtl: bool) -> (Option<TextDirection>, f32, f32) {
+fn error_galley_glyphs(rtl: bool) -> (TextDirection, f32, f32) {
     let ctx = Context::default();
     if rtl {
         ctx.set_right_to_left(true);
@@ -88,7 +88,7 @@ fn image_error_alt_text_follows_the_interface_direction() {
     let (direction, latin_x, arabic_x) = error_galley_glyphs(true);
     assert_eq!(
         direction,
-        Some(TextDirection::RightToLeft),
+        TextDirection::RightToLeft,
         "RTL: the error galley should carry an explicit right-to-left base"
     );
     assert!(
@@ -98,13 +98,14 @@ fn image_error_alt_text_follows_the_interface_direction() {
     );
 
     // LTR twin: the stamp is inert, so first-strong's fallback resolution stays
-    // left-to-right and the Latin run stays left of the Arabic run (the galley's
-    // job carries the resolved direction after layout):
+    // left-to-right and the Latin run stays left of the Arabic run (the fork
+    // resolves the base direction per paragraph at layout time, so the job
+    // keeps its unstamped `Auto`):
     let (direction, latin_x, arabic_x) = error_galley_glyphs(false);
     assert_eq!(
         direction,
-        Some(TextDirection::LeftToRight),
-        "LTR: the error galley should resolve left-to-right"
+        TextDirection::Auto,
+        "LTR: the error galley should keep an unstamped (fallback left-to-right) base"
     );
     assert!(
         latin_x < arabic_x,
