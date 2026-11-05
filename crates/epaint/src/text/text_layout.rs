@@ -226,7 +226,9 @@ struct ShapingContext {
     font_metrics: StyledMetrics,
     is_first_glyph_in_section: bool,
 
-    /// Bidi embedding level of the run being emitted.
+    /// The UAX #9 embedding level of the bidi run being laid out (odd = RTL).
+    /// Stamped onto every glyph the context creates, so continuation glyphs
+    /// carry their cluster's level too.
     bidi_level: u8,
 }
 
@@ -4415,6 +4417,146 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Every glyph is stamped with its bidi run's UAX #9 embedding level, so a
+    /// row's visual glyph stream can be split back into directional runs at
+    /// level changes (consumers: the accessibility `TextRun` builder). LTR rows
+    /// stay all-zero (pure metadata — rendering is unaffected).
+    #[test]
+    fn bidi_levels_partition_rows_into_directional_runs() {
+        let mut fonts = test_fonts();
+        fn level_runs(galley: &Galley) -> Vec<(u8, String)> {
+            assert_eq!(galley.rows.len(), 1, "expected a single-row galley");
+            let mut runs: Vec<(u8, String)> = Vec::new();
+            for glyph in &galley.rows[0].row.glyphs {
+                match runs.last_mut() {
+                    Some((level, text)) if *level == glyph.bidi_level => {
+                        text.push(glyph.chr);
+                    }
+                    _ => runs.push((glyph.bidi_level, glyph.chr.to_string())),
+                }
+            }
+            runs
+        }
+
+        // LTR base with an embedded RTL run: 0 / 1 / 0. The fork stores glyphs
+        // in logical order, so the runs come out in logical order (the
+        // mission's visual-stream form reverses the RTL run):
+        assert_eq!(
+            level_runs(&layout_with_direction(
+                &mut fonts,
+                "Hello שלום world",
+                TextDirection::Auto
+            )),
+            vec![
+                (0, "Hello ".to_owned()),
+                (1, "שלום".to_owned()),
+                (0, " world".to_owned()),
+            ]
+        );
+        // Two runs suffice when the RTL text ends the row:
+        assert_eq!(
+            level_runs(&layout_with_direction(
+                &mut fonts,
+                "Hello שלום",
+                TextDirection::Auto
+            )),
+            vec![(0, "Hello ".to_owned()), (1, "שלום".to_owned())]
+        );
+
+        // RTL base with European numbers: the space between them resolves to
+        // the base level, so it belongs to the RTL run, and the digits sit at
+        // level 2 (even). Logical order: the Arabic run first, the digits after:
+        assert_eq!(
+            level_runs(&layout_with_direction(
+                &mut fonts,
+                "عربي 123",
+                TextDirection::Auto
+            )),
+            vec![(1, "عربي ".to_owned()), (2, "123".to_owned())]
+        );
+
+        // Pure RTL: every glyph at the odd base level:
+        for direction in [TextDirection::Auto, TextDirection::RightToLeft] {
+            for glyph in &layout_with_direction(&mut fonts, "تقرير", direction).rows[0]
+                .row
+                .glyphs
+            {
+                assert!(
+                    glyph.is_rtl(),
+                    "pure-RTL glyph {:?} must carry an odd level",
+                    glyph.chr
+                );
+            }
+        }
+
+        // Pure LTR: every glyph at level 0 (also with an explicit LTR pin):
+        for direction in [TextDirection::Auto, TextDirection::LeftToRight] {
+            for glyph in &layout_with_direction(&mut fonts, "Hello World 123", direction).rows[0]
+                .row
+                .glyphs
+            {
+                assert_eq!(
+                    glyph.bidi_level, 0,
+                    "pure-LTR glyph {:?} must carry level 0",
+                    glyph.chr
+                );
+            }
+        }
+    }
+
+    /// Continuation glyphs (zero-width stand-ins that keep
+    /// `glyphs.len() == char_count` for multi-char clusters) carry their
+    /// cluster's bidi level: they belong to the same directional run as the
+    /// glyphs before them. No bundled font shapes a multi-glyph cluster, so
+    /// this uses the synthetic shaper vector (see
+    /// `descending_run_first_emitted_cluster_keeps_its_continuation_glyphs`).
+    #[test]
+    fn continuation_glyphs_carry_their_cluster_bidi_level() {
+        let run_text = "ab\u{E000}";
+        let mut fonts = test_fonts();
+        let codepoints = [('b', 1), ('\u{E000}', 1), ('a', 0)];
+        let (glyph_buffer, face_key, face_metrics) = shape_synthetic_run(&mut fonts, &codepoints);
+
+        let family = fonts.family_key(&FontFamily::Proportional);
+        // An odd level stands in for any RTL run: the point is that every
+        // glyph of the run — continuations included — carries the run's level.
+        let mut ctx = ShapingContext {
+            family,
+            pixels_per_point: 1.0,
+            font_size: 14.0,
+            line_height: face_metrics.row_height,
+            extra_letter_spacing: 0.0,
+            section_index: 0,
+            font_metrics: face_metrics.clone(),
+            is_first_glyph_in_section: true,
+            bidi_level: 3,
+        };
+        let run = TextRun {
+            font_key: face_key,
+            byte_range: ByteRangeExt::full(run_text),
+            bidi_level: 3,
+            raster: None,
+        };
+        let mut paragraph = Paragraph::from_section_index(0);
+        layout_shaped_run(
+            &mut fonts,
+            &run,
+            run_text,
+            &glyph_buffer,
+            &face_metrics,
+            &mut ctx,
+            &mut paragraph,
+        );
+
+        assert_eq!(paragraph.glyphs.len(), run_text.chars().count());
+        for glyph in &paragraph.glyphs {
+            assert_eq!(glyph.bidi_level, 3, "glyph {:?}", glyph.chr);
+            assert!(glyph.is_rtl());
+        }
+        // The continuation glyph (the zero-advance one) is covered too:
+        assert!(paragraph.glyphs.iter().any(|g| g.advance_width == 0.0));
     }
 
     /// Shape `codepoints` — (char, cluster byte offset) pairs in output order —

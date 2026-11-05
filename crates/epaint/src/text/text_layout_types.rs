@@ -1059,11 +1059,17 @@ pub struct Glyph {
     /// Whether this glyph carries its own color, e.g. a color emoji.
     pub is_color: bool,
 
-    /// Resolved bidi embedding level of the character (UAX #9).
+    /// The resolved UAX #9 embedding level of the directional run this glyph
+    /// was laid out for (odd = right-to-left; the row's base direction is
+    /// [`Row::base_direction`]).
     ///
-    /// `0` for plain left-to-right text; odd levels are right-to-left.
-    /// Glyphs stay in logical order in [`Row::glyphs`]; this decides where
-    /// they are placed on the row and which side of them a cursor sits.
+    /// Pure left-to-right rows stamp level 0 on every glyph. The glyphs of a
+    /// row are in logical order (the visual placement lives in their `pos.x`
+    /// and [`Row::visual_order`]), so grouping the slice by `bidi_level`
+    /// recovers the directional runs in logical order (see e.g. the
+    /// accessibility `TextRun` builder). Serialized galleys from before this
+    /// field existed degrade to all-level-0, which is today's behavior.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub bidi_level: u8,
 
     /// Index into [`LayoutJob::sections`]. Decides color etc.
@@ -1077,7 +1083,24 @@ pub struct Glyph {
     pub first_vertex: u32,
 }
 
+/// Pin the glyph size: galleys are cached per layout, so a silently growing
+/// [`Glyph`] would bloat every galley in every cache. rustc packs the two
+/// one-byte fields (`is_color`, `bidi_level`) into existing padding, keeping
+/// the struct at 72 bytes. If this assert fires, your field made every stored
+/// glyph grow — re-check the layout before shipping.
+const _: () = assert!(
+    core::mem::size_of::<Glyph>() == 72,
+    "Glyph grew beyond 72 bytes: every cached galley holds one Glyph per char",
+);
+
 impl Glyph {
+    /// True if the glyph's directional run was laid out right-to-left (odd
+    /// UAX #9 embedding level).
+    #[inline]
+    pub fn is_rtl(&self) -> bool {
+        self.bidi_level % 2 == 1
+    }
+
     #[inline]
     pub fn size(&self) -> Vec2 {
         Vec2::new(self.advance_width, self.line_height)
@@ -1092,12 +1115,6 @@ impl Glyph {
     #[inline]
     pub fn logical_rect(&self) -> Rect {
         Rect::from_min_size(self.pos - vec2(0.0, self.font_ascent), self.size())
-    }
-
-    /// Is this glyph part of a right-to-left run?
-    #[inline]
-    pub fn is_rtl(&self) -> bool {
-        self.bidi_level % 2 == 1
     }
 }
 
