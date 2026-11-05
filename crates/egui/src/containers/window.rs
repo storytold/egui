@@ -1517,10 +1517,10 @@ fn title_ui(
     };
 
     if let Some(left_button) = left_button {
-        atoms.push_right(Atom::custom(left_button, button_allocation_size));
+        atoms.push_end(Atom::custom(left_button, button_allocation_size));
     }
 
-    atoms.push_right(Atom::grow());
+    atoms.push_end(Atom::grow());
 
     // The container below is forced LTR and mirrors only the top-level list, so the
     // internals of a multi-atom title must be reversed here to read right-to-left.
@@ -1537,12 +1537,12 @@ fn title_ui(
         first_text.shrink = true;
     }
 
-    atoms.extend_right(title);
+    atoms.extend_end(title);
 
-    atoms.push_right(Atom::grow());
+    atoms.push_end(Atom::grow());
 
     if let Some(right_button) = right_button {
-        atoms.push_right(Atom::custom(right_button, button_allocation_size));
+        atoms.push_end(Atom::custom(right_button, button_allocation_size));
     }
 
     let spacing = ui.spacing().item_spacing.x;
