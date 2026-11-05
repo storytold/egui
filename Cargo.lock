@@ -1502,9 +1502,11 @@ version = "0.37.0"
 dependencies = [
  "egui",
  "epaint",
+ "font-test-data",
  "fontique",
  "log",
  "poll-promise",
+ "read-fonts",
  "skrifa",
  "sys-locale",
  "unicode-script",
@@ -1848,10 +1850,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
-name = "font-types"
-version = "0.12.4"
+name = "font-test-data"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e64eb721ca85a34323425f4041adc5d82704d3782d5f8f03793bc012419dce23"
+checksum = "d7d5eef7b0018a69fbb83b4f1e723631176fcb91759942a0c4654b4b3a40f4af"
+dependencies = [
+ "font-types",
+]
+
+[[package]]
+name = "font-types"
+version = "0.12.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "835ae9d781464a79026cde387f9cbc650c9a4909d7cf7e658b127e3c35d2f35d"
 dependencies = [
  "bytemuck",
  "serde",
