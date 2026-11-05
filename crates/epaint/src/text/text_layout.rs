@@ -5712,4 +5712,116 @@ mod tests {
         assert_close(placed.pos.x, -30.0);
         assert_close(placed.row.size.x, 30.0);
     }
+
+    // -------------------------------------------------------------------------
+    // NG9 port: per-paragraph directional-run information (mission commit
+    // 6e8a57248 recorded `RecordedBidiRun` spans on the transient Paragraph so
+    // its visual-order emission model could wrap the logical stream and
+    // reorder each produced row). This fork never emits a visual-order glyph
+    // stream: glyphs are stored in logical order with a per-glyph
+    // `bidi_level`, wrapping already walks the logical stream, and the visual
+    // placement per UAX #9 L1/L2 is derived from those levels per row
+    // (`reset_whitespace_levels` + `reorder_row_visually`). The recording
+    // machinery is therefore superseded; these pins hold the fork's side of
+    // the same contract: the directional runs are exactly recoverable by
+    // grouping the row's glyphs on `bidi_level`, in logical order, for any
+    // wrap width (there is nothing to gate on a finite one).
+
+    /// The directional runs of a row's glyphs, recovered by grouping
+    /// consecutive glyphs on their `bidi_level`: (level, chars).
+    fn runs_by_level(row: &Row) -> Vec<(u8, String)> {
+        let mut runs: Vec<(u8, String)> = Vec::new();
+        for glyph in &row.glyphs {
+            match runs.last_mut() {
+                Some((level, text)) if *level == glyph.bidi_level => {
+                    text.push(glyph.chr);
+                }
+                _ => runs.push((glyph.bidi_level, glyph.chr.to_string())),
+            }
+        }
+        runs
+    }
+
+    /// C1 — the rename-ar oracle shape (T1) decomposes into its four
+    /// directional runs in logical order: the Arabic word plus the neutral
+    /// space and dot at the odd (right-to-left) base level, the Arabic-Indic
+    /// digits and the latin extension at even levels — one glyph slot per
+    /// char, bytes contiguous. The mission's recorded visual order
+    /// (`pdf.٢٠٢٦ تقرير`) is exactly this run list reversed, which the
+    /// per-row L2 reversal then produces.
+    #[test]
+    fn bidi_runs_are_recoverable_from_logical_glyph_levels() {
+        let mut fonts = tofu_fonts(Arc::new(SimpleLineBreaker));
+        let mut job = LayoutJob::simple(
+            "تقرير ٢٠٢٦.pdf".into(),
+            FontId::proportional(14.0),
+            Color32::WHITE,
+            10_000.0, // big enough to never overflow these shapes
+        );
+        job.direction = TextDirection::RightToLeft;
+        let galley = layout(&mut fonts, 1.0, job.into());
+
+        assert_eq!(galley.rows.len(), 1);
+        let row = &galley.rows[0].row;
+        assert_eq!(
+            row.glyphs.len(),
+            "تقرير ٢٠٢٦.pdf".chars().count(),
+            "one glyph slot per char"
+        );
+        let runs = runs_by_level(row);
+        assert_eq!(
+            runs,
+            vec![
+                (1, "تقرير ".to_owned()),
+                (2, "٢٠٢٦".to_owned()),
+                (1, ".".to_owned()),
+                (2, "pdf".to_owned()),
+            ],
+            "runs: {runs:?}"
+        );
+
+        // A mixed RTL-base segment: the level-2 latin island and the
+        // level-1 Arabic word, in logical order (the mission's recorded
+        // visual order was the reverse: island first, Arabic second):
+        let mut job = LayoutJob::simple(
+            "عربي aaa bbb".into(),
+            FontId::proportional(14.0),
+            Color32::WHITE,
+            10_000.0,
+        );
+        job.direction = TextDirection::RightToLeft;
+        let galley = layout(&mut fonts, 1.0, job.into());
+        let runs = runs_by_level(&galley.rows[0].row);
+        assert_eq!(
+            runs,
+            vec![(1, "عربي ".to_owned()), (2, "aaa bbb".to_owned())],
+            "runs: {runs:?}"
+        );
+
+        // Pure-LTR rows stamp level 0 on every glyph: one even-level run, no
+        // reordering (the row keeps the stored order — `visual_order` empty).
+        for text in ["Hello World 123", "Héllo wörld"] {
+            let mut job = LayoutJob::simple(
+                text.into(),
+                FontId::proportional(14.0),
+                Color32::WHITE,
+                10_000.0,
+            );
+            job.direction = TextDirection::LeftToRight;
+            let galley = layout(&mut fonts, 1.0, job.into());
+            let row = &galley.rows[0].row;
+            assert_eq!(
+                runs_by_level(row),
+                vec![(0, text.to_owned())],
+                "{text:?} must be a single even-level run"
+            );
+            // No reordering happened: the stored (logical) order is the
+            // visual order.
+            assert!(
+                row.visual_order().enumerate().all(|(position, index)| position == index),
+                "{text:?} must not be reordered"
+            );
+            assert!(row.glyphs.iter().all(|glyph| !glyph.is_rtl()));
+        }
+    }
 }
