@@ -105,23 +105,6 @@ impl CCursorRange {
 
     /// The two ends, the one on the left on screen first.
     ///
-    /// On one row that is the one further left; across rows, the one that comes first
-    /// in a left-to-right paragraph and last in a right-to-left one.
-    fn sorted_on_screen(&self, galley: &Galley) -> [CCursor; 2] {
-        let [min, max] = self.sorted_cursors();
-        let min_row = galley.layout_from_cursor(min).row;
-        let max_row = galley.layout_from_cursor(max).row;
-        let swap = if min_row == max_row {
-            galley.pos_from_cursor(max).min.x < galley.pos_from_cursor(min).min.x
-        } else {
-            galley
-                .rows
-                .get(galley.layout_from_cursor(self.primary).row)
-                .is_some_and(|row| row.rtl_paragraph)
-        };
-        if swap { [max, min] } else { [min, max] }
-    }
-
     pub fn slice_str<'s>(&self, text: &'s str) -> &'s str {
         let [min, max] = self.sorted_cursors();
         slice_char_range(text, min.index..max.index)
@@ -144,8 +127,39 @@ impl CCursorRange {
             }
 
             Key::ArrowLeft | Key::ArrowRight if modifiers.is_none() && !self.is_empty() => {
-                let [left, right] = self.sorted_on_screen(galley);
-                *self = Self::one(if key == Key::ArrowLeft { left } else { right });
+                // Collapse the selection onto the visual edge the arrow points at.
+                //
+                // The sorted cursors are in logical order, which matches visual
+                // order only in a left-to-right row: in a right-to-left row the
+                // logical minimum sits at the visual *right* edge, so the choice
+                // is made by caret geometry instead — the visually-earlier
+                // endpoint (upper row, then smaller x) for ArrowLeft, the
+                // visually-later one for ArrowRight, so the two edges agree with
+                // the single-cursor arrow motion. In a left-to-right galley the
+                // geometry reduces to logical order, keeping the old behavior.
+                // A tie (two logical positions sharing one visual edge, possible
+                // at the boundary of runs that counteract the base direction)
+                // falls back to logical order. Like single-cursor motion, this
+                // is approximate inside counteracting runs and across wrapped
+                // right-to-left rows (see `Row` in epaint); multi-row selections
+                // collapse by the caret's own row.
+                const VISUAL_ROW_EPSILON: f32 = 1.0;
+                let [min, max] = self.sorted_cursors();
+                let (min_rect, max_rect) =
+                    (galley.pos_from_cursor(min), galley.pos_from_cursor(max));
+                let min_is_visually_first = min_rect.top() < max_rect.top() - VISUAL_ROW_EPSILON
+                    || (min_rect.top() <= max_rect.top() + VISUAL_ROW_EPSILON
+                        && min_rect.left() <= max_rect.left());
+                let (visually_first, visually_last) = if min_is_visually_first {
+                    (min, max)
+                } else {
+                    (max, min)
+                };
+                *self = Self::one(if key == Key::ArrowLeft {
+                    visually_first
+                } else {
+                    visually_last
+                });
                 true
             }
 
