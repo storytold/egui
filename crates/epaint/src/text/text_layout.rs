@@ -981,8 +981,9 @@ fn rows_from_paragraphs(
                 .filter(|breaks| !fits || breaks.iter().any(|after| after.hard));
             if let Some(breaks) = breaks {
                 line_break(&paragraph, &breaks, job, &mut rows, elided);
-                let placed_row = rows.last_mut().unwrap();
-                placed_row.ends_with_newline = !is_last_paragraph;
+                if let Some(placed_row) = rows.last_mut() {
+                    placed_row.ends_with_newline = !is_last_paragraph;
+                }
             } else {
                 rows.push(PlacedRow {
                     pos: pos2(0.0, f32::NAN),
@@ -5823,5 +5824,308 @@ mod tests {
             );
             assert!(row.glyphs.iter().all(|glyph| !glyph.is_rtl()));
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // NG9 wrapped-row oracles (mission commit 6bece037c). The mission needed a
+    // dedicated logical-stream wrap path (`line_break_single_rtl_run`) because
+    // its emitted stream is visual; on this fork `line_break` already walks
+    // the logical glyph vector and the visual placement happens per row
+    // afterwards, so the mechanism is superseded — the oracles are ported
+    // (adapted to fork semantics) to pin the same end-state contract.
+    //
+    // All wrap-width measurements come from an LTR-pinned twin of the oracle
+    // job (same text, `round_output_to_gui = false`, infinite width): the
+    // twin is never reordered, so its stored order is its visual order and
+    // every measured quantity is a span or gap, never an absolute x. The
+    // synthetic tofu fonts serve every glyph with the same whole-pixel
+    // advance, so the twin's spans are bit-identical to the widths the wrap
+    // compares. Each intended row's width is its content INCLUDING its
+    // trailing break space; `W` is the maximum of those over all intended
+    // rows (the final row contributes its bare content) plus 0.5 px, with
+    // per-boundary asserts.
+    //
+    // Fork semantics: a row's `glyphs` stay in LOGICAL order and the visual
+    // placement lives in `pos.x` + `visual_order`, so all per-row visual
+    // assertions below read the glyphs through `Row::visual_order` (the
+    // mission's copies read the stored stream, which was visual there).
+
+    /// The visible glyphs of every row of a galley, in visual (left-to-right)
+    /// order, as `(chr, x, advance)`.
+    fn visible_glyphs_per_row(galley: &Galley) -> Vec<Vec<(char, f32, f32)>> {
+        galley
+            .rows
+            .iter()
+            .map(|placed| {
+                placed
+                    .row
+                    .visual_order()
+                    .filter(|&i| placed.row.glyphs[i].advance_width > 0.0)
+                    .map(|i| {
+                        let glyph = &placed.row.glyphs[i];
+                        (glyph.chr, glyph.pos.x, glyph.advance_width)
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// The visible non-whitespace glyphs of every row, in visual order.
+    fn visible_chars_per_row(galley: &Galley) -> Vec<Vec<char>> {
+        galley
+            .rows
+            .iter()
+            .map(|placed| {
+                placed
+                    .row
+                    .visual_order()
+                    .filter(|&i| {
+                        let glyph = &placed.row.glyphs[i];
+                        glyph.advance_width > 0.0 && !glyph.chr.is_whitespace()
+                    })
+                    .map(|i| placed.row.glyphs[i].chr)
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// The stored (logical) text of every row.
+    fn logical_text_per_row(galley: &Galley) -> Vec<String> {
+        galley
+            .rows
+            .iter()
+            .map(|placed| placed.row.text())
+            .collect()
+    }
+
+    /// The glyphs of `row` in visual order, filtered to advancing ones.
+    fn visual_glyphs(row: &Row) -> Vec<(char, f32, f32)> {
+        row.visual_order()
+            .filter(|&i| row.glyphs[i].advance_width > 0.0)
+            .map(|i| {
+                let glyph = &row.glyphs[i];
+                (glyph.chr, glyph.pos.x, glyph.advance_width)
+            })
+            .collect()
+    }
+
+    /// One row with no wrapping, from the synthetic tofu fonts at ppp 1.0
+    /// (every advance a whole number of physical pixels).
+    fn layout_unwrapped(text: &str, direction: TextDirection) -> Galley {
+        let mut fonts = tofu_fonts(Arc::new(SimpleLineBreaker));
+        let mut job = LayoutJob::simple(
+            text.to_owned(),
+            FontId::proportional(14.0),
+            Color32::WHITE,
+            f32::INFINITY,
+        );
+        job.direction = direction;
+        job.round_output_to_gui = false;
+        layout(&mut fonts, 1.0, job.into())
+    }
+
+    /// Lay out with a finite wrap width, from the synthetic tofu fonts.
+    fn layout_wrapped(text: &str, direction: TextDirection, wrap_width: f32) -> Galley {
+        let mut fonts = tofu_fonts(Arc::new(SimpleLineBreaker));
+        let mut job = LayoutJob::simple(
+            text.to_owned(),
+            FontId::proportional(14.0),
+            Color32::WHITE,
+            wrap_width,
+        );
+        job.direction = direction;
+        job.round_output_to_gui = false;
+        layout(&mut fonts, 1.0, job.into())
+    }
+
+    /// The whitespace-separated visible runs of a single-row stream: each
+    /// run's span (last `max_x` − first x) and the gaps between consecutive
+    /// runs (next run's first x − previous run's last `max_x`). A run boundary
+    /// is a gap in the stream (the filtered-out space's advance). Measured on
+    /// the visual order (which for the LTR twins used here is the stored one).
+    fn visible_runs(galley: &Galley) -> (Vec<f32>, Vec<f32>) {
+        assert_eq!(galley.rows.len(), 1, "expected a single-row galley");
+        let glyphs: Vec<(char, f32, f32)> = visual_glyphs(&galley.rows[0].row)
+            .into_iter()
+            .filter(|(chr, _, _)| !chr.is_whitespace())
+            .collect();
+        let mut spans = Vec::new();
+        let mut gaps = Vec::new();
+        let mut run_first = 0usize;
+        for i in 1..=glyphs.len() {
+            let boundary = i == glyphs.len()
+                || glyphs[i].1 - (glyphs[i - 1].1 + glyphs[i - 1].2) > 0.5;
+            if boundary {
+                spans.push(glyphs[i - 1].1 + glyphs[i - 1].2 - glyphs[run_first].1);
+                if i < glyphs.len() {
+                    gaps.push(glyphs[i].1 - (glyphs[i - 1].1 + glyphs[i - 1].2));
+                }
+                run_first = i;
+            }
+        }
+        (spans, gaps)
+    }
+
+    /// Assert two glyph vectors agree within half a pixel.
+    #[track_caller]
+    fn assert_glyphs_close(got: &[(char, f32, f32)], expected: &[(char, f32, f32)]) {
+        assert_eq!(got.len(), expected.len(), "glyph counts: {got:?} vs {expected:?}");
+        for (i, ((gc, gx, ga), (ec, ex, ea))) in core::iter::zip(got, expected).enumerate() {
+            assert_eq!(gc, ec, "glyph {i}: {got:?} vs {expected:?}");
+            assert!(
+                (gx - ex).abs() < 0.5 && (ga - ea).abs() < 0.5,
+                "glyph {i} ({gc}): got x={gx} a={ga}, expected x={ex} a={ea}"
+            );
+        }
+    }
+
+    /// Assert the visual x positions of a row's glyphs are non-decreasing.
+    #[track_caller]
+    fn assert_visual_x_nondecreasing(glyphs: &[(char, f32, f32)]) {
+        for pair in glyphs.windows(2) {
+            assert!(
+                pair[0].1 <= pair[1].1 + 0.5,
+                "visual x must be non-decreasing: {glyphs:?}"
+            );
+        }
+    }
+
+    /// A — a wrapped pure-RTL paragraph reads top-down: one word per row, in
+    /// logical order. (On the mission's tree the pre-change path sliced the
+    /// emitted visual stream from its visually-left, logically-last end and
+    /// produced the rows bottom-up; this fork's `line_break` walks the
+    /// logical stream, so the oracle pins the existing behavior.)
+    #[test]
+    fn wrapped_pure_rtl_reads_top_down() {
+        let text = "أول ثاني ثالث";
+
+        // Wrap width measured from the LTR twin (a single run emits the same
+        // stream in both bases): `أول ␣ ثاني ␣ ثالث`, so run 0 = أول,
+        // run 1 = ثاني, run 2 = ثالث.
+        let twin = layout_unwrapped(text, TextDirection::LeftToRight);
+        let (spans, gaps) = visible_runs(&twin);
+        assert_eq!(spans.len(), 3, "the twin's stream is three words: {spans:?}");
+        assert_eq!(gaps.len(), 2, "spans {spans:?} gaps {gaps:?}");
+        let (w_awwal, w_thani, w_thalith) = (spans[0], spans[1], spans[2]);
+        let s = gaps[0];
+        assert!(
+            (gaps[1] - s).abs() < 1e-3,
+            "the tofu space advance is uniform: {spans:?} {gaps:?}"
+        );
+        let wrap_width = (w_awwal + s).max(w_thani + s).max(w_thalith) + 0.5;
+        // Per-boundary asserts: each intended row's content + break space
+        // fits, the next word overflows, and the final row's bare content
+        // fits:
+        assert!(
+            w_awwal + s <= wrap_width && w_awwal + s + w_thani > wrap_width,
+            "spans {spans:?} gaps {gaps:?} W {wrap_width}"
+        );
+        assert!(
+            w_thani + s <= wrap_width && w_thani + s + w_thalith > wrap_width,
+            "spans {spans:?} gaps {gaps:?} W {wrap_width}"
+        );
+        assert!(w_thalith <= wrap_width, "W {wrap_width}");
+
+        for direction in [TextDirection::RightToLeft, TextDirection::Auto] {
+            let galley = layout_wrapped(text, direction, wrap_width);
+            assert_eq!(galley.rows.len(), 3, "one word per row");
+            let chars = visible_chars_per_row(&galley);
+            assert_eq!(chars[0], ['ل', 'و', 'أ'], "row 0 renders أول: {chars:?}");
+            assert_eq!(chars[1], ['ي', 'ن', 'ا', 'ث'], "row 1 renders ثاني: {chars:?}");
+            assert_eq!(chars[2], ['ث', 'ل', 'ا', 'ث'], "row 2 renders ثالث: {chars:?}");
+            // Rows are produced in logical (reading) order:
+            assert_eq!(
+                logical_text_per_row(&galley),
+                ["أول ", "ثاني ", "ثالث"],
+                "rows must follow the reading order (direction {direction:?})"
+            );
+            // Row invariant: visual x non-decreasing, and one glyph slot per
+            // char of the row's logical slice (the word plus its trailing
+            // break space):
+            for glyphs in visible_glyphs_per_row(&galley) {
+                assert_visual_x_nondecreasing(&glyphs);
+            }
+            let counts: Vec<usize> = galley
+                .rows
+                .iter()
+                .map(|placed| placed.row.glyphs.len())
+                .collect();
+            assert_eq!(counts, vec![4, 5, 4], "glyph slots per row: {counts:?}");
+        }
+
+        // Two words then one: W = w(أول) + s + w(ثاني) + s + 0.5.
+        let wrap_width2 = w_awwal + s + w_thani + s + 0.5;
+        assert!(w_awwal + s + w_thani + s <= wrap_width2);
+        assert!(w_awwal + s + w_thani + s + w_thalith > wrap_width2);
+        assert!(w_thalith <= wrap_width2);
+        let galley = layout_wrapped(text, TextDirection::RightToLeft, wrap_width2);
+        assert_eq!(galley.rows.len(), 2);
+        let chars = visible_chars_per_row(&galley);
+        // Row 0 reads `أول ثاني` right-to-left: أول at the visual RIGHT, so
+        // the visual order is ثاني's glyphs first:
+        assert_eq!(chars[0], ['ي', 'ن', 'ا', 'ث', 'ل', 'و', 'أ'], "{chars:?}");
+        assert_eq!(chars[1], ['ث', 'ل', 'ا', 'ث'], "{chars:?}");
+        assert_eq!(logical_text_per_row(&galley), ["أول ثاني ", "ثالث"]);
+        for glyphs in visible_glyphs_per_row(&galley) {
+            assert_visual_x_nondecreasing(&glyphs);
+        }
+    }
+
+    /// Single-row visual-layout pins for the wrapped-oracle strings, adapted
+    /// from the mission's byte-identity pins (captured there from the
+    /// pre-NG9 tree): the no-wrap path keeps the mirror layout — uniform
+    /// advance, glyphs at exact multiples of it in visual order. Measured
+    /// against the tofu advance rather than hard-coded.
+    #[test]
+    fn wrapped_oracle_strings_single_row_mirror_the_stream() {
+        let w = visible_glyphs_per_row(&layout_unwrapped("a", TextDirection::Auto))[0][0].2;
+
+        // An RTL-base paragraph (strong Arabic resolves Auto to RTL): the
+        // visual order is the logically-last word first, positions the
+        // exact multiples of the uniform advance:
+        let glyphs = visual_glyphs(&layout_unwrapped("أول ثاني ثالث", TextDirection::Auto).rows[0].row);
+        let expected: Vec<(char, f32, f32)> = [
+            ('ث', 0.0),
+            ('ل', 1.0),
+            ('ا', 2.0),
+            ('ث', 3.0),
+            (' ', 4.0),
+            ('ي', 5.0),
+            ('ن', 6.0),
+            ('ا', 7.0),
+            ('ث', 8.0),
+            (' ', 9.0),
+            ('ل', 10.0),
+            ('و', 11.0),
+            ('أ', 12.0),
+        ]
+        .into_iter()
+        .map(|(chr, k)| (chr, k * w, w))
+        .collect();
+        assert_glyphs_close(&glyphs, &expected);
+
+        // An RTL-pinned mixed paragraph: the latin island renders at the
+        // visual left, the Arabic word reversed at the visual right:
+        let glyphs = visual_glyphs(
+            &layout_unwrapped("عربي aaa bbb", TextDirection::RightToLeft).rows[0].row,
+        );
+        let expected: Vec<(char, f32, f32)> = [
+            ('a', 0.0),
+            ('a', 1.0),
+            ('a', 2.0),
+            (' ', 3.0),
+            ('b', 4.0),
+            ('b', 5.0),
+            ('b', 6.0),
+            (' ', 7.0),
+            ('ي', 8.0),
+            ('ب', 9.0),
+            ('ر', 10.0),
+            ('ع', 11.0),
+        ]
+        .into_iter()
+        .map(|(chr, k)| (chr, k * w, w))
+        .collect();
+        assert_glyphs_close(&glyphs, &expected);
     }
 }
