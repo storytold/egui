@@ -139,7 +139,7 @@ impl KeyResolver {
         let physical_key = egui::Key::from_name(code);
         // Modifier keys, and keys that type something egui has no key for, fall back to the
         // physical key.
-        let logical_key = self.resolve(key, code).or(physical_key);
+        let logical_key = self.logical_key(key, code, physical_key);
         if let Some(logical_key) = logical_key
             && !code.is_empty()
         {
@@ -155,12 +155,17 @@ impl KeyResolver {
     /// Resolve a `keyup`: the logical key and the physical key.
     pub fn key_up(&mut self, key: &str, code: &str) -> (Option<egui::Key>, Option<egui::Key>) {
         let physical_key = egui::Key::from_name(code);
-        let logical_key = self
-            .pressed
-            .remove(code)
-            .or_else(|| self.resolve(key, code))
-            .or(physical_key);
+        let remembered = self.pressed.remove(code);
+        let logical_key = remembered.or_else(|| self.logical_key(key, code, physical_key));
         (logical_key, physical_key)
+    }
+
+    /// Keep keypad Enter physical even when the logical key falls back to its position.
+    fn logical_key(&self, key: &str, code: &str, physical: Option<egui::Key>) -> Option<egui::Key> {
+        match self.resolve(key, code).or(physical) {
+            Some(egui::Key::NumpadEnter) => Some(egui::Key::Enter),
+            logical => logical,
+        }
     }
 
     /// Forget the held keys, when focus is lost and their `keyup` events go elsewhere.
@@ -181,6 +186,26 @@ impl KeyResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn main_and_keypad_enter_preserve_the_logical_key_and_physical_position() {
+        use egui::Key;
+        for (key, code, logical, physical) in [
+            ("Enter", "Enter", Key::Enter, Key::Enter),
+            ("Enter", "NumpadEnter", Key::Enter, Key::NumpadEnter),
+            ("Unidentified", "NumpadEnter", Key::Enter, Key::NumpadEnter),
+            ("NumpadEnter", "NumpadEnter", Key::Enter, Key::NumpadEnter),
+            ("F1", "NumpadEnter", Key::F1, Key::NumpadEnter),
+        ] {
+            let mut keys = KeyResolver::default();
+            let pair = (Some(logical), Some(physical));
+            assert_eq!(keys.key_up(key, code), pair, "unpaired release of {code}");
+            let down = keys.key_down(key, code, false);
+            assert_eq!((down.key, down.physical_key), pair);
+            assert_eq!(keys.key_up("Unidentified", code), pair, "remembered {key}");
+        }
+    }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]

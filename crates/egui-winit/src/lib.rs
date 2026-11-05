@@ -3210,7 +3210,7 @@ impl State {
         // emit events as if the corresponding keys from the Latin layout were pressed. In this case, clipboard shortcuts
         // are mapped to the physical keys that normally contain C, X, V, etc.
         // See also: https://github.com/emilk/egui/issues/3653
-        let translated = logical_key.or(physical_key);
+        let translated = logical_or_physical_key(logical_key, physical_key);
         if pressed {
             if self.try_clipboard_shortcut(event.physical_key, translated) {
                 return;
@@ -4078,6 +4078,45 @@ fn key_from_named_key(named_key: winit::keyboard::NamedKey) -> Option<egui::Key>
     })
 }
 
+/// Keep keypad Enter logical when the platform supplies only its physical position.
+fn logical_or_physical_key(
+    logical: Option<egui::Key>,
+    physical: Option<egui::Key>,
+) -> Option<egui::Key> {
+    match logical.or(physical) {
+        Some(egui::Key::NumpadEnter) => Some(egui::Key::Enter),
+        key => key,
+    }
+}
+
+#[test]
+fn enter_keys_keep_distinct_physical_positions() {
+    use winit::keyboard::{KeyCode, NamedKey};
+
+    assert_eq!(key_from_named_key(NamedKey::Enter), Some(egui::Key::Enter));
+    assert_eq!(key_from_key_code(KeyCode::Enter), Some(egui::Key::Enter));
+    assert_eq!(
+        key_from_key_code(KeyCode::NumpadEnter),
+        Some(egui::Key::NumpadEnter)
+    );
+    assert_eq!(
+        logical_or_physical_key(None, Some(egui::Key::NumpadEnter)),
+        Some(egui::Key::Enter)
+    );
+    assert_eq!(
+        logical_or_physical_key(Some(egui::Key::A), Some(egui::Key::NumpadEnter)),
+        Some(egui::Key::A)
+    );
+    assert_eq!(
+        logical_or_physical_key(None, Some(egui::Key::F1)),
+        Some(egui::Key::F1)
+    );
+    assert_eq!(
+        logical_or_physical_key(Some(egui::Key::NumpadEnter), Some(egui::Key::NumpadEnter)),
+        Some(egui::Key::Enter)
+    );
+}
+
 fn key_from_key_code(key: winit::keyboard::KeyCode) -> Option<egui::Key> {
     use egui::Key;
     use winit::keyboard::KeyCode;
@@ -4091,7 +4130,8 @@ fn key_from_key_code(key: winit::keyboard::KeyCode) -> Option<egui::Key> {
         KeyCode::Escape => Key::Escape,
         KeyCode::Tab => Key::Tab,
         KeyCode::Backspace => Key::Backspace,
-        KeyCode::Enter | KeyCode::NumpadEnter => Key::Enter,
+        KeyCode::Enter => Key::Enter,
+        KeyCode::NumpadEnter => Key::NumpadEnter,
 
         KeyCode::Insert => Key::Insert,
         KeyCode::Delete => Key::Delete,
