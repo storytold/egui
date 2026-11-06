@@ -3751,6 +3751,18 @@ impl Context {
         self.memory_mut(|mem| mem.areas_mut().set_sublayer(parent, child));
     }
 
+    /// Put the given layers above every other layer of the same [`Order`], bottom first.
+    ///
+    /// Applied at the end of the pass, after egui's own ordering, so [`Self::move_to_top`],
+    /// [`Self::set_sublayer`] and the raise-on-click of [`crate::Area`]s only reorder the layers
+    /// that are not in the list. Unlisted layers keep their relative order; ids that are not known
+    /// layers are ignored.
+    ///
+    /// Applies to the current viewport and to this pass only, so call it every pass.
+    pub fn set_layer_order(&self, layers: &[LayerId]) {
+        self.memory_mut(|mem| mem.areas_mut().set_layer_order(layers));
+    }
+
     /// Retrieve the [`LayerId`] of the top level windows.
     pub fn top_layer_id(&self) -> Option<LayerId> {
         self.memory(|mem| mem.areas().top_layer_id(Order::Middle))

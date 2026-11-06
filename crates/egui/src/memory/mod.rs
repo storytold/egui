@@ -1363,6 +1363,9 @@ pub struct Areas {
     ///
     /// The parent sublayer is moved directly above the child sublayers in the ordering.
     sublayers: ahash::HashMap<LayerId, HashSet<LayerId>>,
+
+    /// Layers ordered by the caller for this pass, bottom first. See [`Self::set_layer_order`].
+    layer_order: Vec<LayerId>,
 }
 
 impl Areas {
@@ -1509,6 +1512,20 @@ impl Areas {
         }
     }
 
+    /// Put the given layers above every other layer of the same [`Order`], bottom first.
+    ///
+    /// Applied at the end of the pass, after egui's own ordering (including
+    /// [`Self::move_to_top`] and [`Self::set_sublayer`]), so those only reorder the layers
+    /// that are not in the list. Layers keep their [`Order`]: a listed `Middle` layer stays
+    /// below every `Foreground` layer. Unlisted layers keep their relative order, and ids
+    /// that are not known layers are ignored.
+    ///
+    /// The list is consumed by the end of the pass. Call it every pass.
+    pub fn set_layer_order(&mut self, layers: &[LayerId]) {
+        self.layer_order.clear();
+        self.layer_order.extend_from_slice(layers);
+    }
+
     pub fn top_layer_id(&self, order: Order) -> Option<LayerId> {
         self.order
             .iter()
@@ -1543,6 +1560,7 @@ impl Areas {
             order,
             wants_to_be_on_top,
             sublayers,
+            layer_order,
             ..
         } = self;
 
@@ -1570,6 +1588,20 @@ impl Areas {
                 continue;
             };
             order.splice(parent_pos..=parent_pos, moved_layers); // replace the parent with itself and its children
+        }
+
+        // Move the listed layers to the end, in list order; the stable sort then puts them above
+        // the unlisted layers of their own `Order`.
+        let mut listed: Vec<LayerId> = Vec::new();
+        for layer in core::mem::take(layer_order) {
+            if order.contains(&layer) && !listed.contains(&layer) {
+                listed.push(layer);
+            }
+        }
+        if !listed.is_empty() {
+            order.retain(|layer| !listed.contains(layer));
+            order.extend(listed);
+            order.sort_by_key(|layer| layer.order);
         }
 
         self.order_map = self
@@ -1771,4 +1803,101 @@ fn requested_ime_resets_are_isolated_per_viewport_and_do_not_replace_stock_inter
     assert_eq!(memory.take_ime_reset(root), Some(newer));
     assert_eq!(memory.take_ime_reset(root), None);
     assert_eq!(memory.take_ime_reset(other), None);
+}
+
+#[cfg(test)]
+mod layer_order_tests {
+    use super::*;
+
+    fn layer(order: Order, name: &str) -> LayerId {
+        LayerId::new(order, Id::unique(name))
+    }
+
+    fn areas_with(layers: &[LayerId]) -> Areas {
+        let mut areas = Areas::default();
+        for &l in layers {
+            areas.set_state(l, area::AreaState::default());
+        }
+        areas.end_pass();
+        areas
+    }
+
+    #[test]
+    fn listed_layers_end_above_unlisted_in_list_order() {
+        let [a, b, c, u1, u2, bg] = [
+            layer(Order::Foreground, "a"),
+            layer(Order::Foreground, "b"),
+            layer(Order::Foreground, "c"),
+            layer(Order::Foreground, "u1"),
+            layer(Order::Foreground, "u2"),
+            layer(Order::Background, "bg"),
+        ];
+        let unknown = layer(Order::Foreground, "unknown");
+        let mut areas = areas_with(&[a, u1, b, u2, c, bg]);
+        areas.set_layer_order(&[c, unknown, b, a, b]);
+        areas.end_pass();
+        assert_eq!(areas.order(), [bg, u1, u2, c, b, a]);
+        assert_eq!(areas.compare_order(a, u2), core::cmp::Ordering::Greater);
+
+        // The list is consumed: the next pass keeps the order.
+        areas.end_pass();
+        assert_eq!(areas.order(), [bg, u1, u2, c, b, a]);
+    }
+
+    #[test]
+    fn listed_layer_stays_below_a_higher_order() {
+        let listed = layer(Order::Middle, "listed");
+        let unlisted_fg = layer(Order::Foreground, "fg");
+        let unlisted_mid = layer(Order::Middle, "mid");
+        let mut areas = areas_with(&[unlisted_fg, listed, unlisted_mid]);
+        areas.set_layer_order(&[listed]);
+        areas.end_pass();
+        assert_eq!(areas.order(), [unlisted_mid, listed, unlisted_fg]);
+    }
+
+    #[test]
+    fn raise_on_press_moves_only_unlisted_layers() {
+        let [a, b, u1, u2] = [
+            layer(Order::Foreground, "a"),
+            layer(Order::Foreground, "b"),
+            layer(Order::Foreground, "u1"),
+            layer(Order::Foreground, "u2"),
+        ];
+        let mut areas = areas_with(&[a, b, u1, u2]);
+        // A press raises the listed layer `a` and the unlisted `u1`.
+        areas.move_to_top(a);
+        areas.move_to_top(u1);
+        areas.set_layer_order(&[a, b]);
+        areas.end_pass();
+        assert_eq!(areas.order(), [u2, u1, a, b]);
+    }
+
+    #[test]
+    fn modal_gate_follows_the_list() {
+        let ctx = crate::Context::default();
+        let modal = layer(Order::Foreground, "modal");
+        let other = layer(Order::Foreground, "other");
+        let run = |list: &[LayerId]| {
+            let output = ctx.run_ui(Default::default(), |ui| {
+                ui.memory_mut(|mem| {
+                    mem.areas_mut().set_state(modal, area::AreaState::default());
+                    mem.areas_mut().set_state(other, area::AreaState::default());
+                    mem.set_modal_layer(modal);
+                });
+                ui.ctx().set_layer_order(list);
+            });
+            output.drop_without_applying_deltas();
+        };
+        let above = |layer| ctx.memory(|mem| mem.is_above_modal_layer(layer));
+
+        // Passes two apart: the modal layer and the order are read from the previous pass.
+        run(&[modal, other]);
+        run(&[modal, other]);
+        assert!(above(modal) && above(other), "a layer above the modal is allowed");
+
+        run(&[other, modal]);
+        run(&[other, modal]);
+        assert!(above(modal));
+        assert!(!above(other), "a layer the list puts below the modal is gated");
+    }
 }
