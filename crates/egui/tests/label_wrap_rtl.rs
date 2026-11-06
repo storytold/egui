@@ -144,12 +144,12 @@ fn rtl_wrap_continues_from_the_reading_start_with_the_first_row_indented() {
             continue;
         }
         // (i) later rows hug the reading-start edge: the ink sits at the
-        // galley origin, which the box wobble displaces from the container
-        // edge — a wrapped row keeps its break space in its box (its advance
-        // is part of the row's kept size), so `galley.rect.right()` pokes
-        // that far past the ink and displaces ALL rows equally (a wrapped
-        // row keeps its break space in its box; 9 px for the default font's
-        // space at 14 px). The ink never pokes PAST the edge:
+        // galley origin, which lands on the container edge — a wrapped row
+        // hangs its break space reading-forward inside its box instead of
+        // extending the box past the anchored edge, so `galley.rect.right()`
+        // measures the rows' common reading-start edge exactly and the ink
+        // is flush with the container edge. The band keeps a small
+        // tolerance for pixel rounding. The ink never pokes PAST the edge:
         let wobble = text.galley.rect.right();
         assert!(
             ink.right() <= max_rect.right() + 2.0,
