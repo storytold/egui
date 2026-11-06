@@ -3750,7 +3750,8 @@ impl Context {
     ///
     /// Applied at the end of the pass, after egui's own ordering, so [`Self::move_to_top`],
     /// [`Self::set_sublayer`] and the raise-on-click of [`crate::Area`]s only reorder the layers
-    /// that are not in the list. Unlisted layers keep their relative order; ids that are not known
+    /// that are not in the list. An unlisted sublayer of a listed layer moves with its parent and
+    /// sits directly above it. Unlisted layers keep their relative order; ids that are not known
     /// layers are ignored.
     ///
     /// Applies to the current viewport and to this pass only, so call it every pass.
