@@ -8,12 +8,13 @@
 //! shapes), so they survive engine tweaks and renderers.
 //!
 //! On this base the cursor indices are logical character indices: Home/End
-//! jump to the row's reading start/end (the visual right/left edge in a
-//! right-to-left row), while the arrow keys move the caret visually
-//! (`ArrowRight` x+, `ArrowLeft` x-) independent of the reading direction of the
-//! runs; the bidi *rendering* order is asserted separately from the painted
-//! glyphs (Arabic run right of the Latin run, mirrored brackets, digits
-//! reading left-to-right).
+//! jump to the row's reading start/end (the reading start anchors at the
+//! reading-side row edge; the reading end sits at the last-read run's exit
+//! edge — on a uniform row the opposite row edge), while the arrow keys move
+//! the caret visually (`ArrowRight` x+, `ArrowLeft` x-) independent of the
+//! reading direction of the runs; the bidi *rendering* order is asserted
+//! separately from the painted glyphs (Arabic run right of the Latin run,
+//! mirrored brackets, digits reading left-to-right).
 //!
 //! Assertions that need actual Arabic glyphs are gated on the RTL font fixture
 //! ([`egui_kittest::HarnessBuilder::with_rtl_font`], env var `KITTEST_RTL_FONT`)
@@ -290,8 +291,9 @@ fn test_text_edit_bidi_boundaries() {
     let painted_text = text.clone();
     let mut harness = focused_rtl_edit(&mut text);
 
-    // The end caret and Home at the two reading edges (Home is the visual
-    // right edge in a right-to-left row, End the visual left edge):
+    // Home anchors at the reading start's entry edge (the visual right edge
+    // of this row); the end caret sits at the reading end, after the
+    // last-read Latin glyph — inside the row, left of Home:
     let end_index = cursor_char_index(&harness);
     assert!(end_index > 0, "the focused cursor should start at the end");
     harness.key_press(egui::Key::Home);
