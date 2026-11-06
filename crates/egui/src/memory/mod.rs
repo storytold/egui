@@ -1516,7 +1516,8 @@ impl Areas {
     ///
     /// Applied at the end of the pass, after egui's own ordering (including
     /// [`Self::move_to_top`] and [`Self::set_sublayer`]), so those only reorder the layers
-    /// that are not in the list. Layers keep their [`Order`]: a listed `Middle` layer stays
+    /// that are not in the list. An unlisted sublayer of a listed layer moves with its parent
+    /// and sits directly above it. Layers keep their [`Order`]: a listed `Middle` layer stays
     /// below every `Foreground` layer. Unlisted layers keep their relative order, and ids
     /// that are not known layers are ignored.
     ///
@@ -1573,8 +1574,9 @@ impl Areas {
         // For all layers with sublayers, put the sublayers directly after the parent layer:
         // (it doesn't matter in which order we replace parents with their children)
         #[expect(clippy::iter_over_hash_type)]
-        for (parent, children) in core::mem::take(sublayers) {
-            let mut moved_layers = vec![parent]; // parent first…
+        let sublayers = core::mem::take(sublayers);
+        for (parent, children) in &sublayers {
+            let mut moved_layers = vec![*parent]; // parent first…
 
             order.retain(|l| {
                 if children.contains(l) {
@@ -1584,14 +1586,14 @@ impl Areas {
                     true
                 }
             });
-            let Some(parent_pos) = order.iter().position(|l| l == &parent) else {
+            let Some(parent_pos) = order.iter().position(|l| l == parent) else {
                 continue;
             };
             order.splice(parent_pos..=parent_pos, moved_layers); // replace the parent with itself and its children
         }
 
-        // Move the listed layers to the end, in list order; the stable sort then puts them above
-        // the unlisted layers of their own `Order`.
+        // Move the listed layers to the end, in list order, each followed by its unlisted
+        // sublayers; the stable sort then puts them above the unlisted layers of their own `Order`.
         let mut listed: Vec<LayerId> = Vec::new();
         for layer in core::mem::take(layer_order) {
             if order.contains(&layer) && !listed.contains(&layer) {
@@ -1599,8 +1601,19 @@ impl Areas {
             }
         }
         if !listed.is_empty() {
-            order.retain(|layer| !listed.contains(layer));
-            order.extend(listed);
+            let mut moved = Vec::new();
+            for &parent in &listed {
+                moved.push(parent);
+                if let Some(children) = sublayers.get(&parent) {
+                    moved.extend(
+                        order
+                            .iter()
+                            .filter(|l| children.contains(*l) && !listed.contains(*l)),
+                    );
+                }
+            }
+            order.retain(|layer| !moved.contains(layer));
+            order.extend(moved);
             order.sort_by_key(|layer| layer.order);
         }
 
@@ -1842,6 +1855,22 @@ mod layer_order_tests {
         // The list is consumed: the next pass keeps the order.
         areas.end_pass();
         assert_eq!(areas.order(), [bg, u1, u2, c, b, a]);
+    }
+
+    #[test]
+    fn unlisted_sublayer_follows_its_listed_parent() {
+        let [parent, child, other, u1, u2] = [
+            layer(Order::Foreground, "parent"),
+            layer(Order::Foreground, "child"),
+            layer(Order::Foreground, "other"),
+            layer(Order::Foreground, "u1"),
+            layer(Order::Foreground, "u2"),
+        ];
+        let mut areas = areas_with(&[u1, parent, u2, other, child]);
+        areas.set_sublayer(parent, child);
+        areas.set_layer_order(&[parent, other]);
+        areas.end_pass();
+        assert_eq!(areas.order(), [u1, u2, parent, child, other]);
     }
 
     #[test]
