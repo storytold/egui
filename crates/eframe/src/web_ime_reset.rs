@@ -37,6 +37,7 @@ impl ResetRequests {
         ));
         Some(request)
     }
+
     /// Completion is permitted only for the exact descriptor whose fresh source was configured.
     pub fn complete(
         &mut self,

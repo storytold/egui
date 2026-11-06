@@ -134,10 +134,7 @@ mod probe {
     fn seed_matches(image: &ColorImage) -> bool {
         image.size == [2, 2]
             && image.pixels.len() == SEED_RGBA.len()
-            && image
-                .pixels
-                .iter()
-                .zip(SEED_RGBA)
+            && core::iter::zip(image.pixels.iter(), SEED_RGBA)
                 .all(|(pixel, expected)| pixel.to_srgba_unmultiplied() == expected)
     }
 
