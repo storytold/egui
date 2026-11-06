@@ -2329,41 +2329,13 @@ impl State {
                     consumed: false,
                 }
             }
-            WindowEvent::HoveredFile(path) => {
-                self.egui_input.hovered_files.push(egui::HoveredFile {
-                    path: Some(path.clone()),
-                    ..Default::default()
-                });
-                EventResponse {
-                    repaint: true,
-                    consumed: false,
-                }
+            WindowEvent::HoveredFile(_)
+            | WindowEvent::HoveredFileMoved(_)
+            | WindowEvent::HoveredFileCancelled
+            | WindowEvent::DroppedFile(_) => {
+                let pixels_per_point = pixels_per_point(&self.egui_ctx, window);
+                on_file_drag_window_event(&mut self.egui_input, pixels_per_point, event)
             }
-            WindowEvent::HoveredFileCancelled => {
-                self.egui_input.hovered_files.clear();
-                EventResponse {
-                    repaint: true,
-                    consumed: false,
-                }
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            WindowEvent::DroppedFile(path) => {
-                self.egui_input.hovered_files.clear();
-                self.egui_input
-                    .dropped_files
-                    .push(std::sync::Arc::new(NativeFile::from(path.clone())));
-                EventResponse {
-                    repaint: true,
-                    consumed: false,
-                }
-            }
-            // Winit's web backend does not emit file-drop events. Browser file reads
-            // require a browser file handle, which this path-only event cannot provide.
-            #[cfg(target_arch = "wasm32")]
-            WindowEvent::DroppedFile(_) => EventResponse {
-                repaint: false,
-                consumed: false,
-            },
             WindowEvent::ModifiersChanged(state) => {
                 let state = state.state();
 
@@ -5106,6 +5078,7 @@ pub fn short_window_event_description(event: &winit::event::WindowEvent) -> &'st
         WindowEvent::Destroyed => "WindowEvent::Destroyed",
         WindowEvent::DroppedFile { .. } => "WindowEvent::DroppedFile",
         WindowEvent::HoveredFile { .. } => "WindowEvent::HoveredFile",
+        WindowEvent::HoveredFileMoved { .. } => "WindowEvent::HoveredFileMoved",
         WindowEvent::HoveredFileCancelled => "WindowEvent::HoveredFileCancelled",
         WindowEvent::Focused { .. } => "WindowEvent::Focused",
         WindowEvent::KeyboardInput { .. } => "WindowEvent::KeyboardInput",
@@ -5373,5 +5346,117 @@ mod tests {
         let enter_vk = windows_virtual_letter(Some(VK_RETURN));
         assert_eq!(letter_key(enter, enter_vk, false), Some(Key::Enter));
         assert_eq!(letter_key(enter, None, true), Some(Key::Enter));
+    }
+}
+
+/// Applies a native file drag or drop [`winit::event::WindowEvent`] to `egui_input`.
+///
+/// Handles `HoveredFile`, `HoveredFileMoved`, `HoveredFileCancelled`, and `DroppedFile`,
+/// converting physical drag coordinates to logical points using `pixels_per_point`.
+pub fn on_file_drag_window_event(
+    egui_input: &mut egui::RawInput,
+    pixels_per_point: f32,
+    event: &winit::event::WindowEvent,
+) -> EventResponse {
+    use winit::event::WindowEvent;
+    match event {
+        WindowEvent::HoveredFile(path) => {
+            egui_input.hovered_files.push(egui::HoveredFile {
+                path: Some(path.clone()),
+                ..Default::default()
+            });
+            EventResponse {
+                repaint: true,
+                consumed: false,
+            }
+        }
+        WindowEvent::HoveredFileMoved(pos_in_pixels) => {
+            egui_input.file_drag_pos = Some(egui::pos2(
+                pos_in_pixels.x as f32 / pixels_per_point,
+                pos_in_pixels.y as f32 / pixels_per_point,
+            ));
+            EventResponse {
+                repaint: true,
+                consumed: false,
+            }
+        }
+        WindowEvent::HoveredFileCancelled => {
+            egui_input.hovered_files.clear();
+            egui_input.file_drag_pos = None;
+            EventResponse {
+                repaint: true,
+                consumed: false,
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        WindowEvent::DroppedFile(path) => {
+            egui_input.hovered_files.clear();
+            egui_input
+                .dropped_files
+                .push(std::sync::Arc::new(NativeFile::from(path.clone())));
+            EventResponse {
+                repaint: true,
+                consumed: false,
+            }
+        }
+        // Winit's web backend does not emit file-drop events. Browser file reads
+        // require a browser file handle, which this path-only event cannot provide.
+        #[cfg(target_arch = "wasm32")]
+        WindowEvent::DroppedFile(_) => EventResponse {
+            repaint: false,
+            consumed: false,
+        },
+        _ => EventResponse {
+            repaint: false,
+            consumed: false,
+        },
+    }
+}
+
+#[cfg(test)]
+mod file_drag_event_tests {
+    use super::*;
+
+    #[test]
+    fn file_drag_window_events_scale_retain_and_clear() {
+        use winit::dpi::PhysicalPosition;
+        use winit::event::WindowEvent;
+
+        let mut raw = egui::RawInput::default();
+        let ppp = 2.0_f32;
+        let physical = PhysicalPosition::new(280.0, 170.0);
+
+        let resp =
+            on_file_drag_window_event(&mut raw, ppp, &WindowEvent::HoveredFileMoved(physical));
+        assert!(resp.repaint && !resp.consumed);
+        assert_eq!(raw.file_drag_pos, Some(egui::pos2(140.0, 85.0)));
+
+        let path = std::path::PathBuf::from("/tmp/example.png");
+        let resp =
+            on_file_drag_window_event(&mut raw, ppp, &WindowEvent::HoveredFile(path.clone()));
+        assert!(resp.repaint && !resp.consumed);
+        assert_eq!(raw.hovered_files.len(), 1);
+
+        let resp = on_file_drag_window_event(&mut raw, ppp, &WindowEvent::HoveredFileCancelled);
+        assert!(resp.repaint && !resp.consumed);
+        assert_eq!(raw.hovered_files.len(), 0);
+        assert_eq!(raw.file_drag_pos, None);
+
+        let _ = on_file_drag_window_event(&mut raw, ppp, &WindowEvent::HoveredFileMoved(physical));
+        let _ = on_file_drag_window_event(&mut raw, ppp, &WindowEvent::HoveredFile(path.clone()));
+        let frame_before_drop = raw.take();
+        assert_eq!(
+            frame_before_drop.file_drag_pos,
+            Some(egui::pos2(140.0, 85.0))
+        );
+        assert_eq!(raw.file_drag_pos, Some(egui::pos2(140.0, 85.0)));
+
+        let resp = on_file_drag_window_event(&mut raw, ppp, &WindowEvent::DroppedFile(path));
+        assert!(resp.repaint && !resp.consumed);
+        assert_eq!(raw.hovered_files.len(), 0);
+        assert_eq!(raw.dropped_files.len(), 1);
+        let drop_frame = raw.take();
+        assert_eq!(drop_frame.file_drag_pos, Some(egui::pos2(140.0, 85.0)));
+        assert_eq!(raw.file_drag_pos, None);
     }
 }
