@@ -4361,7 +4361,15 @@ impl Context {
         });
     }
 
-    pub(crate) fn register_accesskit_parent(&self, id: Id, parent_id: Id) {
+    /// Make the AccessKit node of `id` a child of the node of `parent_id`.
+    ///
+    /// Widgets created with [`Ui::interact`] and its variants do this for you. Call it for a
+    /// member that has no egui widget, with the member's id and the [`Ui::unique_id`] of the
+    /// parent, before the first [`Self::accesskit_node_builder`] call for `id` in the pass.
+    /// A node created before the call is already attached to the nearest ancestor with a node.
+    ///
+    /// Call it every pass the member is shown.
+    pub fn register_accesskit_parent(&self, id: Id, parent_id: Id) {
         self.write(|ctx| {
             if let Some(state) = ctx.viewport().this_pass.accesskit_state.as_mut() {
                 state.parent_map.insert(id, parent_id);

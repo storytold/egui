@@ -1893,11 +1893,17 @@ mod layer_order_tests {
         // Passes two apart: the modal layer and the order are read from the previous pass.
         run(&[modal, other]);
         run(&[modal, other]);
-        assert!(above(modal) && above(other), "a layer above the modal is allowed");
+        assert!(
+            above(modal) && above(other),
+            "a layer above the modal is allowed"
+        );
 
         run(&[other, modal]);
         run(&[other, modal]);
         assert!(above(modal));
-        assert!(!above(other), "a layer the list puts below the modal is gated");
+        assert!(
+            !above(other),
+            "a layer the list puts below the modal is gated"
+        );
     }
 }
