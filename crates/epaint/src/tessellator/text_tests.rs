@@ -58,6 +58,7 @@ fn fixture(color: bool, invisible_color: bool) -> TextShape {
     let row = Row {
         section_index_at_start: 0,
         base_direction: TextDirection::LeftToRight,
+        leading_advance: 0.0,
         // The invisible glyph shares its first vertex with the next visible glyph.
         // The trailing invisible glyph shares the decoration's first vertex.
         glyphs: vec![
