@@ -4394,7 +4394,7 @@ mod tests {
         }
     }
 
-    /// T5 — the cursor layer maps *logical* columns over the bidi-reordered
+    /// The cursor layer maps *logical* columns over the bidi-reordered
     /// row: under a right-to-left base direction the text-start caret (logical
     /// column 0) sits at the visual RIGHT edge and the text-end caret in the
     /// visual left half, clicks map visual x back to the logical column
@@ -4514,9 +4514,8 @@ mod tests {
             runs
         }
 
-        // LTR base with an embedded RTL run: 0 / 1 / 0. The fork stores glyphs
-        // in logical order, so the runs come out in logical order (the
-        // mission's visual-stream form reverses the RTL run):
+        // LTR base with an embedded RTL run: 0 / 1 / 0. Glyphs are stored
+        // in logical order, so the runs come out in logical order:
         assert_eq!(
             level_runs(&layout_with_direction(
                 &mut fonts,
@@ -6137,18 +6136,13 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // NG9 port: per-paragraph directional-run information (mission commit
-    // 6e8a57248 recorded `RecordedBidiRun` spans on the transient Paragraph so
-    // its visual-order emission model could wrap the logical stream and
-    // reorder each produced row). This fork never emits a visual-order glyph
-    // stream: glyphs are stored in logical order with a per-glyph
-    // `bidi_level`, wrapping already walks the logical stream, and the visual
-    // placement per UAX #9 L1/L2 is derived from those levels per row
-    // (`reset_whitespace_levels` + `reorder_row_visually`). The recording
-    // machinery is therefore superseded; these pins hold the fork's side of
-    // the same contract: the directional runs are exactly recoverable by
-    // grouping the row's glyphs on `bidi_level`, in logical order, for any
-    // wrap width (there is nothing to gate on a finite one).
+    // Per-paragraph directional-run pins: glyphs are stored in logical order
+    // with a per-glyph `bidi_level`, wrapping already walks the logical
+    // stream, and the visual placement per UAX #9 L1/L2 is derived from
+    // those levels per row (`reset_whitespace_levels` +
+    // `reorder_row_visually`). The directional runs are exactly recoverable
+    // by grouping the row's glyphs on `bidi_level`, in logical order, for
+    // any wrap width (there is nothing to gate on a finite one).
 
     /// The directional runs of a row's glyphs, recovered by grouping
     /// consecutive glyphs on their `bidi_level`: (level, chars).
@@ -6165,11 +6159,11 @@ mod tests {
         runs
     }
 
-    /// C1 — the rename-ar oracle shape (T1) decomposes into its four
-    /// directional runs in logical order: the Arabic word plus the neutral
+    /// A mixed-run shape decomposes into its four directional runs in
+    /// logical order: the Arabic word plus the neutral
     /// space and dot at the odd (right-to-left) base level, the Arabic-Indic
     /// digits and the latin extension at even levels — one glyph slot per
-    /// char, bytes contiguous. The mission's recorded visual order
+    /// char, bytes contiguous. The visual order
     /// (`pdf.٢٠٢٦ تقرير`) is exactly this run list reversed, which the
     /// per-row L2 reversal then produces.
     #[test]
@@ -6204,8 +6198,8 @@ mod tests {
         );
 
         // A mixed RTL-base segment: the level-2 latin island and the
-        // level-1 Arabic word, in logical order (the mission's recorded
-        // visual order was the reverse: island first, Arabic second):
+        // level-1 Arabic word, in logical order (the visual order is the
+        // reverse: island first, Arabic second):
         let mut job = LayoutJob::simple(
             "عربي aaa bbb".into(),
             FontId::proportional(14.0),
@@ -6251,14 +6245,11 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // NG9 wrapped-row oracles (mission commit 6bece037c). The mission needed a
-    // dedicated logical-stream wrap path (`line_break_single_rtl_run`) because
-    // its emitted stream is visual; on this fork `line_break` already walks
+    // Wrapped rows keep UAX #9 L1/L2 per rendered line: `line_break` walks
     // the logical glyph vector and the visual placement happens per row
-    // afterwards, so the mechanism is superseded — the oracles are ported
-    // (adapted to fork semantics) to pin the same end-state contract.
+    // afterwards; these tests pin that end-state contract.
     //
-    // All wrap-width measurements come from an LTR-pinned twin of the oracle
+    // All wrap-width measurements come from an LTR-pinned twin of the wrapped
     // job (same text, `round_output_to_gui = false`, infinite width): the
     // twin is never reordered, so its stored order is its visual order and
     // every measured quantity is a span or gap, never an absolute x. The
@@ -6269,10 +6260,9 @@ mod tests {
     // rows (the final row contributes its bare content) plus 0.5 px, with
     // per-boundary asserts.
     //
-    // Fork semantics: a row's `glyphs` stay in LOGICAL order and the visual
+    // A row's `glyphs` stay in LOGICAL order and the visual
     // placement lives in `pos.x` + `visual_order`, so all per-row visual
-    // assertions below read the glyphs through `Row::visual_order` (the
-    // mission's copies read the stored stream, which was visual there).
+    // assertions below read the glyphs through `Row::visual_order`.
 
     /// The visible glyphs of every row of a galley, in visual (left-to-right)
     /// order, as `(chr, x, advance)`.
@@ -6414,11 +6404,10 @@ mod tests {
         }
     }
 
-    /// A — a wrapped pure-RTL paragraph reads top-down: one word per row, in
-    /// logical order. (On the mission's tree the pre-change path sliced the
-    /// emitted visual stream from its visually-left, logically-last end and
-    /// produced the rows bottom-up; this fork's `line_break` walks the
-    /// logical stream, so the oracle pins the existing behavior.)
+    /// A wrapped pure-RTL paragraph reads top-down: one word per row, in
+    /// logical order. (`line_break` walks the logical stream, so this pins
+    /// the existing behavior; slicing an emitted visual stream from its
+    /// visually-left, logically-last end would produce the rows bottom-up.)
     #[test]
     fn wrapped_pure_rtl_reads_top_down() {
         let text = "أول ثاني ثالث";
@@ -6507,9 +6496,8 @@ mod tests {
         }
     }
 
-    /// Single-row visual-layout pins for the wrapped-oracle strings, adapted
-    /// from the mission's byte-identity pins (captured there from the
-    /// pre-NG9 tree): the no-wrap path keeps the mirror layout — uniform
+    /// Single-row visual-layout pins for the wrapped-reference strings: the
+    /// no-wrap path keeps the mirror layout — uniform
     /// advance, glyphs at exact multiples of it in visual order. Measured
     /// against the tofu advance rather than hard-coded.
     #[test]
@@ -6567,12 +6555,9 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // NG9 mixed-direction wrapped oracles (mission commit 2de73ffd3). The
-    // mission generalized its logical wrap path to every RTL-containing
-    // overflowing paragraph and reordered each produced row from recorded
-    // runs; this fork's per-glyph bidi levels already express that per row
-    // (see the C1/C2 notes above), so the mechanism is superseded and the
-    // oracles are ported adapted to pin the per-row UAX #9 L1/L2 contract.
+    // Mixed-direction wrapped rows keep UAX #9 L1/L2 per rendered line: the
+    // per-glyph bidi levels already express that per row, and the tests
+    // below pin the per-row UAX #9 L1/L2 contract.
 
     /// Build a two-section job: `section_texts` are concatenated in order;
     /// the byte ranges are derived from the concatenation.
@@ -6608,7 +6593,7 @@ mod tests {
         job
     }
 
-    /// B — a wrapped mixed-direction RTL-base paragraph keeps UAX #9 L1/L2
+    /// A wrapped mixed-direction RTL-base paragraph keeps UAX #9 L1/L2
     /// per rendered line: `عربي aaa bbb` (RTL-pinned) breaks at the logical
     /// space after `aaa`, and row 1 must render `aaa يبرع` (the latin island
     /// at the visual left, the Arabic word at its reading position), not a
@@ -6623,7 +6608,7 @@ mod tests {
         // run 0 = يبرع, run 1 = aaa, run 2 = bbb. The intended row 1 is
         // `عربي aaa ␣` (content + trailing break space); the `aaa`→`bbb`
         // gap's space sits at an even level in both bases (level 0 in the
-        // twin, level 2 inside the island in the oracle job), so its shaping
+        // twin, level 2 inside the island in the RTL-pinned job), so its shaping
         // — and hence its advance — is identical in both.
         let twin = layout_unwrapped(text, TextDirection::LeftToRight);
         let (spans, gaps) = visible_runs(&twin);
@@ -6666,10 +6651,9 @@ mod tests {
         // Trailing-space pin: the kept break-candidate space survives, is
         // L1-reset to the base level, and renders at the row's visual
         // reading end — the visually-LEFT slot of an RTL-base row (its
-        // `pos.x` is at or before every non-space glyph's x). On the fork
-        // the row's glyphs are stored logically, so the kept space is the
-        // row's LAST stored glyph (the mission's copy read the stored
-        // stream, which was visual there). At an under-sized wrap width
+        // `pos.x` is at or before every non-space glyph's x). The row's
+        // glyphs are stored logically, so the kept space is the row's LAST
+        // stored glyph. At an under-sized wrap width
         // this pin fails by design (the kept space becomes the row-internal
         // one).
         let row0 = &galley.rows[0].row;
@@ -6691,7 +6675,7 @@ mod tests {
         );
     }
 
-    /// C — an LTR-base paragraph with embedded RTL wraps correctly: the
+    /// An LTR-base paragraph with embedded RTL wraps correctly: the
     /// Hebrew word renders visually reordered (`םולש`) inside whichever row
     /// it lands, the surrounding latin words keep their logical order, and
     /// every row keeps the visual-x invariant. The wrap width anchors on the
@@ -6958,13 +6942,11 @@ mod tests {
             }
         }
 
-        // Known tofu residual (documented, not fixed here): the fork's tofu
+        // Known tofu residual (documented, not fixed here): the tofu
         // fonts serve the overflow character with a ZERO advance, so it fits
         // without popping and the L1-reset break space survives at the row's
-        // visual reading end (upstream-faithful for a zero-advance ellipsis;
-        // the mission's tofu gave the `…` a full advance and so never saw
-        // this). With a real font the space is popped with the replaced
-        // glyphs — pinned below.
+        // visual reading end. With a real font the space is popped with the
+        // replaced glyphs — pinned below.
         {
             let mut fonts = tofu_fonts(Arc::new(SimpleLineBreaker));
             let mut job = LayoutJob::simple(
@@ -7100,12 +7082,10 @@ mod tests {
 
     /// Hostile wrapped shapes must not panic and must keep one glyph slot per
     /// char whenever the wrap produced all the rows (no truncation): the
-    /// digit-mixed wrapped shape and an isolate-soup wrapped at width 100
-    /// (the shapes the mission's commit grew its T6 hostile sweep with), plus
-    /// two-section wrapped RTL jobs in both section orders through the same
-    /// wrap + elision gauntlet. (The fork never ported the mission's whole T6
-    /// sweep, so this is the commit's delta as a self-contained sweep; the
-    /// cursor paths are smoked on every galley.)
+    /// digit-mixed wrapped shape and an isolate-soup wrapped at width 100,
+    /// plus two-section wrapped RTL jobs in both section orders through the
+    /// same wrap + elision gauntlet; the cursor paths are smoked on every
+    /// galley.
     #[test]
     fn bidi_wrapped_hostile_input_does_not_panic() {
         // Stepping the caret one visual position (the fork's arrow keys,
