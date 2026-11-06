@@ -999,7 +999,7 @@ fn digits_only_value_direction_follows_the_interface() {
 }
 
 // ---------------------------------------------------------------------------
-// Wrapped right-to-left rows (NG9): rows are produced in logical order, so
+// Wrapped right-to-left rows: rows are produced in logical order, so
 // the cursor machinery and the selection highlight follow the reading order
 // across wrapped rows for the first time. The LTR twins pin the unchanged
 // geometry.
@@ -1188,10 +1188,7 @@ fn wrapped_rtl_cursor_round_trips_through_caret_positions() {
 /// column, and the row's reading start (visual right under RTL) when it
 /// covers the row's first column. The LTR twin mirrors.
 ///
-/// Known residual (documented, not fixed here; fork wording of the mission's
-/// residual - on this fork the row's glyphs are stored in logical order, so
-/// the L1-reset break space TRAILS the vector where the mission's stored
-/// visual order led with it): with `keep_trailing_whitespace`
+/// Known residual (documented, not fixed here): with `keep_trailing_whitespace`
 /// ([`TextEdit`]), a wrapped RTL-base row whose glyph vector trails with the
 /// L1-reset break space excludes that space from the halign ink span (the
 /// pre-existing trailing-whitespace semantic in `halign_and_justify_row`),
