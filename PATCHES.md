@@ -36,6 +36,7 @@ Drop a patch when an egui release in use contains it.
 | E23 | on `craft/interact-enabled` | egui | `Response::describe_for_accessibility` is public: the AccessKit description and name `on_hover_text` sets, for tooltips with other contents | upstreamable | craft-ui `TooltipExt` |
 | E24 | on `craft/interact-enabled` | egui | `ScrollArea::horizontal_scroll_bar_label` and `vertical_scroll_bar_label`: the AccessKit name of each scroll bar (WCAG 4.1.2); no name by default | upstreamable | craft-libs `List` accessibility check |
 | E25 | on `craft/interact-enabled` | egui | `Context::set_accesskit_focus`: reports a widget as the AccessKit focus for one pass without changing `memory.focused()` or event routing, for menus that light a row while no widget has egui focus | upstreamable | craft-libs `Menu` |
+| E29 | on `craft/framework-patches` | egui | `Context::register_accesskit_parent` is public: a member with no egui widget registers its id and its parent `Ui`'s unique id before it creates its node | upstreamable | craft-ui arena members |
 
 E1 changes from `e7e37ad`: the hooks are installed in `init_native`, so `create_native` uses them too, and a
 unit test covers installing and replacing them. E2+E3 is the same change as `b02321d` with a `surface_fit`
