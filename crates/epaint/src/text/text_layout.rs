@@ -4851,6 +4851,245 @@ mod tests {
         );
     }
 
+    /// The caret geometry of a mixed row maps every logical column by the
+    /// *local* bidi level of the glyph displaying it (not the row's base
+    /// parity): inside an embedded run the carets walk in that run's own
+    /// reading direction, the reading-exit caret sits at the last-read
+    /// glyph's exit edge — strictly inside the row, not at the opposite
+    /// visual edge — and every column round-trips through its caret x.
+    /// Relational pins only: absolute pixels are font-dependent.
+    #[test]
+    fn mixed_row_caret_geometry_maps_by_local_level() {
+        let mut fonts = test_fonts();
+
+        // RTL base with an embedded LTR run (first-strong inference):
+        let galley = layout_with_direction(&mut fonts, "ملف PDF", TextDirection::Auto);
+        assert_eq!(galley.rows.len(), 1);
+        let placed = &galley.rows[0];
+        let row = &placed.row;
+        assert!(
+            row.glyphs[0].is_rtl(),
+            "first-strong inference must resolve the row right-to-left"
+        );
+        let n = row.char_count_excluding_newline().0;
+        assert_eq!(n, 7, "one cursor column per character");
+        let mid_y = (placed.min_y() + placed.max_y()) * 0.5;
+        let x_of = |column: usize| {
+            galley
+                .pos_from_layout_cursor(&LayoutCursor {
+                    row: 0,
+                    column: CharIndex(column),
+                })
+                .min
+                .x
+        };
+        let ink_min = row
+            .glyphs
+            .iter()
+            .map(|g| g.pos.x)
+            .fold(f32::INFINITY, f32::min)
+            + placed.pos.x;
+        let ink_max = row
+            .glyphs
+            .iter()
+            .map(|g| g.max_x())
+            .fold(f32::NEG_INFINITY, f32::max)
+            + placed.pos.x;
+
+        // The embedded Latin run reads left-to-right: its caret columns walk
+        // with *increasing* x:
+        assert!(
+            x_of(4) < x_of(5) && x_of(5) < x_of(6) && x_of(6) < x_of(7),
+            "the Latin run's carets must walk left-to-right: {} {} {} {}",
+            x_of(4),
+            x_of(5),
+            x_of(6),
+            x_of(7)
+        );
+        // The Arabic run shares the base direction and walks right-to-left;
+        // its reading-start caret (column 0) sits at the ink's right edge:
+        assert!(
+            (x_of(0) - ink_max).abs() < 1.0,
+            "column 0 (the reading start) must sit at the ink right edge: {} vs {ink_max}",
+            x_of(0)
+        );
+        assert!(
+            x_of(0) > x_of(1) && x_of(1) > x_of(2) && x_of(2) > x_of(3),
+            "the Arabic run's carets must walk right-to-left: {} {} {} {}",
+            x_of(0),
+            x_of(1),
+            x_of(2),
+            x_of(3)
+        );
+        // The reading exit (column 7) sits at the last-read Latin glyph's
+        // right edge — strictly inside the row, not at the visual left edge:
+        assert!(
+            x_of(7) > ink_min && x_of(7) < x_of(3),
+            "the reading exit must anchor at the Latin run's right edge: {} \
+             (ink min {ink_min}, the Arabic run's exit {})",
+            x_of(7),
+            x_of(3)
+        );
+        // The run boundary teleports the caret from the Arabic run's exit
+        // edge to the Latin run's entry edge:
+        assert!(
+            x_of(3) > x_of(4),
+            "the boundary must drop the caret from the Arabic run's exit edge \
+             to the Latin run's entry edge: {} vs {}",
+            x_of(3),
+            x_of(4)
+        );
+        // Hit-test round-trips: every run-owned caret x maps back to its
+        // column. The reading exit's caret x is not run-owned on this row: it
+        // coincides with the run-boundary space's shaped box, so its click
+        // resolves by the space's parity rather than back to the exit.
+        for column in 0..n {
+            let back = galley.cursor_from_pos(vec2(x_of(column), mid_y));
+            assert_eq!(
+                back.index.0, column,
+                "clicking the caret x of column {column} must return that column"
+            );
+        }
+        // Direct hit-test pins (row-relative `char_at`): the ink's left edge
+        // lands on the first-read Latin glyph, the ink's right edge on the
+        // Arabic reading start, a click past the run-boundary space's center
+        // snaps to the space's reading-start edge (the space resolves to the
+        // paragraph level, so it reads with the Arabic run), and a click on
+        // the last-read Latin glyph resolves to the reading exit:
+        let char_at = |x: f32| row.char_at(x).0;
+        assert_eq!(
+            char_at(ink_min - placed.pos.x),
+            4,
+            "a click at the ink's left edge must land on the first-read Latin glyph (P)"
+        );
+        assert_eq!(
+            char_at(ink_max - placed.pos.x),
+            0,
+            "a click at the ink's right edge must land on the reading start (م)"
+        );
+        let space = &row.glyphs[3];
+        assert_eq!(space.chr, ' ', "logical slot 3 is the run-boundary space");
+        assert!(
+            space.is_rtl(),
+            "the run-boundary space must take the paragraph level"
+        );
+        let space_center = space.pos.x + space.advance_width * 0.5;
+        assert_eq!(
+            char_at(space_center),
+            3,
+            "a click past the space's center must snap to its reading-start edge"
+        );
+        let last_latin = &row.glyphs[6];
+        assert_eq!(last_latin.chr, 'F');
+        let last_latin_center = last_latin.pos.x + last_latin.advance_width * 0.5;
+        assert_eq!(
+            char_at(last_latin_center),
+            n,
+            "a click inside the last-read Latin glyph must land on the reading exit"
+        );
+
+        // The LTR twin: an embedded RTL run under a left-to-right base reads
+        // right-to-left — its carets DESCEND with the column — and the
+        // reading start (ع's entry) anchors at the ink's right edge while the
+        // reading exit anchors at the run's visual left edge:
+        let galley = layout_with_direction(&mut fonts, "abc عربي", TextDirection::LeftToRight);
+        assert_eq!(galley.rows.len(), 1);
+        let placed = &galley.rows[0];
+        let row = &placed.row;
+        let n = row.char_count_excluding_newline().0;
+        assert_eq!(n, 8);
+        let x_of = |column: usize| {
+            galley
+                .pos_from_layout_cursor(&LayoutCursor {
+                    row: 0,
+                    column: CharIndex(column),
+                })
+                .min
+                .x
+        };
+        let ink_max = row
+            .glyphs
+            .iter()
+            .map(|g| g.max_x())
+            .fold(f32::NEG_INFINITY, f32::max)
+            + placed.pos.x;
+        let run_left = row
+            .glyphs
+            .iter()
+            .filter(|g| g.is_rtl())
+            .map(|g| g.pos.x)
+            .fold(f32::INFINITY, f32::min)
+            + placed.pos.x;
+        assert!(
+            x_of(4) > x_of(5) && x_of(5) > x_of(6) && x_of(6) > x_of(7) && x_of(7) > x_of(8),
+            "the embedded RTL run's carets must walk right-to-left: {} {} {} {} {}",
+            x_of(4),
+            x_of(5),
+            x_of(6),
+            x_of(7),
+            x_of(8)
+        );
+        assert!(
+            (x_of(4) - ink_max).abs() < 1.0,
+            "column 4 (ع's entry) must sit at the ink right edge: {} vs {ink_max}",
+            x_of(4)
+        );
+        assert!(
+            (x_of(8) - run_left).abs() < 1.0,
+            "the reading exit must anchor at the RTL run's visual left edge: {} vs {run_left}",
+            x_of(8)
+        );
+        // The LTR prefix keeps today's ascending geometry:
+        assert!(
+            x_of(0) < x_of(1) && x_of(1) < x_of(2) && x_of(2) < x_of(3),
+            "the LTR prefix's carets must keep their left-to-right walk"
+        );
+
+        // All-even twin under an RTL base (every Latin/digit value in an RTL
+        // field): the content counteracts the base, so the mapping is by the
+        // glyphs' own level — column 0 paints at the ink's left edge and the
+        // reading exit at the ink's right edge:
+        let galley = layout_with_direction(&mut fonts, "Hello", TextDirection::RightToLeft);
+        assert_eq!(galley.rows.len(), 1);
+        let placed = &galley.rows[0];
+        let row = &placed.row;
+        let n = row.char_count_excluding_newline().0;
+        assert_eq!(n, 5);
+        let x_of = |column: usize| {
+            galley
+                .pos_from_layout_cursor(&LayoutCursor {
+                    row: 0,
+                    column: CharIndex(column),
+                })
+                .min
+                .x
+        };
+        let ink_min = row
+            .glyphs
+            .iter()
+            .map(|g| g.pos.x)
+            .fold(f32::INFINITY, f32::min)
+            + placed.pos.x;
+        let ink_max = row
+            .glyphs
+            .iter()
+            .map(|g| g.max_x())
+            .fold(f32::NEG_INFINITY, f32::max)
+            + placed.pos.x;
+        assert!(
+            (x_of(0) - ink_min).abs() < 1.0,
+            "column 0 must sit at the ink's left edge for all-even content in \
+             an RTL base: {} vs {ink_min}",
+            x_of(0)
+        );
+        assert!(
+            (x_of(n) - ink_max).abs() < 1.0,
+            "column {n} must sit at the ink's right edge for all-even content \
+             in an RTL base: {} vs {ink_max}",
+            x_of(n)
+        );
+    }
+
     /// Arrow-key movement is visual: under a right-to-left base direction,
     /// moving toward the visual left steps to the logically NEXT character and
     /// vice versa ([`Galley::cursor_left_visually`] /
@@ -7115,6 +7354,40 @@ mod tests {
             }
         }
 
+        // The caret geometry paths (`char_at` / `x_offset`) must stay
+        // panic-free and in-range on hostile input: probe `char_at` over a
+        // spread of x values (on-ink, row edges, far off-ink, and every glyph
+        // center) and `x_offset` over every column, on every row of the
+        // elided and untruncated layouts. NaN/inf clicks make every scan
+        // comparison false, so plain `f32` comparisons need no guard.
+        fn assert_caret_geometry_stays_in_range(
+            galley: &Galley,
+            text: &str,
+            direction: TextDirection,
+        ) {
+            for placed in &galley.rows {
+                let row = &placed.row;
+                let n = row.char_count_excluding_newline().0;
+                let mut probes = vec![0.0, row.size.x, -1000.0, 1000.0];
+                probes.extend(row.glyphs.iter().map(|g| g.pos.x + g.advance_width * 0.5));
+                for probe_x in probes {
+                    let column = row.char_at(probe_x).0;
+                    assert!(
+                        column <= n,
+                        "char_at must stay in range for {text:?} \
+                         (direction {direction:?}): {column} > {n}"
+                    );
+                }
+                for column in 0..=n {
+                    let x = row.x_offset(CharIndex(column));
+                    assert!(
+                        x.is_finite(),
+                        "x_offset must stay finite for {text:?} (direction {direction:?})"
+                    );
+                }
+            }
+        }
+
         let mut fonts = tofu_fonts(Arc::new(SimpleLineBreaker));
         let directions = [
             TextDirection::Auto,
@@ -7164,6 +7437,7 @@ mod tests {
                 let _ = galley.cursor_from_pos(vec2(0.0, 0.0));
                 let _ = galley.pos_from_cursor(galley.end());
                 assert_arrow_walk_stays_clamped(&galley, text, direction);
+                assert_caret_geometry_stays_in_range(&galley, text, direction);
 
                 // The same shape wide enough to never elide: the totals
                 // assert above then bites on the untruncated rows.
@@ -7190,6 +7464,7 @@ mod tests {
                 let _ = galley.cursor_from_pos(vec2(0.0, 0.0));
                 let _ = galley.pos_from_cursor(galley.end());
                 assert_arrow_walk_stays_clamped(&galley, text, direction);
+                assert_caret_geometry_stays_in_range(&galley, text, direction);
             }
         }
 
@@ -7236,6 +7511,7 @@ mod tests {
                 let _ = galley.cursor_from_pos(vec2(0.0, 0.0));
                 let _ = galley.pos_from_cursor(galley.end());
                 assert_arrow_walk_stays_clamped(&galley, &text, direction);
+                assert_caret_geometry_stays_in_range(&galley, &text, direction);
             }
         }
     }
