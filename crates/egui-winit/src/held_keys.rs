@@ -281,7 +281,7 @@ mod tests {
     fn release_helper_emits_nothing_for_an_unmatched_release() {
         let mut state = test_state(egui::Context::default());
         state.release_keyboard_input(physical(KeyCode::KeyQ));
-        assert!(state.egui_input().events.is_empty());
+        assert_eq!(state.egui_input().events, [] as [egui::Event; 0]);
     }
 
     #[test]
@@ -456,5 +456,52 @@ mod tests {
         assert_eq!(held.release(unknown), vec![Key::B]);
         assert_eq!(held.release(native), vec![Key::A]);
         assert!(held.release(unknown).is_empty());
+    }
+
+    #[test]
+    fn paste_shortcut_without_async_transfer_emits_release_unless_aliased() {
+        let mut state = test_state(egui::Context::default());
+        state.modifiers = Modifiers::COMMAND;
+        let a = physical(KeyCode::KeyA);
+        let v = physical(KeyCode::KeyV);
+        assert!(state.try_clipboard_shortcut(v, Some(Key::V)));
+        assert!(
+            !state
+                .egui_input()
+                .events
+                .iter()
+                .any(|e| matches!(e, Event::Key { .. })),
+            "paste shortcut must not emit a Key-down event"
+        );
+        state.egui_input.events.clear();
+        state.release_keyboard_input(v);
+        assert_eq!(
+            state.egui_input().events,
+            vec![state_key_event(
+                Key::V,
+                Some(Key::V),
+                false,
+                Modifiers::COMMAND
+            )]
+        );
+
+        // If another physical key alias already holds Key::V, releasing the paste key
+        // must not release Key::V until that alias also releases.
+        state.egui_input.events.clear();
+        let _ = state.held_keys.press(a, Some(Key::V), true);
+        assert!(state.try_clipboard_shortcut(v, Some(Key::V)));
+        state.egui_input.events.clear();
+        state.release_keyboard_input(v);
+        assert_eq!(state.egui_input().events, [] as [egui::Event; 0]);
+        state.release_keyboard_input(a);
+        assert_eq!(
+            state.egui_input().events,
+            vec![state_key_event(
+                Key::V,
+                Some(Key::A),
+                false,
+                Modifiers::COMMAND
+            )]
+        );
     }
 }
