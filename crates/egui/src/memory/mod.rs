@@ -1573,8 +1573,8 @@ impl Areas {
 
         // For all layers with sublayers, put the sublayers directly after the parent layer:
         // (it doesn't matter in which order we replace parents with their children)
-        #[expect(clippy::iter_over_hash_type)]
         let sublayers = core::mem::take(sublayers);
+        #[expect(clippy::iter_over_hash_type)]
         for (parent, children) in &sublayers {
             let mut moved_layers = vec![*parent]; // parent first…
 
