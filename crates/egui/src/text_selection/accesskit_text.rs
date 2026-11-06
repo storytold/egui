@@ -638,6 +638,80 @@ mod tests {
         assert_eq!(chunk1.len(), 15);
     }
 
+    /// A >255-char right-to-left row with a trailing newline: the 255-char
+    /// split stays in logical order (the glyphs are stored logically, so the
+    /// chunks read back the row's text verbatim) and the newline terminates
+    /// the row's logically-last run, whose value is the newline alone. The
+    /// LTR sibling (`long_ltr_rows_chunk_every_255_chars`) covers the
+    /// identity permutation; this walks the RTL path through the real
+    /// pipeline.
+    #[test]
+    fn long_rtl_row_chunks_read_logically_with_the_newline_last() {
+        let ctx = Context::default();
+        let text = format!("{}\nx", "عربي ".repeat(51)); // 255 chars, then '\n', then 'x'
+        let mut galley_slot = None;
+        let update = accesskit_update(&ctx, |ui| {
+            let galley = ui.painter().layout(
+                text.clone(),
+                FontId::proportional(14.0),
+                Color32::WHITE,
+                f32::INFINITY,
+            );
+            galley_slot = Some(galley);
+            ui.add(crate::Label::new(text.clone()).wrap_mode(crate::TextWrapMode::Extend));
+        });
+
+        let galley = galley_slot.expect("galley");
+        assert!(
+            galley.rows[0].rtl_paragraph,
+            "the text must resolve RTL (first-strong)"
+        );
+        assert_eq!(galley.rows.len(), 2, "the newline splits the text");
+        assert!(galley.rows[0].ends_with_newline);
+
+        // The 255-split: every run but the last is a full 255-column chunk,
+        // the runs tile the row's columns in order, and the final run carries
+        // the newline (one column past the glyphs):
+        let runs0 = row_text_runs(&galley.rows[0]);
+        let row_columns =
+            galley.rows[0].glyphs.len() + usize::from(galley.rows[0].ends_with_newline);
+        assert!(runs0.len() >= 2, "the row must split: {runs0:?}");
+        let mut expected_start = 0;
+        for (i, run) in runs0.iter().enumerate() {
+            assert_eq!(run.start, expected_start, "runs must tile in order");
+            if i + 1 < runs0.len() {
+                assert_eq!(run.len(), MAX_CHARS_PER_TEXT_RUN, "full chunk: {runs0:?}");
+            }
+            expected_start = run.end;
+        }
+        assert_eq!(expected_start, row_columns, "runs cover every column");
+        assert!(
+            runs0
+                .last()
+                .is_some_and(|run| run.end > galley.rows[0].glyphs.len()),
+            "the last run carries the newline"
+        );
+
+        // The row's tree runs, joined in order, read back the row's logical
+        // text with the newline last (row 0's runs, then row 1's single run):
+        let run_values: Vec<String> = runs(&update, &text)
+            .into_iter()
+            .map(|(value, _)| value)
+            .collect();
+        assert_eq!(run_values.len(), runs0.len() + 1, "row 1 adds one run");
+        assert_eq!(run_values.concat(), text);
+        assert_eq!(
+            run_values.get(runs0.len() - 1).map(String::as_str),
+            Some("\n"),
+            "the glyph-less run's value is the newline"
+        );
+        assert_eq!(
+            run_values.last().map(String::as_str),
+            Some("x"),
+            "row 1 holds the char after the newline"
+        );
+    }
+
     /// The UI language is stamped on the AccessKit root (inherited by every
     /// node); a text run whose content language is known and different
     /// re-stamps it on its run nodes, content in the UI's language inherits.
