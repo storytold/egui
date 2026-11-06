@@ -215,11 +215,22 @@ impl Label {
 
         let available_width = ui.available_width();
 
+        // The resolved base reading direction (Auto defers to first-strong
+        // inference), decided BEFORE layouting: the fast path below mutates
+        // the job.
+        let base_rtl = if layout_job.direction == epaint::text::TextDirection::Auto {
+            epaint::text::TextDirection::infer(&layout_job.text)
+                == Some(epaint::text::TextDirection::RightToLeft)
+        } else {
+            layout_job.direction == epaint::text::TextDirection::RightToLeft
+        };
+
         let wrap_mode = self.wrap_mode.unwrap_or_else(|| ui.wrap_mode());
         if wrap_mode == TextWrapMode::Wrap
-            && ui.layout().main_dir() == Direction::LeftToRight
             && ui.layout().main_wrap()
             && available_width.is_finite()
+            && ((ui.layout().main_dir() == Direction::LeftToRight && !base_rtl)
+                || (ui.layout().main_dir() == Direction::RightToLeft && base_rtl))
         {
             // On a wrapping horizontal layout we want text to start after the previous widget,
             // then continue on the line below! This will take some extra work:
@@ -234,15 +245,30 @@ impl Label {
             layout_job.wrap.max_width = available_width;
             layout_job.first_row_min_height = cursor.height();
             layout_job.halign = Align::Min;
-            // The text continues the row of the previous widget, from the left:
-            layout_job.halign_min_is_start = false;
+            // The text continues the row of the previous widget, from the
+            // reading start: under a left-to-right layout that is the left
+            // edge, with plain left-anchored rows; under a right-to-left
+            // layout the rows must opt into the per-row reading-start
+            // anchoring (see `LayoutJob::halign_min_is_start`), which hangs
+            // the first row's leading advance inside the reading-start edge.
+            layout_job.halign_min_is_start = base_rtl;
             layout_job.justify = false;
             if let Some(first_section) = layout_job.sections.first_mut() {
                 first_section.leading_space = first_row_indentation;
             }
             let galley = ui.fonts_mut(|fonts| fonts.layout_job(layout_job));
 
-            let pos = pos2(ui.max_rect().left(), ui.cursor().top()) - vec2(galley.rect.left(), 0.0);
+            let pos = if base_rtl {
+                // Right-to-left rows hang from the common reading-start edge
+                // of their boxes (the per-row anchoring above), with the
+                // first row's leading advance inside that edge, so anchoring
+                // the galley box's right edge at the container's
+                // reading-start edge insets the first row's ink by the
+                // indent.
+                pos2(ui.max_rect().right(), ui.cursor().top()) - vec2(galley.rect.right(), 0.0)
+            } else {
+                pos2(ui.max_rect().left(), ui.cursor().top()) - vec2(galley.rect.left(), 0.0)
+            };
             assert!(!galley.rows.is_empty(), "Galleys are never empty");
             // collect a response from many rows:
             let rect = galley.rows[0]

@@ -901,13 +901,27 @@ impl PlacedRow {
         Rect::from_min_size(self.pos, self.row.size)
     }
 
-    /// Same as [`Self::rect`] but excluding the `LayoutSection::leading_space`.
+    /// Same as [`Self::rect`] but excluding the `LayoutSection::leading_space`
+    /// ink gap.
+    ///
+    /// Direction-aware. A left-to-right row reads from the left: the trim
+    /// starts at the first glyph (the visually-leftmost one), so the leading
+    /// advance is excluded from the left edge. A right-to-left row reads
+    /// from the right: its leading advance occupies the box's right edge and
+    /// stays part of the rect (it is the reading-start indent the hit rect
+    /// gives back), so the trim only drops the empty space left of the
+    /// visually-leftmost glyph (the logically-last one).
     pub fn rect_without_leading_space(&self) -> Rect {
-        let x = self.pos.x + self.glyphs.first().map_or(0.0, |g| g.pos.x);
         let right = self.pos.x + self.size.x;
+        let leftmost = if self.row.base_direction == TextDirection::RightToLeft {
+            self.glyphs.last()
+        } else {
+            self.glyphs.first()
+        };
+        let x = self.pos.x + leftmost.map_or(0.0, |g| g.pos.x);
         Rect::from_min_max(
             Pos2::new(x, self.pos.y),
-            Pos2::new(right, self.pos.y + self.size.y),
+            Pos2::new(right, self.pos.y + self.row.size.y),
         )
     }
 }
