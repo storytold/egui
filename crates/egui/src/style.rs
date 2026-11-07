@@ -3178,6 +3178,7 @@ pub fn font_tweak_ui(ui: &mut Ui, tweak: &mut FontTweak, axes: &[FontVariationAx
                 thin_space_width,
                 tab_size,
                 subpixel_binning,
+                color_transfer_function: _,
                 fallback_align,
             } = tweak;
 
