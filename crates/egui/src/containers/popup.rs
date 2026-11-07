@@ -189,6 +189,17 @@ pub struct Popup<'a> {
     accessibility_label: Option<String>,
 }
 
+/// A menu's items, one under the other, filling its width and starting at its start edge:
+/// the right one with [`crate::Style::right_to_left`].
+pub(crate) fn menu_layout(right_to_left: bool) -> Layout {
+    let align = if right_to_left {
+        Align::Max
+    } else {
+        Align::Min
+    };
+    Layout::top_down_justified(align)
+}
+
 impl<'a> Popup<'a> {
     /// Create a new popup
     pub fn new(id: Id, ctx: Context, anchor: impl Into<PopupAnchor>, layer_id: LayerId) -> Self {
@@ -246,17 +257,20 @@ impl<'a> Popup<'a> {
     }
 
     /// Show a popup when the widget was clicked.
-    /// Sets the layout to `Layout::top_down_justified(Align::Min)`.
+    /// Sets the layout to `Layout::top_down_justified(Align::Min)`,
+    /// or `Align::Max` with [`crate::Style::right_to_left`].
     pub fn menu(button_response: &Response) -> Self {
+        let right_to_left = button_response.ctx.global_style().right_to_left;
         Self::from_toggle_button_response(button_response)
             .kind(PopupKind::Menu)
-            .layout(Layout::top_down_justified(Align::Min))
+            .layout(menu_layout(right_to_left))
             .style(menu_style)
             .gap(0.0)
     }
 
     /// Show a context menu when the widget was secondary clicked.
-    /// Sets the layout to `Layout::top_down_justified(Align::Min)`.
+    /// Sets the layout to `Layout::top_down_justified(Align::Min)`,
+    /// or `Align::Max` with [`crate::Style::right_to_left`].
     /// In contrast to [`Self::menu`], this will open at the pointer position.
     pub fn context_menu(response: &Response) -> Self {
         Self::menu(response)

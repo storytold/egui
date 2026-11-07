@@ -749,7 +749,7 @@ impl SubMenu {
             .kind(PopupKind::Menu)
             .open(is_open)
             .align(align)
-            .layout(Layout::top_down_justified(Align::Min))
+            .layout(super::popup::menu_layout(ui.style().right_to_left))
             .gap(gap)
             .style(menu_config.style.clone())
             // The close behavior is handled by the menu (see below)
