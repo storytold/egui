@@ -1576,4 +1576,18 @@ mod ime_reset_browser_tests {
         assert_eq!(blurs.call0(&JsValue::NULL).unwrap().as_f64(), Some(0.0));
         assert!(fixture.runner.try_lock().unwrap().text_agent.has_focus());
     }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn text_agent_turns_off_browser_typing_assistance() {
+        let fixture = Fixture::new();
+        let input = fixture.input();
+        for (name, value) in [
+            ("autocapitalize", "off"),
+            ("autocomplete", "off"),
+            ("autocorrect", "off"),
+            ("spellcheck", "false"),
+        ] {
+            assert_eq!(input.get_attribute(name).as_deref(), Some(value), "{name}");
+        }
+    }
 }
