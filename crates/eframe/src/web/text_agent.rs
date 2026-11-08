@@ -14,6 +14,16 @@ use crate::web_caret_position::{
 
 use super::{AppRunner, NeedRepaint, PanicHandler, WebRunner};
 
+/// Turns off the browser's own typing assistance on the hidden input. The app owns
+/// capitalization, correction and spelling; browser suggestions (e.g. the word suggestions
+/// iPadOS shows above the keyboard) would compete with it and take screen space of their own.
+const TEXT_AGENT_ASSIST_OFF_ATTRIBUTES: [(&str, &str); 4] = [
+    ("autocapitalize", "off"),
+    ("autocomplete", "off"),
+    ("autocorrect", "off"),
+    ("spellcheck", "false"),
+];
+
 #[derive(Clone)]
 pub(super) struct TextAgentContext {
     pub runner: Weak<RefCell<Option<AppRunner>>>,
@@ -418,7 +428,9 @@ impl TextAgent {
             .create_element("input")?
             .dyn_into::<web_sys::HtmlInputElement>()?;
         input.set_type("text");
-        input.set_attribute("autocapitalize", "off")?;
+        for (name, value) in TEXT_AGENT_ASSIST_OFF_ATTRIBUTES {
+            input.set_attribute(name, value)?;
+        }
         // Keep a sibling of the canvas, including inside shadow DOM. No focus during setup.
         let style = input.style();
         for (key, value) in [
