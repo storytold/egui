@@ -1517,4 +1517,63 @@ mod ime_reset_browser_tests {
             );
         }
     }
+
+    // A click on the canvas must not move DOM focus away from a focused text agent: every
+    // round trip hides and re-shows the iPadOS keyboard shortcut bar.
+    #[wasm_bindgen(
+        inline_js = "export function egui_probe_mouse(type, x, y) { const init = {clientX: x, clientY: y, button: 0, bubbles: true, cancelable: true, pointerType: 'mouse', isPrimary: true}; return type.startsWith('pointer') ? new PointerEvent(type, init) : new MouseEvent(type, init); }\nexport function egui_probe_blur_counter(el) { const seen = {count: 0}; el.addEventListener('blur', () => seen.count++); return () => seen.count; }"
+    )]
+    extern "C" {
+        fn egui_probe_mouse(kind: &str, x: f64, y: f64) -> web_sys::MouseEvent;
+        fn egui_probe_blur_counter(element: &web_sys::HtmlInputElement) -> js_sys::Function;
+    }
+
+    fn canvas_center(canvas: &web_sys::HtmlCanvasElement) -> (f64, f64) {
+        let rect = canvas.get_bounding_client_rect();
+        (
+            rect.x() + rect.width() / 2.0,
+            rect.y() + rect.height() / 2.0,
+        )
+    }
+
+    fn click_event_on_canvas(fixture: &Fixture, kind: &str) -> web_sys::MouseEvent {
+        let (x, y) = canvas_center(&fixture.canvas);
+        let event = egui_probe_mouse(kind, x, y);
+        fixture.canvas.dispatch_event(&event).unwrap();
+        event
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn canvas_mousedown_keeps_a_focused_text_agent_focused() {
+        let fixture = Fixture::new();
+        super::super::events::install_test_pointer_focus(&fixture.runner).unwrap();
+        let event = click_event_on_canvas(&fixture, "mousedown");
+        assert!(
+            event.default_prevented(),
+            "the browser's focus default would move focus to the canvas"
+        );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn canvas_mousedown_without_text_agent_focus_keeps_the_browser_default() {
+        let fixture = Fixture::new();
+        super::super::events::install_test_pointer_focus(&fixture.runner).unwrap();
+        egui_probe_focus_body();
+        assert!(!fixture.runner.try_lock().unwrap().text_agent.has_focus());
+        let event = click_event_on_canvas(&fixture, "mousedown");
+        assert!(
+            !event.default_prevented(),
+            "focusing the canvas from outside (e.g. VSCode tabs) must keep working"
+        );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn canvas_pointerup_does_not_bounce_a_focused_text_agent() {
+        let fixture = Fixture::new();
+        super::super::events::install_test_pointer_focus(&fixture.runner).unwrap();
+        let blurs = egui_probe_blur_counter(&fixture.input());
+        click_event_on_canvas(&fixture, "pointerup");
+        assert_eq!(blurs.call0(&JsValue::NULL).unwrap().as_f64(), Some(0.0));
+        assert!(fixture.runner.try_lock().unwrap().text_agent.has_focus());
+    }
 }

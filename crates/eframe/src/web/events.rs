@@ -92,6 +92,7 @@ pub(crate) fn install_event_handlers(runner_ref: &WebRunner) -> Result<(), JsVal
     install_mousemove(runner_ref, &document)?;
     install_pointerup(runner_ref, &document)?;
     install_pointerdown(runner_ref, &canvas)?;
+    install_mousedown(runner_ref, &canvas)?;
     install_mouseleave(runner_ref, &canvas)?;
 
     install_touchstart(runner_ref, &canvas)?;
@@ -117,6 +118,14 @@ pub(super) fn install_test_focus_and_keyboard(runner: &WebRunner) -> Result<(), 
     install_blur_focus(runner, &canvas)?;
     install_keydown(runner, &canvas)?;
     install_keyup(runner, &canvas)
+}
+
+#[cfg(test)]
+pub(super) fn install_test_pointer_focus(runner: &WebRunner) -> Result<(), JsValue> {
+    let document = web_sys::window().unwrap().document().unwrap();
+    let canvas = runner.try_lock().unwrap().canvas().clone();
+    install_mousedown(runner, &canvas)?;
+    install_pointerup(runner, &document)
 }
 
 fn install_blur_focus(runner_ref: &WebRunner, target: &EventTarget) -> Result<(), JsValue> {
@@ -580,6 +589,25 @@ fn install_pointerdown(runner_ref: &WebRunner, target: &EventTarget) -> Result<(
     )
 }
 
+/// Keeps the text agent focused while the user clicks the canvas.
+///
+/// The canvas is focusable, so the browser's default `mousedown` action moves focus from the
+/// text agent to the canvas, and the next frame moves it back. On iPadOS every such round trip
+/// hides and re-shows the keyboard shortcut bar. Only the focus default is suppressed, and only
+/// while the text agent already owns focus, so focusing the canvas from outside (e.g. editor
+/// tabs in VS Code) keeps working.
+fn install_mousedown(runner_ref: &WebRunner, target: &EventTarget) -> Result<(), JsValue> {
+    runner_ref.add_event_listener(
+        target,
+        "mousedown",
+        |event: web_sys::MouseEvent, runner: &mut AppRunner| {
+            if runner.text_agent.has_focus() {
+                event.prevent_default();
+            }
+        },
+    )
+}
+
 fn install_pointerup(runner_ref: &WebRunner, target: &EventTarget) -> Result<(), JsValue> {
     runner_ref.add_event_listener(
         target,
@@ -612,8 +640,11 @@ fn install_pointerup(runner_ref: &WebRunner, target: &EventTarget) -> Result<(),
                 // any touch event, which resulted in the on-screen keyboard
                 // not working when focusing on a text field in an egui app.
                 // This attempts to fix that by forcing the focus on any
-                // click on the canvas.
-                super::focus_without_scroll(runner.canvas()).ok();
+                // click on the canvas. A focused text agent already receives the keyboard;
+                // stealing its focus would only bounce it back next frame.
+                if !runner.text_agent.has_focus() {
+                    super::focus_without_scroll(runner.canvas()).ok();
+                }
 
                 // In Safari we are only allowed to do certain things
                 // (like playing audio, start a download, etc)
