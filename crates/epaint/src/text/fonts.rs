@@ -999,7 +999,7 @@ mod tests {
     /// `FontTweak::color_transfer_function` is per font: under an atlas-wide curve that darkens
     /// antialiased edges, a face set to `Off` keeps its raw coverage, byte for byte what it gets
     /// when the whole atlas is `Off`. Document text drawn over a page rendered by something else
-    /// relies on this (PdfCraft's inline text editor).
+    /// relies on this (the inline text editor of a PDF application, for one).
     #[test]
     fn a_fonts_tweak_overrides_the_atlas_color_transfer_function() {
         use crate::FontColorTransferFunction;
