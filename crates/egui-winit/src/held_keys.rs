@@ -122,6 +122,50 @@ mod tests {
         feed(ctx, core::mem::take(&mut state.egui_input.events));
     }
 
+    #[test]
+    fn native_repeat_reaches_egui_after_focus_loss_or_viewport_handoff() {
+        for key in [Key::N, Key::Y] {
+            let ctx = egui::Context::default();
+            let mut state = test_state(ctx.clone());
+            let code = physical(if key == Key::N {
+                KeyCode::KeyN
+            } else {
+                KeyCode::KeyY
+            });
+            // A destination State never saw the original down; the OS still marks this repeat.
+            state.press_keyboard_input(code, Some(key), Some(key), true);
+            assert!(matches!(
+                state.egui_input().events.as_slice(),
+                [Event::Key { repeat: true, .. }]
+            ));
+            feed_state(&ctx, &mut state);
+            assert!(
+                ctx.input(|i| matches!(i.events.as_slice(), [Event::Key { repeat: true, .. }]))
+            );
+
+            // The native focus-loss path clears its key map and egui clears its own.
+            state.held_keys.clear();
+            feed(&ctx, vec![Event::WindowFocused(false)]);
+            state.press_keyboard_input(code, Some(key), Some(key), true);
+            feed_state(&ctx, &mut state);
+            assert!(
+                ctx.input(|i| matches!(i.events.as_slice(), [Event::Key { repeat: true, .. }]))
+            );
+            state.release_keyboard_input(code);
+            feed_state(&ctx, &mut state);
+            assert!(!ctx.input(|i| i.key_down(key)));
+
+            state.held_keys.clear();
+            feed(&ctx, vec![Event::WindowFocused(false)]);
+            // A genuinely fresh press after a missing release is distinguishable from repeat.
+            state.press_keyboard_input(code, Some(key), Some(key), false);
+            feed_state(&ctx, &mut state);
+            assert!(
+                ctx.input(|i| matches!(i.events.as_slice(), [Event::Key { repeat: false, .. }]))
+            );
+        }
+    }
+
     fn physical(key: KeyCode) -> PhysicalKey {
         PhysicalKey::Code(key)
     }
@@ -357,7 +401,7 @@ mod tests {
         // Ctrl is released and the held key repeats with normal text.
         state.modifiers = Modifiers::NONE;
         assert_eq!(
-            state.press_keyboard_input(code, Some(Key::C), Some(Key::C)),
+            state.press_keyboard_input(code, Some(Key::C), Some(Key::C), false),
             Some(Key::C)
         );
         assert_eq!(
@@ -383,7 +427,7 @@ mod tests {
 
         // A fresh press after release starts a new pair.
         assert_eq!(
-            state.press_keyboard_input(code, Some(Key::C), Some(Key::C)),
+            state.press_keyboard_input(code, Some(Key::C), Some(Key::C), false),
             Some(Key::C)
         );
     }
@@ -395,7 +439,7 @@ mod tests {
         let code = physical(KeyCode::KeyZ);
 
         assert_eq!(
-            state.press_keyboard_input(code, Some(Key::Z), Some(Key::Z)),
+            state.press_keyboard_input(code, Some(Key::Z), Some(Key::Z), false),
             Some(Key::Z)
         );
         feed_state(&ctx, &mut state);
@@ -404,7 +448,7 @@ mod tests {
 
         // A layout change on repeat keeps the originally emitted identity.
         assert_eq!(
-            state.press_keyboard_input(code, Some(Key::Y), Some(Key::Y)),
+            state.press_keyboard_input(code, Some(Key::Y), Some(Key::Y), false),
             Some(Key::Z)
         );
         let repeats: Vec<bool> = state

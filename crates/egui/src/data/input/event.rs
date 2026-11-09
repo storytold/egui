@@ -82,8 +82,9 @@ pub enum Event {
         /// On many platforms, holding down a key produces many repeated "pressed" events for it, so called key-repeats.
         /// Sometimes you will want to ignore such events, and this lets you do that.
         ///
-        /// egui will automatically detect such repeat events and mark them as such here.
-        /// Therefore, if you are writing an egui integration, you do not need to set this (just set it to `false`).
+        /// Integrations should preserve the native repeat flag when available, including when
+        /// a held key first arrives after focus changes. egui also detects repeats from its
+        /// held-key state, so integrations without native metadata can set this to `false`.
         repeat: bool,
 
         /// The state of the modifier keys at the time of the event.

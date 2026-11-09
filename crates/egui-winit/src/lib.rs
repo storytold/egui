@@ -3094,13 +3094,14 @@ impl State {
         physical: winit::keyboard::PhysicalKey,
         physical_key: Option<egui::Key>,
         translated: Option<egui::Key>,
+        repeat: bool,
     ) -> Option<egui::Key> {
         let active_key = self.held_keys.press(physical, translated, true)?;
         self.egui_input.events.push(egui::Event::Key {
             key: active_key,
             physical_key,
             pressed: true,
-            repeat: false, // egui will fill this in for us!
+            repeat,
             modifiers: self.modifiers,
         });
         Some(active_key)
@@ -3163,7 +3164,7 @@ impl State {
             state,
 
             location: _, // e.g. is it on the numpad?
-            repeat: _,   // egui will figure this out for us
+            repeat,
             ..
         } = event;
 
@@ -3219,7 +3220,8 @@ impl State {
                 return;
             }
 
-            let _ = self.press_keyboard_input(event.physical_key, physical_key, translated);
+            let _ =
+                self.press_keyboard_input(event.physical_key, physical_key, translated, *repeat);
         } else {
             self.release_keyboard_input(event.physical_key);
         }
