@@ -773,7 +773,7 @@ impl State {
     /// platforms keep their synchronous compatibility behavior.
     pub fn request_paste(&mut self, window: &Window) {
         self.rebind_clipboard_target(window);
-        self.begin_regular_clipboard_paste();
+        let _ = self.begin_regular_clipboard_paste();
     }
 
     /// Forward an app-requested cut (`ViewportCommand::RequestCut`) through the normal egui path.
@@ -1515,7 +1515,10 @@ impl State {
 
     /// Start a non-blocking regular-clipboard paste on Wayland, or use the platform's
     /// synchronous compatibility path elsewhere.
-    fn begin_regular_clipboard_paste(&mut self) {
+    ///
+    /// Returns `true` when an asynchronous Wayland transfer was started (so the paste event will
+    /// arrive in a later `drain_clipboard_pastes` batch rather than synchronously on key-down).
+    fn begin_regular_clipboard_paste(&mut self) -> bool {
         #[cfg(all(
             feature = "clipboard",
             feature = "wayland",
@@ -1529,21 +1532,21 @@ impl State {
         ))]
         if let Some(transport) = self.clipboard.wayland_transport() {
             let focused = self.focused_widget_id();
-            match self.clipboard_paste.begin_regular(
+            return match self.clipboard_paste.begin_regular(
                 &transport,
                 focused,
                 std::sync::Arc::clone(&self.clipboard_repaint_waker),
             ) {
-                Ok(()) => {}
+                Ok(()) => true,
                 Err(err) => {
                     // Wayland image fallback is deliberately disabled until winit can carry an
                     // image offer through a validated, bounded transfer. An absent or non-text
                     // regular offer (including `InvalidData` from a stale self-source) is a
                     // failed paste, never a synchronous arboard read on the event path.
                     self.record_clipboard_failure("regular paste request", &err.to_io_error());
+                    false
                 }
-            }
-            return;
+            };
         }
 
         #[cfg(all(
@@ -1562,7 +1565,7 @@ impl State {
             // blocking arboard/data-control read on the Wayland event path.
             self.clipboard_failures = self.clipboard_failures.wrapping_add(1);
             log::warn!("winit Wayland clipboard is unavailable; ignoring paste request");
-            return;
+            return false;
         }
 
         // Non-Wayland platforms retain their existing synchronous clipboard behavior.
@@ -1580,6 +1583,7 @@ impl State {
                 .events
                 .push(egui::Event::PasteImage(std::sync::Arc::new(image)));
         }
+        false
     }
 
     /// Start a non-blocking PRIMARY paste for a middle-click on Wayland.
@@ -3124,20 +3128,23 @@ impl State {
             return false;
         }
 
+        let mut emit_release = false;
         if is_cut_command(self.modifiers, active_key) {
             self.egui_input.events.push(egui::Event::Cut);
         } else if is_copy_command(self.modifiers, active_key) {
             self.egui_input.events.push(egui::Event::Copy);
         } else if is_paste_command(self.modifiers, active_key) {
             // On Wayland this only starts a transfer and requests a viewport repaint on
-            // completion; it never blocks the event path on the clipboard peer.
-            self.begin_regular_clipboard_paste();
+            // completion; it never blocks the event path on the clipboard peer. When no async
+            // transfer is started, keep the key identity for release so apps that trigger
+            // non-text/internal clipboard pastes on Key::V release still receive it.
+            emit_release = !self.begin_regular_clipboard_paste();
         } else {
             return false;
         }
 
         self.release_keyboard_input(physical);
-        let _ = self.held_keys.press(physical, translated, false);
+        let _ = self.held_keys.press(physical, translated, emit_release);
         true
     }
 
