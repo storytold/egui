@@ -1567,10 +1567,7 @@ impl State {
 
         // Non-Wayland platforms retain their existing synchronous clipboard behavior.
         if let Some(contents) = self.clipboard.get() {
-            let contents = contents.replace("\r\n", "\n");
-            if !contents.is_empty() {
-                self.egui_input.events.push(egui::Event::Paste(contents));
-            }
+            self.egui_input.events.push(text_paste_event(&contents));
         } else if let Some(image) = self.clipboard.get_image() {
             // No usable text on the clipboard (e.g. an image was copied with
             // mspaint/Snipping Tool, which never puts a text representation
@@ -1648,12 +1645,7 @@ impl State {
         for outcome in outcomes {
             match outcome {
                 clipboard_bridge::PasteOutcome::Regular(Ok(text)) => {
-                    // A present empty text is a successful read. Preserve egui's existing
-                    // no-op-for-empty paste behavior without treating it as absent content.
-                    let text = text.replace("\r\n", "\n");
-                    if !text.is_empty() {
-                        self.egui_input.events.push(egui::Event::Paste(text));
-                    }
+                    self.egui_input.events.push(text_paste_event(&text));
                 }
                 clipboard_bridge::PasteOutcome::Regular(Err(err)) => {
                     // No image fallback here: see `begin_regular_clipboard_paste`.
@@ -3753,6 +3745,12 @@ fn is_printable_char(chr: char) -> bool {
     !is_in_private_use_area && !chr.is_ascii_control()
 }
 
+// Rich-only copies can have empty plain text. Their paste event lets the application
+// read the formatted representation; text edits already ignore an empty Paste.
+fn text_paste_event(text: &str) -> egui::Event {
+    egui::Event::Paste(text.replace("\r\n", "\n"))
+}
+
 fn is_cut_command(modifiers: egui::Modifiers, keycode: egui::Key) -> bool {
     keycode == egui::Key::Cut
         || (modifiers.command_only() && keycode == egui::Key::X)
@@ -5137,6 +5135,18 @@ pub fn short_window_event_description(event: &winit::event::WindowEvent) -> &'st
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn successful_empty_text_read_still_emits_a_paste_event() {
+        assert!(matches!(text_paste_event(""), egui::Event::Paste(text) if text.is_empty()));
+    }
+
+    #[test]
+    fn text_paste_normalizes_crlf_and_preserves_other_text() {
+        assert!(
+            matches!(text_paste_event("one\r\ntwo\rthree"), egui::Event::Paste(text) if text == "one\ntwo\rthree")
+        );
+    }
 
     #[test]
     fn destroyed_window_resets_ime_cursor_purpose_and_allow_on_every_platform() {
