@@ -1526,5 +1526,9 @@ fn initialize_or_update_viewport<'a>(
 /// `egui_winit::screen_size_in_pixels` lays egui out over it; `inner_size` there is only the safe
 /// area, and a surface that size is stretched over the screen.
 fn surface_size(window: &winit::window::Window) -> winit::dpi::PhysicalSize<u32> {
-    if cfg!(target_os = "ios") { window.outer_size() } else { window.inner_size() }
+    if cfg!(target_os = "ios") {
+        window.outer_size()
+    } else {
+        window.inner_size()
+    }
 }
