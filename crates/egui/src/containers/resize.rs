@@ -276,7 +276,14 @@ impl Resize {
             if grip_on_left {
                 size.x = -size.x;
             }
-            user_requested_size = Some(size + 0.5 * corner_response.rect.size());
+            size += 0.5 * corner_response.rect.size();
+            // The corner only resizes the directions that are resizable.
+            for d in 0..2 {
+                if !self.resizable[d] {
+                    size[d] = state.desired_size[d];
+                }
+            }
+            user_requested_size = Some(size);
         }
 
         let is_actively_resizing = user_requested_size.is_some();

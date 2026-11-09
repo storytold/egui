@@ -1070,3 +1070,53 @@ pub fn scene_with_zero_rect_and_unbounded_zoom_should_not_produce_nan() {
         "scene_rect: {scene_rect:?}"
     );
 }
+
+/// Dragging the corner of a `Resize` changes only the directions that are resizable, with the
+/// grip at the bottom-right and, in a right-to-left layout, at the bottom-left.
+#[test]
+fn resize_corner_drag_keeps_a_direction_that_is_not_resizable() {
+    for right_to_left in [false, true] {
+        let mut harness = Harness::new_ui_state(
+            move |ui, inner: &mut Rect| {
+                ui.style_mut().right_to_left = right_to_left;
+                egui::Resize::default()
+                    .resizable([false, true])
+                    .default_size([200.0, 100.0])
+                    .show(ui, |ui| *inner = ui.max_rect());
+            },
+            Rect::NOTHING,
+        );
+        harness.run();
+        let before = *harness.state();
+
+        let corner = Vec2::splat(harness.ctx.global_style().visuals.resize_corner_size);
+        let (grab, drag) = if right_to_left {
+            (
+                before.left_bottom() + Vec2::new(0.5 * corner.x, -0.5 * corner.y),
+                Vec2::new(-60.0, 40.0),
+            )
+        } else {
+            (before.max - 0.5 * corner, Vec2::new(60.0, 40.0))
+        };
+        harness.hover_at(grab);
+        harness.run();
+        harness.drag_at(grab);
+        harness.run();
+        harness.hover_at(grab + drag);
+        harness.run();
+        harness.drop_at(grab + drag);
+        harness.run();
+        let after = *harness.state();
+
+        assert_eq!(
+            after.height(),
+            before.height() + drag.y,
+            "the height follows the drag (right_to_left: {right_to_left})"
+        );
+        assert_eq!(
+            after.width(),
+            before.width(),
+            "the width stays (right_to_left: {right_to_left})"
+        );
+    }
+}
