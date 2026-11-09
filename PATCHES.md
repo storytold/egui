@@ -221,3 +221,12 @@ The canonical immutable winit pin and lock are now aligned. Managed `canonical-l
 `audit34` passed lock generation and locked/offline metadata validation; the only dependency
 identity change was the qualified local winit source becoming its exact canonical Git revision.
 Consumer egui-family pins and their canonical locks remain a separate landing step.
+
+
+### Wayland file drag coordinates (`RawInput::file_drag_pos`)
+
+Pairs with `storytold/winit#29` (`storytold/photocraft#10225`) to expose native file-drag
+coordinates in `egui::RawInput::file_drag_pos` from `WindowEvent::HoveredFileMoved` (scaled by
+`pixels_per_point`). Retains the final drag position across frames until `dropped_files` are
+delivered and clears it on `WindowEvent::HoveredFileCancelled` or after drop delivery so drag
+positions never leak into subsequent drags.

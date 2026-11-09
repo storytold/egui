@@ -80,6 +80,13 @@ pub struct RawInput {
     #[cfg_attr(feature = "serde", serde(skip))]
     pub dropped_files: Vec<DroppedFileHandle>,
 
+    /// Position of an active file drag or just-delivered file drop, in points.
+    ///
+    /// Populated by integrations that receive drag coordinates separately from ordinary pointer
+    /// motion (such as Wayland `wl_data_device` enter/motion). Retained across frames while a drag
+    /// is in flight and consumed when [`Self::dropped_files`] is taken or cleared on cancel.
+    pub file_drag_pos: Option<emath::Pos2>,
+
     /// The native window has the keyboard focus (i.e. is receiving key presses).
     ///
     /// False when the user alt-tab away from the application, for instance.
@@ -119,6 +126,7 @@ impl Default for RawInput {
             events: vec![],
             hovered_files: Default::default(),
             dropped_files: Default::default(),
+            file_drag_pos: None,
             focused: true, // integrations opt into global focus tracking
             system_theme: None,
             keyboard_layout_is_latin: None,
@@ -172,6 +180,11 @@ impl RawInput {
             predicted_dt: self.predicted_dt,
             events: core::mem::take(&mut self.events),
             hovered_files: self.hovered_files.clone(),
+            file_drag_pos: if self.dropped_files.is_empty() {
+                self.file_drag_pos
+            } else {
+                self.file_drag_pos.take()
+            },
             dropped_files: core::mem::take(&mut self.dropped_files),
             focused: self.focused,
             system_theme: self.system_theme,
@@ -192,6 +205,7 @@ impl RawInput {
             mut events,
             mut hovered_files,
             mut dropped_files,
+            file_drag_pos,
             focused,
             system_theme,
             keyboard_layout_is_latin,
@@ -208,6 +222,7 @@ impl RawInput {
         self.events.append(&mut events);
         self.hovered_files.append(&mut hovered_files);
         self.dropped_files.append(&mut dropped_files);
+        self.file_drag_pos = file_drag_pos.or(self.file_drag_pos);
         self.focused = focused;
         self.system_theme = system_theme;
         self.keyboard_layout_is_latin = keyboard_layout_is_latin.or(self.keyboard_layout_is_latin);
@@ -228,6 +243,7 @@ impl RawInput {
             events,
             hovered_files,
             dropped_files,
+            file_drag_pos,
             focused,
             system_theme,
             keyboard_layout_is_latin,
@@ -259,6 +275,7 @@ impl RawInput {
         ui.label(format!("predicted_dt: {:.1} ms", 1e3 * predicted_dt));
         ui.label(format!("hovered_files: {}", hovered_files.len()));
         ui.label(format!("dropped_files: {}", dropped_files.len()));
+        ui.label(format!("file_drag_pos: {file_drag_pos:?}"));
         ui.label(format!("focused: {focused}"));
         ui.label(format!("system_theme: {system_theme:?}"));
         ui.label(format!(
@@ -321,5 +338,42 @@ mod tests {
         let frame = input.take();
         assert_eq!(frame.latin_layout_char(Key::C), Some('j'));
         assert_eq!(input.latin_layout_char(Key::C), None);
+    }
+
+    #[derive(Debug)]
+    struct DummyDroppedFile;
+
+    impl crate::DroppedFile for DummyDroppedFile {
+        fn path(&self) -> &std::path::Path {
+            std::path::Path::new("layer.png")
+        }
+
+        fn bytes(&self) -> Result<Vec<u8>, String> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[test]
+    fn retains_file_drag_pos_until_dropped_files_are_taken() {
+        let pos = emath::pos2(320.0, 240.0);
+        let mut raw = RawInput {
+            file_drag_pos: Some(pos),
+            ..Default::default()
+        };
+
+        // Frame while drag is in flight (or between wl_data_device.leave and pipe EOF):
+        // file_drag_pos stays available on both the taken frame input and the retained state.
+        let frame1 = raw.take();
+        assert_eq!(frame1.file_drag_pos, Some(pos));
+        assert_eq!(raw.file_drag_pos, Some(pos));
+
+        // Frame where dropped_files are delivered: frame2 receives the final drag position and
+        // consumes it so it does not leak into later frames.
+        raw.dropped_files
+            .push(std::sync::Arc::new(DummyDroppedFile));
+        let frame2 = raw.take();
+        assert_eq!(frame2.file_drag_pos, Some(pos));
+        assert_eq!(frame2.dropped_files.len(), 1);
+        assert_eq!(raw.file_drag_pos, None);
     }
 }

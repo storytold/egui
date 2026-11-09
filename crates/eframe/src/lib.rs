@@ -202,6 +202,10 @@ pub use web::{WebLogger, WebRunner};
 
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg(any(feature = "glow", feature = "wgpu_no_default_features"))]
+pub use {egui_winit, winit};
+
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(feature = "glow", feature = "wgpu_no_default_features"))]
 mod native;
 
 #[cfg(target_os = "macos")]
