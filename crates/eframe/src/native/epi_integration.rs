@@ -30,12 +30,12 @@ pub fn viewport_builder(
     // Always use the default window size / position on iOS. Trying to restore the previous position
     // causes the window to be shown too small.
     #[cfg(not(target_os = "ios"))]
-    let inner_size_points = if let Some(window_settings) = window_settings {
+    if let Some(window_settings) = window_settings {
         // Restore pos/size from previous session
 
         if clamp_size_to_monitor_size {
             window_settings.clamp_size_to_sane_values(largest_monitor_point_size(
-                egui_zoom_factor,
+                window_settings.zoom_factor(egui_zoom_factor),
                 event_loop,
             ));
         }
@@ -43,7 +43,6 @@ pub fn viewport_builder(
 
         viewport_builder =
             window_settings.initialize_viewport_builder(egui_zoom_factor, viewport_builder);
-        Some(window_settings.inner_size_points())
     } else {
         if let Some(pos) = viewport_builder.position {
             viewport_builder = viewport_builder.with_position(pos);
@@ -57,9 +56,7 @@ pub fn viewport_builder(
             );
             viewport_builder = viewport_builder.with_inner_size(initial_window_size);
         }
-
-        viewport_builder.inner_size
-    };
+    }
 
     #[cfg(not(target_os = "ios"))]
     if native_options.centered {
@@ -71,7 +68,9 @@ pub fn viewport_builder(
             let monitor_size = monitor
                 .size()
                 .to_logical::<f32>(egui_zoom_factor as f64 * monitor.scale_factor());
-            let inner_size = inner_size_points.unwrap_or(egui::Vec2 { x: 800.0, y: 600.0 });
+            let inner_size = viewport_builder
+                .inner_size
+                .unwrap_or(egui::Vec2 { x: 800.0, y: 600.0 });
             if 0.0 < monitor_size.width && 0.0 < monitor_size.height {
                 let x = (monitor_size.width - inner_size.x) * 0.5;
                 let y = (monitor_size.height - inner_size.y) * 0.5;
@@ -199,7 +198,7 @@ pub struct EpiIntegration {
     /// Settings the root window was restored with, for the parts applied when it is first shown.
     restored_window_settings: Option<WindowSettings>,
 
-    /// Normal (non-maximized) geometry of the root window, as last saved.
+    /// Latest normal (non-maximized) geometry of the root window.
     #[cfg(feature = "persistence")]
     normal_geometry: Option<egui_winit::WindowGeometry>,
 
@@ -265,15 +264,19 @@ impl EpiIntegration {
             });
         }
 
-        let restored_window_settings = load_window_settings(frame.storage());
+        let restored_window_settings =
+            load_window_settings(native_options.persist_window, frame.storage()).or_else(|| {
+                WindowSettings::requested_at_start(
+                    egui_ctx.zoom_factor(),
+                    window,
+                    &native_options.viewport,
+                )
+            });
         #[cfg(feature = "persistence")]
         let normal_geometry = restored_window_settings
             .map(|settings| settings.normal_geometry())
             .or_else(|| {
-                // Nothing saved yet, so use the window's own geometry, unless it starts maximized:
-                (!window.is_maximized() && window.fullscreen().is_none()).then(|| {
-                    egui_winit::WindowGeometry::from_window(egui_ctx.zoom_factor(), window)
-                })
+                egui_winit::WindowGeometry::from_normal_window(egui_ctx.zoom_factor(), window)
             });
 
         Self {
@@ -322,6 +325,21 @@ impl EpiIntegration {
         }
 
         egui_winit.on_window_event(window, event)
+    }
+
+    /// Remember normal geometry while the user resizes or moves, before a maximize/fullscreen
+    /// command can replace it. Waiting for the next autosave loses the latest normal rectangle.
+    pub fn track_window_geometry(&mut self, window: &winit::window::Window) {
+        #[cfg(feature = "persistence")]
+        if self.persist_window
+            && window.is_visible() != Some(false)
+            && let Some(geometry) =
+                egui_winit::WindowGeometry::from_normal_window(self.egui_ctx.zoom_factor(), window)
+        {
+            self.normal_geometry = Some(geometry);
+        }
+        #[cfg(not(feature = "persistence"))]
+        let _ = (self, window);
     }
 
     pub fn pre_update(&mut self) {
@@ -469,6 +487,14 @@ impl EpiIntegration {
         }
     }
 
+    /// Drop the storage, which waits for its pending write to reach the disk.
+    ///
+    /// Call it after the last [`Self::save`] and before [`epi::App::on_exit`]: an app may end
+    /// the process from there (e.g. with `std::process::exit`), losing a write still in flight.
+    pub fn close_storage(&mut self) {
+        self.frame.storage = None;
+    }
+
     pub fn save(&mut self, app: &mut dyn epi::App, window: Option<&winit::window::Window>) {
         #[cfg(not(feature = "persistence"))]
         let _ = (self, app, window);
@@ -517,10 +543,18 @@ const STORAGE_EGUI_MEMORY_KEY: &str = "egui";
 #[cfg(feature = "persistence")]
 const STORAGE_WINDOW_KEY: &str = "window";
 
-pub fn load_window_settings(_storage: Option<&dyn epi::Storage>) -> Option<WindowSettings> {
+/// The root window settings saved by an earlier run, unless the app turned off
+/// [`epi::NativeOptions::persist_window`].
+pub fn load_window_settings(
+    _persist_window: bool,
+    _storage: Option<&dyn epi::Storage>,
+) -> Option<WindowSettings> {
     profiling::function_scope!();
     #[cfg(feature = "persistence")]
     {
+        if !_persist_window {
+            return None;
+        }
         epi::get_value(_storage?, STORAGE_WINDOW_KEY)
     }
     #[cfg(not(feature = "persistence"))]
@@ -535,4 +569,45 @@ pub fn load_egui_memory(_storage: Option<&dyn epi::Storage>) -> Option<egui::Mem
     }
     #[cfg(not(feature = "persistence"))]
     None
+}
+
+#[cfg(all(test, feature = "persistence"))]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+    use crate::epi::Storage as _;
+
+    #[derive(Default)]
+    struct MemoryStorage(HashMap<String, String>);
+
+    impl epi::Storage for MemoryStorage {
+        fn get_string(&self, key: &str) -> Option<String> {
+            self.0.get(key).cloned()
+        }
+
+        fn set_string(&mut self, key: &str, value: String) {
+            self.0.insert(key.to_owned(), value);
+        }
+
+        fn remove_string(&mut self, key: &str) {
+            self.0.remove(key);
+        }
+
+        fn flush(&mut self) {}
+    }
+
+    #[test]
+    fn window_is_restored_only_while_persist_window_is_on() {
+        let mut storage = MemoryStorage::default();
+        storage.set_string(
+            STORAGE_WINDOW_KEY,
+            "(normal_geometry:(outer_position_pixels:Some((x:10.0,y:20.0)),scale_factor:1.0,\
+             inner_size_points:(x:800.0,y:600.0),zoom_factor:Some(1.0)),fullscreen:false,maximized:true)"
+                .to_owned(),
+        );
+
+        assert!(load_window_settings(true, Some(&storage)).is_some());
+        assert!(load_window_settings(false, Some(&storage)).is_none());
+    }
 }

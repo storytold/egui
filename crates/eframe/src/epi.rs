@@ -379,6 +379,8 @@ pub struct NativeOptions {
 
     /// Controls whether or not the native window position and size will be
     /// persisted (only if the "persistence" feature is enabled).
+    ///
+    /// When `false`, a window saved by an earlier run is not restored either.
     pub persist_window: bool,
 
     /// Load system fonts on demand for characters that the installed fonts lack,
