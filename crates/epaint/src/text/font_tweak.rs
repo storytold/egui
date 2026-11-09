@@ -44,6 +44,17 @@ pub struct FontTweak {
     /// `None` means use the global setting in [`TextOptions::subpixel_binning`](crate::text::TextOptions::subpixel_binning).
     pub subpixel_binning: Option<bool>,
 
+    /// Override the global color transfer function for this specific font: how its antialiasing
+    /// coverage becomes alpha in the glyph atlas.
+    ///
+    /// `None` means use the global setting in [`TextOptions::color_transfer_function`](crate::text::TextOptions::color_transfer_function).
+    /// Color glyphs (e.g. emoji) never go through a transfer function, whatever this says.
+    ///
+    /// Set it to [`FontColorTransferFunction::Off`](crate::FontColorTransferFunction::Off) on a
+    /// font that draws document text over a page rendered by something else: its edges then keep
+    /// the raw coverage that renderer uses, while the interface text keeps the global curve.
+    pub color_transfer_function: Option<crate::FontColorTransferFunction>,
+
     /// Override the font's default variation coordinates for its axes ("wght", etc.).
     pub coords: VariationCoords,
 
@@ -76,6 +87,7 @@ impl Default for FontTweak {
             hinting: None,
             hinting_target: HintingTarget::default(),
             subpixel_binning: None,
+            color_transfer_function: None,
             coords: VariationCoords::default(),
             thin_space_width: 0.5,
             tab_size: 4.0,

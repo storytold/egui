@@ -672,6 +672,12 @@ impl FontFace {
         &self.shaper_data
     }
 
+    /// This face's own color transfer function, if it has one.
+    #[inline]
+    pub(crate) fn color_transfer_function(&self) -> Option<crate::FontColorTransferFunction> {
+        self.tweak.color_transfer_function
+    }
+
     /// Whether to render this face at up to four sub-pixel offsets.
     #[inline]
     pub(crate) fn subpixel_binning(&self) -> bool {

@@ -995,4 +995,76 @@ mod tests {
         let width = view.glyph_width(&FontId::new(12.0, FontFamily::Proportional), ' ');
         assert_eq!(width, 0.0);
     }
+
+    /// `FontTweak::color_transfer_function` is per font: under an atlas-wide curve that darkens
+    /// antialiased edges, a face set to `Off` keeps its raw coverage, byte for byte what it gets
+    /// when the whole atlas is `Off`. Document text drawn over a page rendered by something else
+    /// relies on this (the inline text editor of a PDF application, for one).
+    #[test]
+    fn a_fonts_tweak_overrides_the_atlas_color_transfer_function() {
+        use crate::FontColorTransferFunction;
+        use crate::text::FontTweak;
+
+        // The proportional face twice: once on the atlas curve, once with `Off` for itself.
+        let mut definitions = FontDefinitions::default();
+        let primary = definitions.families[&FontFamily::Proportional][0].clone();
+        let data = (*definitions.font_data[&primary]).clone();
+        let tweak = FontTweak {
+            color_transfer_function: Some(FontColorTransferFunction::Off),
+            ..data.tweak.clone()
+        };
+        definitions
+            .font_data
+            .insert("raw".to_owned(), Arc::new(data.tweak(tweak)));
+        definitions
+            .families
+            .insert(FontFamily::Name("raw".into()), vec!["raw".to_owned()]);
+
+        // Every alpha of the glyphs of "egui" in `family`, read back from the atlas.
+        let alphas = |options: TextOptions, family: FontFamily| -> Vec<u8> {
+            let mut fonts = Fonts::new(options, definitions.clone());
+            let galley = fonts.with_pixels_per_point(1.0).layout_no_wrap(
+                "egui".to_owned(),
+                FontId::new(13.0, family),
+                Color32::WHITE,
+            );
+            let image = fonts.image();
+            galley
+                .rows
+                .iter()
+                .flat_map(|row| row.glyphs.iter())
+                .flat_map(|glyph| {
+                    let uv = glyph.uv_rect;
+                    (uv.min[1]..uv.max[1])
+                        .flat_map(move |y| (uv.min[0]..uv.max[0]).map(move |x| (x, y)))
+                        .map(|(x, y)| image[(x as usize, y as usize)].a())
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        };
+        let darkening = TextOptions {
+            color_transfer_function: FontColorTransferFunction::Gamma(0.5),
+            ..TextOptions::default()
+        };
+        let raw = TextOptions {
+            color_transfer_function: FontColorTransferFunction::Off,
+            ..TextOptions::default()
+        };
+
+        let on_curve = alphas(darkening, FontFamily::Proportional);
+        let overridden = alphas(darkening, FontFamily::Name("raw".into()));
+        let reference = alphas(raw, FontFamily::Proportional);
+        assert!(!reference.is_empty(), "the glyphs are in the atlas");
+        assert_eq!(
+            overridden, reference,
+            "the face set to Off rasterizes as it does under an Off atlas"
+        );
+        let sum = |alphas: &[u8]| alphas.iter().map(|a| u32::from(*a)).sum::<u32>();
+        assert!(
+            sum(&on_curve) > sum(&reference),
+            "gamma 0.5 darkens the edges of the face left on the atlas curve: {} vs {}",
+            sum(&on_curve),
+            sum(&reference)
+        );
+    }
 }
