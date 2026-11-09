@@ -684,7 +684,9 @@ impl<'t> TextEdit<'t> {
             }
 
             if interactive && ui.memory(|mem| mem.has_focus(id)) {
-                ui.memory_mut(|mem| mem.set_focus_lock_filter(id, event_filter));
+                let mut lock_filter = event_filter;
+                lock_filter.escape |= state.cursor_purpose.is_ime_composition();
+                ui.memory_mut(|mem| mem.set_focus_lock_filter(id, lock_filter));
 
                 let default_cursor_range = if cursor_at_end {
                     CCursorRange::one(galley.end())
@@ -708,10 +710,14 @@ impl<'t> TextEdit<'t> {
                         default_cursor_range,
                         owns_ime_events,
                         char_limit,
-                        event_filter,
+                        event_filter: lock_filter,
                         return_key,
                     },
                 );
+
+                let mut lock_filter = event_filter;
+                lock_filter.escape |= state.cursor_purpose.is_ime_composition();
+                ui.memory_mut(|mem| mem.set_focus_lock_filter(id, lock_filter));
 
                 if changed {
                     text_changed = true;
@@ -744,6 +750,7 @@ impl<'t> TextEdit<'t> {
         let should_shrink = clip_text || multiline;
 
         let mut get_galley = None;
+        let mut precomputed_galley;
         let inner_rect_id = IdSalt::new("text_edit_rect");
         let mut response = {
             let any_shrink = hint_text.any_shrink();
@@ -758,47 +765,74 @@ impl<'t> TextEdit<'t> {
             }
 
             if text.as_str().is_empty() && !hint_text.is_empty() {
-                // Add hint_text (if any):
-                let mut shrunk = any_shrink;
-                let mut first = true;
-
-                // Since we can't set a fallback color per atom, we have to override it here.
-                // Sucks, since it means users won't be able to override it.
-                hint_text.map_texts(|t| t.color(hint_text_color));
-
-                for mut atom in hint_text {
-                    if !shrunk && matches!(atom.kind, AtomKind::Text(_)) {
-                        // elide the hint_text if needed
-                        atom = atom.atom_shrink(true);
-                        atom = atom.atom_grow(true);
-                        shrunk = true;
-                    }
-
-                    if first {
-                        // The first atom in the hint text gets inner_rect_id, so we can know
-                        // where to paint the cursor
-                        atom = atom.atom_id(inner_rect_id);
-                        first = false;
-                    }
-
-                    // Align the hint text the same as the input text so the hint, the
-                    // cursor, and the typed text all share one alignment. The default
-                    // `align` is `LEFT_TOP`, which keeps multi line text edits unchanged.
-                    atoms.push_right(atom.atom_align(align));
-                }
-
-                // Calculate the empty galley, so it can be read later. The available width is
-                // technically wrong, but doesn't matter since the galley is empty
                 let available_width = allocate_width - frame.total_margin().sum().x;
-                let galley = layouter(ui, text, available_width);
+                let mut galley = layouter(ui, text, available_width);
+                handle_events(ui, &mut galley, layouter, available_width, &mut *text);
 
-                // We can't update the galley immediately here, since it would show both hint text
-                // and the newly typed letter. So we pass a clone instead, and accept having a frame
-                // delay on the very first keystroke.
-                let mut galley_clone = Arc::clone(&galley);
-                handle_events(ui, &mut galley_clone, layouter, available_width, &mut *text);
+                if text.as_str().is_empty() {
+                    // Add hint_text (if any):
+                    let mut shrunk = any_shrink;
+                    let mut first = true;
 
-                get_galley = Some(galley);
+                    // Since we can't set a fallback color per atom, we have to override it here.
+                    // Sucks, since it means users won't be able to override it.
+                    hint_text.map_texts(|t| t.color(hint_text_color));
+
+                    for mut atom in hint_text {
+                        if !shrunk && matches!(atom.kind, AtomKind::Text(_)) {
+                            // elide the hint_text if needed
+                            atom = atom.atom_shrink(true);
+                            atom = atom.atom_grow(true);
+                            shrunk = true;
+                        }
+
+                        if first {
+                            // The first atom in the hint text gets inner_rect_id, so we can know
+                            // where to paint the cursor
+                            atom = atom.atom_id(inner_rect_id);
+                            first = false;
+                        }
+
+                        // Align the hint text the same as the input text so the hint, the
+                        // cursor, and the typed text all share one alignment. The default
+                        // `align` is `LEFT_TOP`, which keeps multi line text edits unchanged.
+                        atoms.push_right(atom.atom_align(align));
+                    }
+
+                    get_galley = Some(galley);
+                } else {
+                    precomputed_galley = Some((available_width, galley));
+                    atoms.push_right(
+                        AtomKind::closure(|ui, args| {
+                            let galley = match precomputed_galley.take() {
+                                Some((width, galley))
+                                    if (args.available_size.x - width).abs() <= 1e-3 =>
+                                {
+                                    galley
+                                }
+                                _ => layouter(ui, text, args.available_size.x),
+                            };
+
+                            let intrinsic_size = galley.intrinsic_size();
+                            let mut size = galley.size();
+                            size.y = size.y.at_least(min_inner_height);
+                            if clip_text {
+                                size.x = size.x.at_most(args.available_size.x);
+                            }
+
+                            // We paint the galley later, so we can do clipping and offsetting
+                            get_galley = Some(galley);
+                            IntoSizedResult {
+                                intrinsic_size,
+                                sized: SizedAtomKind::Empty { size: Some(size) },
+                            }
+                        })
+                        .atom_grow(true)
+                        .atom_align(align)
+                        .atom_id(inner_rect_id)
+                        .atom_shrink(should_shrink),
+                    );
+                }
             } else {
                 // We need a closure here, so we can calculate the galley based on the available
                 // width (after adding suffix and prefix), for correct wrapping in multi line text
@@ -1147,6 +1181,12 @@ impl<'t> TextEdit<'t> {
             }
         }
 
+        if interactive && ui.memory(|mem| mem.has_focus(id)) {
+            let mut lock_filter = event_filter;
+            lock_filter.escape |= state.cursor_purpose.is_ime_composition();
+            ui.memory_mut(|mem| mem.set_focus_lock_filter(id, lock_filter));
+        }
+
         state.clone().store(ui.ctx(), id);
 
         if response.changed() {
@@ -1285,10 +1325,13 @@ fn events(
 
     // We feed state to the undoer both before and after handling input
     // so that the undoer creates automatic saves even when there are no events for a while.
-    state.undoer.lock().feed_state(
-        ui.input(|i| i.time),
-        &(cursor_range, text.as_str().to_owned()),
-    );
+    // Suppress while IME pre-edit is active so intermediate jamo/kana are not undo steps.
+    if !state.cursor_purpose.is_ime_composition() {
+        state.undoer.lock().feed_state(
+            ui.input(|i| i.time),
+            &(cursor_range, text.as_str().to_owned()),
+        );
+    }
 
     let copy_if_not_password = |ui: &Ui, text: String| {
         if !password {
@@ -1379,6 +1422,19 @@ fn events(
                 } else {
                     None
                 }
+            }
+            Event::Key {
+                key: Key::Escape,
+                pressed: true,
+                modifiers,
+                ..
+            } if modifiers.is_none() && state.cursor_purpose.is_ime_composition() => {
+                let range_to_clear =
+                    active_preedit_cursor_range(text, &state.cursor_purpose, &cursor_range);
+                state.cursor_purpose = TextEditCursorPurpose::Selection;
+                let ccursor = text.delete_selected(&range_to_clear);
+                ui.memory_mut(|mem| mem.interrupt_ime());
+                Some(CursorMutation::Selection(CCursorRange::one(ccursor)))
             }
             Event::Key {
                 key: Key::Tab,
@@ -1533,7 +1589,9 @@ fn events(
                         text: preedit_text,
                         active_range_chars,
                     } => {
-                        let mut ccursor = clear_preedit_text(text, &cursor_range);
+                        let range_to_clear =
+                            active_preedit_cursor_range(text, &state.cursor_purpose, &cursor_range);
+                        let mut ccursor = clear_preedit_text(text, &range_to_clear);
 
                         if preedit_text.is_empty() {
                             Some(CursorMutation::Selection(CCursorRange::one(ccursor)))
@@ -1557,8 +1615,10 @@ fn events(
                             &state.cursor_purpose,
                             password,
                         ));
+                        let range_to_clear =
+                            active_preedit_cursor_range(text, &state.cursor_purpose, &cursor_range);
                         state.cursor_purpose = TextEditCursorPurpose::Selection;
-                        let mut ccursor = clear_preedit_text(text, &cursor_range);
+                        let mut ccursor = clear_preedit_text(text, &range_to_clear);
 
                         if !commit_text.is_empty() {
                             text.insert_text_at(&mut ccursor, commit_text, char_limit);
@@ -1675,12 +1735,31 @@ fn events(
 
     state.cursor.set_char_range(Some(cursor_range));
 
-    state.undoer.lock().feed_state(
-        ui.input(|i| i.time),
-        &(cursor_range, text.as_str().to_owned()),
-    );
+    if !state.cursor_purpose.is_ime_composition() {
+        state.undoer.lock().feed_state(
+            ui.input(|i| i.time),
+            &(cursor_range, text.as_str().to_owned()),
+        );
+    }
 
     (any_change, cursor_range)
+}
+
+/// Return the clamped character range of an active IME pre-edit, or `fallback` when not composing.
+fn active_preedit_cursor_range(
+    text: &dyn TextBuffer,
+    cursor_purpose: &TextEditCursorPurpose,
+    fallback: &CCursorRange,
+) -> CCursorRange {
+    match cursor_purpose {
+        TextEditCursorPurpose::ImeComposition { preedit_range, .. } => {
+            let char_count = text.as_str().chars().count();
+            let start = preedit_range.start.min(char_count);
+            let end = preedit_range.end.min(char_count).max(start);
+            CCursorRange::two(CCursor::new(start), CCursor::new(end))
+        }
+        TextEditCursorPurpose::Selection => *fallback,
+    }
 }
 
 /// Build the bounded committed snapshot used by both the outgoing IME payload and receipts.

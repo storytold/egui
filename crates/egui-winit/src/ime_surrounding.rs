@@ -1,4 +1,4 @@
-//! Outgoing IME surrounding-text synchronization for the Wayland backend.
+//! Outgoing IME surrounding-text synchronization for the Wayland and macOS backends.
 //!
 //! [`egui::output::IMEOutput`] is produced once per pass by the widget that owns IME input.
 //! This module turns that transient descriptor into ordered window operations:
@@ -14,16 +14,16 @@
 //!
 //! The planner is deliberately independent of winit. It only mutates its cache after every sink
 //! operation for the pass reported [`SinkOutcome::Applied`]; a locally suppressed write is never
-//! remembered as published. The production sink is the small Wayland adapter at the bottom of
-//! this file.
+//! remembered as published. The production sink is the small Wayland/macOS adapter at the bottom
+//! of this file.
 //!
 //! # Supported targets
 //!
-//! The module is compiled exactly where winit's Wayland backend exists: `feature = "wayland"` on
-//! free Unix targets outside Apple, Android, Emscripten and Redox. That covers Linux, the BSDs and
-//! any other target winit's `wayland_platform` cfg accepts; it is not available on macOS/Windows.
-//! X11 windows in the same winit build are rejected at runtime through
-//! `xdg_toplevel().is_none()` and keep their pre-existing IME behavior.
+//! The module is compiled where winit exposes surrounding-text sync:
+//! * `target_os = "macos"`, through `WindowExtMacOS`;
+//! * `feature = "wayland"` on free Unix targets outside Apple, Android, Emscripten and Redox,
+//!   through `WindowExtWayland` (X11 windows in the same winit build are rejected at runtime
+//!   through `xdg_toplevel().is_none()` and keep their pre-existing IME behavior).
 //!
 //! # Command ownership
 //!
@@ -196,8 +196,8 @@ pub(crate) trait ImeSurroundingSink {
 /// Per-window outgoing IME surrounding-text state.
 ///
 /// This is intentionally separate from the integration-level enable/disable latch
-/// ([`ImeGate`] and `State::allow_ime`). This structure only remembers what the backend was last
-/// told after every platform operation for the pass was applied.
+/// (`ImeGate` on Wayland and `State::allow_ime`). This structure only remembers what the backend
+/// was last told after every platform operation for the pass was applied.
 #[derive(Default)]
 pub(crate) struct ImeSurroundingSync {
     backend: Option<BackendContext>,
@@ -466,6 +466,17 @@ fn valid_payload(payload: &IMESurroundingTextPayload) -> bool {
 /// pass when the editor has already disappeared. External disables are not deferred: a
 /// `IMEAllowed(false)` commits synchronously so that the same frame cannot publish surrounding
 /// text first.
+#[cfg(any(
+    test,
+    all(
+        feature = "wayland",
+        unix,
+        not(target_vendor = "apple"),
+        not(target_os = "android"),
+        not(target_os = "emscripten"),
+        not(target_os = "redox"),
+    ),
+))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ImeGate {
     /// Last window focus state delivered by winit.
@@ -485,6 +496,17 @@ pub(crate) struct ImeGate {
     pending_external_enable: bool,
 }
 
+#[cfg(any(
+    test,
+    all(
+        feature = "wayland",
+        unix,
+        not(target_vendor = "apple"),
+        not(target_os = "android"),
+        not(target_os = "emscripten"),
+        not(target_os = "redox"),
+    ),
+))]
 impl ImeGate {
     /// Record `WindowEvent::Focused`.
     pub(crate) fn set_focused(&mut self, focused: bool) {
@@ -564,7 +586,18 @@ impl ImeGate {
     }
 }
 
-/// Result of [`ImeGate::transition`].
+/// Result of `ImeGate::transition`.
+#[cfg(any(
+    test,
+    all(
+        feature = "wayland",
+        unix,
+        not(target_vendor = "apple"),
+        not(target_os = "android"),
+        not(target_os = "emscripten"),
+        not(target_os = "redox"),
+    ),
+))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ImeAllowTransition {
     /// Value to keep in `State::allow_ime` after this pass.
@@ -578,18 +611,46 @@ pub(crate) struct ImeAllowTransition {
 ///
 /// The bridge compiles for a free-Unix winit build that may run either backend, so the module
 /// cfg alone cannot tell the two windows apart.
+#[cfg(all(
+    feature = "wayland",
+    unix,
+    not(target_vendor = "apple"),
+    not(target_os = "android"),
+    not(target_os = "emscripten"),
+    not(target_os = "redox"),
+))]
 pub(crate) fn is_wayland_window(window: &Window) -> bool {
     use winit::platform::wayland::WindowExtWayland as _;
     // `xdg_toplevel` is `None` for an X11 window in the same winit build.
     window.xdg_toplevel().is_some()
 }
 
-/// Wayland window adapter for [`ImeSurroundingSink`].
+/// True when `window` exposes platform surrounding-text synchronization.
+pub(crate) fn supports_ime_surrounding_window(window: &Window) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = window;
+        true
+    }
+    #[cfg(all(
+        feature = "wayland",
+        unix,
+        not(target_vendor = "apple"),
+        not(target_os = "android"),
+        not(target_os = "emscripten"),
+        not(target_os = "redox"),
+    ))]
+    {
+        is_wayland_window(window)
+    }
+}
+
+/// Wayland and macOS window adapter for [`ImeSurroundingSink`].
 ///
 /// `ime_allowed` is a read-only snapshot of the integration-level `State::allow_ime`, the value
 /// last committed to `Window::set_ime_allowed`. The dedicated clear preserves that state, so the
 /// snapshot never changes during a pass; it only decides whether publishing text would actually
-/// reach the compositor.
+/// reach the platform backend.
 pub(crate) struct WinitImeSurroundingSink<'a> {
     window: &'a Window,
     ime_allowed: bool,
@@ -606,21 +667,32 @@ impl<'a> WinitImeSurroundingSink<'a> {
 
 impl ImeSurroundingSink for WinitImeSurroundingSink<'_> {
     fn supports_ime_surrounding_text(&self) -> bool {
-        // This proves the window is Wayland; it does not prove that the compositor implements
-        // `zwp_text_input_v3` or that a text input is currently entered. Winit keeps the snapshot
-        // for the next entering text input, which is why publishing is still correct there. Nor
-        // does it prove which winit API surface is available: the clear below needs the E21b
-        // `clear_ime_surrounding_text`, which the pinned revision does not have.
-        is_wayland_window(self.window)
+        // On Wayland this proves the window has an xdg_toplevel (excluding X11 windows in a mixed
+        // build), and on macOS `WinitView` always maintains an `NSTextInputClient` document cache.
+        supports_ime_surrounding_window(self.window)
     }
 
     fn clear_ime_context(&mut self) -> SinkOutcome {
-        use winit::platform::wayland::WindowExtWayland as _;
-        // One dedicated commit: winit forgets its cached text, keeps `ime_allowed` as it is,
-        // never enables a disabled window, and resets the protocol context only when text was
-        // published or a composition was active. It is a no-op for a disabled window apart from
-        // forgetting the cache, which is why no local allowed check is needed here.
-        self.window.clear_ime_surrounding_text();
+        // One dedicated clear: winit forgets its cached text, keeps `ime_allowed` as it is,
+        // never enables a disabled window, and resets the protocol context on Wayland only when
+        // text was published or a composition was active.
+        #[cfg(all(
+            feature = "wayland",
+            unix,
+            not(target_vendor = "apple"),
+            not(target_os = "android"),
+            not(target_os = "emscripten"),
+            not(target_os = "redox"),
+        ))]
+        {
+            use winit::platform::wayland::WindowExtWayland as _;
+            self.window.clear_ime_surrounding_text();
+        }
+        #[cfg(target_os = "macos")]
+        {
+            use winit::platform::macos::WindowExtMacOS as _;
+            self.window.clear_ime_surrounding_text();
+        }
         SinkOutcome::Applied
     }
 
@@ -637,15 +709,37 @@ impl ImeSurroundingSink for WinitImeSurroundingSink<'_> {
             return SinkOutcome::Suppressed;
         }
 
-        use winit::platform::wayland::WindowExtWayland as _;
-        let cause = match cause {
-            ImeChangeCause::InputMethod => {
-                winit::platform::wayland::ImeTextChangeCause::InputMethod
-            }
-            ImeChangeCause::Other => winit::platform::wayland::ImeTextChangeCause::Other,
-        };
-        self.window
-            .set_ime_surrounding_text_with_change_cause(text, cursor, anchor, cause);
+        #[cfg(all(
+            feature = "wayland",
+            unix,
+            not(target_vendor = "apple"),
+            not(target_os = "android"),
+            not(target_os = "emscripten"),
+            not(target_os = "redox"),
+        ))]
+        {
+            use winit::platform::wayland::WindowExtWayland as _;
+            let cause = match cause {
+                ImeChangeCause::InputMethod => {
+                    winit::platform::wayland::ImeTextChangeCause::InputMethod
+                }
+                ImeChangeCause::Other => winit::platform::wayland::ImeTextChangeCause::Other,
+            };
+            self.window
+                .set_ime_surrounding_text_with_change_cause(text, cursor, anchor, cause);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            use winit::platform::macos::WindowExtMacOS as _;
+            let cause = match cause {
+                ImeChangeCause::InputMethod => {
+                    winit::platform::macos::ImeTextChangeCause::InputMethod
+                }
+                ImeChangeCause::Other => winit::platform::macos::ImeTextChangeCause::Other,
+            };
+            self.window
+                .set_ime_surrounding_text_with_change_cause(text, cursor, anchor, cause);
+        }
         SinkOutcome::Applied
     }
 }
@@ -1523,7 +1617,7 @@ mod tests {
         let mut harness = PassHarness::new();
         harness.window_focus_gained();
         harness.external_ime_allowed(true);
-        assert!(harness.sink.calls.is_empty());
+        assert_eq!(harness.sink.calls, []);
         assert!(!harness.allow_ime);
         let ime = output(1, 1, IMEPurpose::Normal, "hello");
         harness.pass(Some(&ime));
@@ -1996,5 +2090,168 @@ mod tests {
         assert!(!diagnostic.contains("horse"), "{diagnostic}");
         assert!(diagnostic.contains("<redacted>"), "{diagnostic}");
         assert!(diagnostic.contains("28"), "{diagnostic}");
+    }
+
+    /// Models the macOS `State` integration path in `lib.rs`, which deliberately omits Wayland's
+    /// `ImeGate` and `clear_ime_surrounding_on_focus_loss` so transient focus changes (Hanja
+    /// candidate windows, `Cmd+Tab`) never invoke `set_ime_allowed(false)` / `discardMarkedText()`.
+    struct MacosPassHarness {
+        sync: ImeSurroundingSync,
+        sink: FakeSink,
+        allow_ime: bool,
+        focused: bool,
+        old_ime_purpose: IMEPurpose,
+    }
+
+    impl MacosPassHarness {
+        fn new() -> Self {
+            let mut sink = FakeSink::new();
+            sink.allowed = false;
+            Self {
+                sync: ImeSurroundingSync::default(),
+                sink,
+                allow_ime: false,
+                focused: false,
+                old_ime_purpose: IMEPurpose::Normal,
+            }
+        }
+
+        fn pass(&mut self, ime: Option<&IMEOutput>, reset: bool) -> ImeSurroundingAction {
+            let ime_requested = ime.is_some();
+            let is_toggling_ime = self.allow_ime != ime_requested;
+            let mut ime_context_was_reset = is_toggling_ime;
+            if is_toggling_ime {
+                self.allow_ime = ime_requested;
+                self.sink.allowed = ime_requested;
+                self.sink.published = None;
+                self.sink.calls.push(if ime_requested {
+                    Call::WindowEnable
+                } else {
+                    Call::WindowDisable
+                });
+            }
+            if reset && self.allow_ime && !is_toggling_ime {
+                self.sink.published = None;
+                ime_context_was_reset = true;
+            }
+            if let Some(ime) = ime
+                && ime.purpose != self.old_ime_purpose
+            {
+                self.old_ime_purpose = ime.purpose;
+            }
+            if ime_context_was_reset {
+                self.sync.forget_backend();
+            }
+            self.sync.update(&mut self.sink, ime, self.allow_ime)
+        }
+
+        fn window_focus_lost(&mut self) {
+            // On macOS, `WindowEvent::Focused(false)` updates `egui_input.focused` and resets
+            // `ime_reset`, and deliberately leaves `allow_ime` and `ime_surrounding` untouched so
+            // `WinitView` preserves active Hangul marked text across transient focus loss.
+            self.focused = false;
+        }
+
+        fn window_focus_gained(&mut self) {
+            self.focused = true;
+        }
+
+        fn external_ime_allowed(&mut self, allowed: bool) {
+            if self.allow_ime != allowed {
+                self.allow_ime = allowed;
+                self.sync.forget_backend();
+            }
+            self.sink.allowed = allowed;
+            if !allowed {
+                self.sink.published = None;
+            }
+            self.sink.calls.push(if allowed {
+                Call::WindowEnable
+            } else {
+                Call::WindowDisable
+            });
+        }
+    }
+
+    #[test]
+    fn macos_enables_ime_on_cold_start_and_preserves_context_across_transient_focus_loss() {
+        let mut harness = MacosPassHarness::new();
+        let first = output(1, 1, IMEPurpose::Normal, "가");
+
+        // Cold start without a prior `Focused(true)` event still enables IME immediately.
+        assert!(matches!(
+            harness.pass(Some(&first), false),
+            ImeSurroundingAction::Set(_)
+        ));
+        assert!(harness.allow_ime, "cold-start descriptor enables macOS IME");
+        assert_eq!(
+            harness.sink.calls,
+            vec![
+                Call::WindowEnable,
+                Call::Set("가".to_owned(), "가".len(), "가".len()),
+            ]
+        );
+        assert_eq!(harness.sink.causes, vec![ImeChangeCause::Other]);
+
+        // Transient focus loss (Hanja popup / Cmd+Tab) emits no WindowDisable or SinkClear.
+        harness.window_focus_gained();
+        assert!(harness.focused);
+        harness.window_focus_lost();
+        assert!(!harness.focused);
+        assert_eq!(
+            harness.pass(Some(&first), false),
+            ImeSurroundingAction::None,
+            "unchanged editor across macOS focus loss must not toggle IME or republish"
+        );
+        assert!(harness.sink.allowed, "macOS IME stays allowed");
+
+        // Next IME commit updates surrounding text with `InputMethod` cause.
+        let mut committed = output(1, 1, IMEPurpose::Normal, "가한");
+        committed.change_cause = ImeChangeCause::InputMethod;
+        assert!(matches!(
+            harness.pass(Some(&committed), false),
+            ImeSurroundingAction::Set(_)
+        ));
+        assert_eq!(
+            harness.sink.causes,
+            vec![ImeChangeCause::Other, ImeChangeCause::InputMethod]
+        );
+    }
+
+    #[test]
+    fn macos_external_ime_allowed_and_reset_keep_cache_coherent() {
+        let mut harness = MacosPassHarness::new();
+        let first = output(1, 1, IMEPurpose::Normal, "한글");
+        harness.pass(Some(&first), false);
+
+        // Redundant `IMEAllowed(true)` preserves cache so owner switch still plans `ClearThenSet`.
+        harness.external_ime_allowed(true);
+        let second_owner = output(2, 2, IMEPurpose::Normal, "한글");
+        assert!(matches!(
+            harness.pass(Some(&second_owner), false),
+            ImeSurroundingAction::ClearThenSet(_)
+        ));
+
+        // Reset/interrupt forgets backend cache and forces an `Other` resend of committed text.
+        let mut after_reset = output(2, 2, IMEPurpose::Normal, "한글");
+        after_reset.change_cause = ImeChangeCause::InputMethod;
+        assert!(matches!(
+            harness.pass(Some(&after_reset), true),
+            ImeSurroundingAction::Set(_)
+        ));
+        assert_eq!(
+            harness.sink.causes.last(),
+            Some(&ImeChangeCause::Other),
+            "post-reset republish must report application-origin cause"
+        );
+
+        // External `IMEAllowed(false)` followed by `IMEAllowed(true)` resends unchanged text.
+        harness.external_ime_allowed(false);
+        assert!(!harness.allow_ime);
+        harness.external_ime_allowed(true);
+        assert!(matches!(
+            harness.pass(Some(&second_owner), false),
+            ImeSurroundingAction::Set(_)
+        ));
     }
 }

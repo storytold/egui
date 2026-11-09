@@ -140,6 +140,11 @@ impl TextEditState {
         self.set_undoer(TextEditUndoer::default());
     }
 
+    /// Returns `true` when an IME pre-edit composition is currently active in this editor.
+    pub fn is_ime_composition(&self) -> bool {
+        self.cursor_purpose.is_ime_composition()
+    }
+
     /// Update the IME owner/focus epoch and return the current context generation.
     ///
     /// The generation is stable through ordinary text and selection updates. It changes when
