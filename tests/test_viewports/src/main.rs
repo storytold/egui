@@ -6,11 +6,20 @@ use std::sync::Arc;
 use eframe::egui;
 use egui::{Id, InnerResponse, UiBuilder, ViewportBuilder, ViewportId, mutex::RwLock};
 
+#[cfg(feature = "wgpu")]
+mod texture_order;
+
 // Drag-and-drop between windows is not yet implemented, but if you wanna work on it, enable this:
 pub const DRAG_AND_DROP_TEST: bool = false;
 
 fn main() {
     env_logger::init(); // Use `RUST_LOG=debug` to see logs.
+
+    #[cfg(feature = "wgpu")]
+    if std::env::args().any(|arg| arg == "--texture-order-regression") {
+        texture_order::run().expect("native texture-order regression");
+        return;
+    }
 
     let _ = eframe::run_native(
         "Viewports",
