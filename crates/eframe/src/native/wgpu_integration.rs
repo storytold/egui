@@ -429,6 +429,16 @@ impl WinitApp for WgpuWinitApp<'_> {
         )
     }
 
+    fn has_visible_immediate_viewport(&self, window_id: WindowId) -> bool {
+        self.running.as_ref().is_some_and(|running| {
+            let shared = running.shared.borrow();
+            shared
+                .viewport_from_window
+                .get(&window_id)
+                .is_some_and(|id| has_visible_immediate_descendant(&shared.viewports, *id))
+        })
+    }
+
     fn save(&mut self) {
         log::debug!("WinitApp::save called");
         if let Some(running) = self.running.as_mut() {
@@ -700,8 +710,12 @@ impl WgpuWinitRunning<'_> {
             };
             let mut raw_input = egui_winit.take_egui_input(window);
 
-            let show_ui = mode == PassMode::Full
-                && (is_visible || is_viewport_or_descendant_visible(viewports, viewport_id));
+            let show_ui = mode.runs_ui(
+                is_visible,
+                || is_viewport_or_descendant_visible(viewports, viewport_id),
+                || has_visible_immediate_descendant(viewports, viewport_id),
+            );
+            let is_visible = mode.paints(is_visible);
 
             integration.pre_update();
 
@@ -1217,6 +1231,19 @@ fn is_viewport_or_descendant_visible(viewports: &Viewports, viewport_id: Viewpor
             && child.ids.this != viewport_id
             && is_viewport_or_descendant_visible(viewports, child.ids.this)
     })
+}
+
+/// See [`winit_integration::has_visible_immediate_descendant`].
+fn has_visible_immediate_descendant(viewports: &Viewports, viewport_id: ViewportId) -> bool {
+    let nodes: Vec<_> = viewports
+        .values()
+        .map(|viewport| winit_integration::ViewportNode {
+            ids: viewport.ids,
+            is_immediate: viewport.viewport_ui_cb.is_none(),
+            is_visible: viewport.info.visible().unwrap_or(true),
+        })
+        .collect();
+    winit_integration::has_visible_immediate_descendant(&nodes, viewport_id)
 }
 
 fn render_immediate_viewport(
