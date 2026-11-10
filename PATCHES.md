@@ -184,6 +184,20 @@ only while the thread is already panicking. It does not count deltas as rendered
 normal ownership rule. Regression tests must preserve the original panic payload and still
 reject an ordinary unhandled drop. Debug/release tests and a fresh adversarial review are required.
 
+### Shared native wgpu texture-update ordering
+
+The wgpu painter owns one texture map for all viewports. Its pending texture deltas now live
+beside that painter in `SharedState`, rather than in separate regular/immediate viewport
+queues. A hidden parent's full resize must be applied before an immediate child's later
+partial update; otherwise the child can upload 54 rows into a 32-row GPU texture
+([DeckCraft #1987](https://github.com/storytold/deckcraft/issues/1987)). Updates remain pending when a viewport or surface is unavailable and are
+discarded only when the shared renderer is torn down.
+
+`test_viewports --texture-order-regression` exercises the native renderer at 2× scale,
+including parent minimize/restore, and checks that the rendered image retains both the
+partial update and the untouched region. See `tests/test_viewports/README.md`.
+
+
 ### Local bidi cursor affinity repair (qualification in progress)
 
 `Galley::clamp_cursor` retains the affinity of a valid character cursor. Converting through

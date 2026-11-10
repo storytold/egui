@@ -67,15 +67,6 @@ struct WgpuWinitRunning<'app> {
 
     /// Wrapped in an `Rc<RefCell<…>>` so it can be re-entrantly shared via a weak-pointer.
     shared: Rc<RefCell<SharedState>>,
-
-    pending_deltas: TexturesDelta,
-}
-
-impl Drop for WgpuWinitRunning<'_> {
-    fn drop(&mut self) {
-        // Avoid debug panic when dropping unapplied deltas on teardown
-        self.pending_deltas.clear();
-    }
 }
 
 /// Everything needed by the immediate viewport renderer.\
@@ -87,12 +78,22 @@ pub struct SharedState {
     egui_ctx: egui::Context,
     viewports: Viewports,
     painter: egui_wgpu::winit::Painter,
+    /// Textures belong to the shared painter, not a viewport. Keep updates in generation order
+    /// so an immediate viewport applies a hidden parent's resize before later partial updates.
+    pending_deltas: TexturesDelta,
     viewport_from_window: HashMap<WindowId, ViewportId>,
     focused_viewport: Option<ViewportId>,
     resized_viewport: Option<ViewportId>,
 
     /// Passed on to each [`egui_winit::State`]. See [`NativeOptions::clipboard_shortcuts`].
     clipboard_shortcuts: bool,
+}
+
+impl Drop for SharedState {
+    fn drop(&mut self) {
+        // Avoid debug panic when dropping unapplied deltas on teardown.
+        self.pending_deltas.clear();
+    }
 }
 
 pub type Viewports = egui::OrderedViewportIdMap<Viewport>;
@@ -105,9 +106,6 @@ pub struct Viewport {
     info: ViewportInfo,
     actions_requested: Vec<ActionRequested>,
 
-    /// Any not yet applied deltas for this viewport.
-    pending_delta: TexturesDelta,
-
     /// `None` for sync viewports.
     viewport_ui_cb: Option<Arc<DeferredViewportUiCallback>>,
 
@@ -117,13 +115,6 @@ pub struct Viewport {
 
     /// `window` and `egui_winit` are initialized together.
     egui_winit: Option<egui_winit::State>,
-}
-
-impl Drop for Viewport {
-    fn drop(&mut self) {
-        // Avoid debug panic when dropping unapplied deltas on teardown
-        self.pending_delta.clear();
-    }
 }
 
 // ----------------------------------------------------------------------------
@@ -362,7 +353,6 @@ impl<'app> WgpuWinitApp<'app> {
                 viewport_ui_cb: None,
                 window: Some(window),
                 egui_winit: Some(egui_winit),
-                pending_delta: Default::default(),
             },
         );
 
@@ -371,6 +361,7 @@ impl<'app> WgpuWinitApp<'app> {
             viewport_from_window,
             viewports,
             painter,
+            pending_deltas: Default::default(),
             focused_viewport: Some(ViewportId::ROOT),
             resized_viewport: None,
             clipboard_shortcuts: self.native_options.clipboard_shortcuts,
@@ -394,7 +385,6 @@ impl<'app> WgpuWinitApp<'app> {
             integration,
             app,
             shared,
-            pending_deltas: Default::default(),
         }))
     }
 }
@@ -632,7 +622,6 @@ impl WgpuWinitRunning<'_> {
             app,
             integration,
             shared,
-            pending_deltas,
         } = self;
 
         let mut frame_timer = crate::stopwatch::Stopwatch::new();
@@ -781,6 +770,7 @@ impl WgpuWinitRunning<'_> {
             egui_ctx,
             viewports,
             painter,
+            pending_deltas,
             viewport_from_window,
             ..
         } = &mut *shared_mut;
@@ -1300,15 +1290,17 @@ fn render_immediate_viewport(
     let SharedState {
         viewports,
         painter,
+        pending_deltas,
         viewport_from_window,
         ..
     } = &mut *shared_mut;
+
+    pending_deltas.append(textures_delta);
 
     let Some(viewport) = viewports.get_mut(&ids.this) else {
         warn!("Viewport disappeared unexpectedly!");
         return;
     };
-    viewport.pending_delta.append(textures_delta);
 
     viewport.info.events.clear(); // they should have been processed
     let (Some(egui_winit), Some(window)) = (&mut viewport.egui_winit, &viewport.window) else {
@@ -1332,7 +1324,7 @@ fn render_immediate_viewport(
         pixels_per_point,
         [0.0, 0.0, 0.0, 0.0],
         &clipped_primitives,
-        &mut viewport.pending_delta,
+        pending_deltas,
         vec![],
         window,
     );
@@ -1485,7 +1477,6 @@ fn initialize_or_update_viewport<'a>(
                 viewport_ui_cb,
                 window: None,
                 egui_winit: None,
-                pending_delta: Default::default(),
             })
         }
 
