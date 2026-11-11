@@ -594,6 +594,7 @@ impl ContextImpl {
                 nodes,
                 parent_map: IdMap::default(),
                 focus_override: None,
+                created: Vec::new(),
             });
         }
 
@@ -688,28 +689,12 @@ impl ContextImpl {
         if let std::collections::hash_map::Entry::Vacant(entry) = builders.entry(id) {
             entry.insert(Default::default());
 
-            /// Find the first ancestor that already has an accesskit node.
-            fn find_accesskit_parent(
-                parent_map: &IdMap<Id>,
-                node_map: &IdMap<accesskit::Node>,
-                id: Id,
-            ) -> Option<Id> {
-                if let Some(parent_id) = parent_map.get(&id) {
-                    if node_map.contains_key(parent_id) {
-                        Some(*parent_id)
-                    } else {
-                        find_accesskit_parent(parent_map, node_map, *parent_id)
-                    }
-                } else {
-                    None
-                }
-            }
-
             let parent_id = find_accesskit_parent(&state.parent_map, builders, id)
                 .unwrap_or_else(crate::accesskit_root_id);
 
             let parent_builder = builders.get_mut(&parent_id)?;
             parent_builder.push_child(id.accesskit_id());
+            state.created.push(id);
         }
 
         builders.get_mut(&id)
@@ -4396,6 +4381,134 @@ impl Context {
     }
 }
 
+/// ## Pass records
+impl Context {
+    /// Where this pass's shapes, widget rects and AccessKit nodes stand, for [`Self::pass_records_since`].
+    pub fn pass_mark(&self) -> crate::PassMark {
+        self.write(|ctx| {
+            let viewport = ctx.viewport();
+            crate::PassMark {
+                shapes: viewport.graphics.lens().collect(),
+                widgets: viewport
+                    .this_pass
+                    .widgets
+                    .layers()
+                    .map(|(layer, rects)| (*layer, rects.len()))
+                    .collect(),
+                nodes: viewport
+                    .this_pass
+                    .accesskit_state
+                    .as_ref()
+                    .map_or(0, |state| state.created.len()),
+            }
+        })
+    }
+
+    /// What this pass added since `mark`: the shapes painted, and the widget rects and AccessKit nodes created, each
+    /// as it stands now.
+    pub fn pass_records_since(&self, mark: &crate::PassMark) -> crate::PassRecords {
+        use crate::PassMark;
+        self.write(|ctx| {
+            let viewport = ctx.viewport();
+            let graphics = &viewport.graphics;
+            let shapes: Vec<_> = graphics
+                .lens()
+                .filter(|(layer, len)| *len > PassMark::at(&mark.shapes, *layer))
+                .filter_map(|(layer, _)| {
+                    let from = PassMark::at(&mark.shapes, layer);
+                    Some((
+                        layer,
+                        graphics
+                            .get(layer)?
+                            .all_entries()
+                            .skip(from)
+                            .cloned()
+                            .collect(),
+                    ))
+                })
+                .collect();
+            let widgets: Vec<WidgetRect> = viewport
+                .this_pass
+                .widgets
+                .layers()
+                .flat_map(|(layer, rects)| {
+                    rects
+                        .get(PassMark::at(&mark.widgets, *layer)..)
+                        .unwrap_or_default()
+                        .iter()
+                        .copied()
+                })
+                .collect();
+            let mut nodes = Vec::new();
+            let mut parents = Vec::new();
+            if let Some(state) = &viewport.this_pass.accesskit_state {
+                for id in state.created.get(mark.nodes..).unwrap_or_default() {
+                    if let Some(node) = state.nodes.get(id) {
+                        nodes.push((*id, node.clone()));
+                    }
+                }
+                for id in widgets
+                    .iter()
+                    .map(|widget| widget.id)
+                    .chain(nodes.iter().map(|(id, _)| *id))
+                {
+                    if let Some(parent) = state.parent_map.get(&id) {
+                        parents.push((id, *parent));
+                    }
+                }
+            }
+            crate::PassRecords {
+                shapes,
+                widgets,
+                nodes,
+                parents,
+            }
+        })
+    }
+
+    /// Adds `records` to this pass as the part of a pass that made them would: its shapes after what each layer
+    /// holds, its widget rects, and its AccessKit nodes under the nodes their parents have now.
+    pub fn replay_pass_records(&self, records: &crate::PassRecords) {
+        self.write(|ctx| {
+            let viewport = ctx.viewport();
+            for (layer, shapes) in &records.shapes {
+                let list = viewport.graphics.entry(*layer);
+                for shape in shapes {
+                    list.add(shape.clip_rect, shape.shape.clone());
+                }
+            }
+            for widget in &records.widgets {
+                viewport.this_pass.widgets.insert(
+                    widget.layer_id,
+                    *widget,
+                    crate::InteractOptions::default(),
+                );
+            }
+            let Some(state) = viewport.this_pass.accesskit_state.as_mut() else {
+                return;
+            };
+            state.parent_map.extend(records.parents.iter().copied());
+            let replayed: ahash::HashSet<Id> = records.nodes.iter().map(|(id, _)| *id).collect();
+            for (id, node) in &records.nodes {
+                if state.nodes.contains_key(id) {
+                    continue;
+                }
+                // A replayed parent lists the node already.
+                let parent = find_accesskit_parent(&state.parent_map, &state.nodes, *id)
+                    .unwrap_or_else(crate::accesskit_root_id);
+                if !replayed.contains(&parent) {
+                    let Some(parent) = state.nodes.get_mut(&parent) else {
+                        continue;
+                    };
+                    parent.push_child(id.accesskit_id());
+                }
+                state.nodes.insert(*id, node.clone());
+                state.created.push(*id);
+            }
+        });
+    }
+}
+
 /// ## Image loading
 impl Context {
     /// Associate some static bytes with a `uri`.
@@ -5109,6 +5222,20 @@ fn warn_if_rect_changes_id(
 ///
 /// Nodes that aren't widgets themselves (e.g. text runs) inherit the visibility
 /// of their closest ancestor that is.
+/// The first ancestor of `id` that already has an AccessKit node.
+fn find_accesskit_parent(
+    parent_map: &IdMap<Id>,
+    node_map: &IdMap<accesskit::Node>,
+    id: Id,
+) -> Option<Id> {
+    let parent_id = parent_map.get(&id)?;
+    if node_map.contains_key(parent_id) {
+        Some(*parent_id)
+    } else {
+        find_accesskit_parent(parent_map, node_map, *parent_id)
+    }
+}
+
 fn is_accesskit_visible(widgets: &crate::WidgetRects, parent_map: &IdMap<Id>, mut id: Id) -> bool {
     loop {
         if let Some(widget) = widgets.get(id) {

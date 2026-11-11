@@ -74,6 +74,9 @@ pub struct AccessKitPassState {
 
     /// See [`crate::Context::set_accesskit_focus`].
     pub focus_override: Option<Id>,
+
+    /// The nodes in the order they were created, for [`crate::Context::pass_records_since`].
+    pub created: Vec<Id>,
 }
 
 #[cfg(debug_assertions)]
