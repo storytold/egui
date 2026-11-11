@@ -29,7 +29,7 @@ jobs:
           URL_SLUG=$(echo $URL_SLUG | tr -cd '[:alnum:]-')
           echo "URL_SLUG=$URL_SLUG" >> $GITHUB_ENV
       - name: Deploy
-        uses: JamesIves/github-pages-deploy-action@v4
+        uses: step-security/github-pages-deploy-action@fe9e6f669019bdc4519d0fe69013b428268eb30c # v4.9.0
         with:
           folder: empty_dir
           repository-name: egui-pr-preview/pr

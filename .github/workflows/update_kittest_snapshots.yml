@@ -41,7 +41,7 @@ jobs:
       - name: Git status
         run: git status
 
-      - uses: stefanzweifel/git-auto-commit-action@v6
+      - uses: step-security/git-auto-commit-action@e2d505468267a3cb406af729d48d664de1f16393 # v6.0.2
         with:
           commit_message: 'Update snapshot images'
 

@@ -38,14 +38,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
 
-      - uses: actions-rs/toolchain@v1
+      - uses: step-security/actions-rs-toolchain@40a2f87e50bed6faa2d050e99810b226b75d8c8a # v1.0.7
         with:
           profile: minimal
           target: wasm32-unknown-unknown
           toolchain: 1.95.0
           override: true
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: step-security/rust-cache@8871c8ba063416da7c32246932ea6ae08700453e # v2.9.2
         with:
           prefix-key: "web-demo-"
 
@@ -60,7 +60,7 @@ jobs:
           scripts/build_demo_web.sh --release
 
       - name: Deploy
-        uses: JamesIves/github-pages-deploy-action@v4
+        uses: step-security/github-pages-deploy-action@fe9e6f669019bdc4519d0fe69013b428268eb30c # v4.9.0
         with:
           folder: web_demo
           # this option will not maintain any history of your previous pages deployment
