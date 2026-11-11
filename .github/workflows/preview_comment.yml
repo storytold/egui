@@ -13,7 +13,7 @@ jobs:
         with:
           egress-policy: audit
       - name: Comment PR
-        uses: thollander/actions-comment-pull-request@v2
+        uses: step-security/actions-comment-pull-request@60cd38988a354b2d22b47612fb02a20e822d6048 # v3.0.2
         env:
           URL_SLUG: ${{ github.event.number }}-${{ github.head_ref }}
         with:
@@ -23,5 +23,5 @@ jobs:
             Preview will be available at https://egui-pr-preview.github.io/pr/${{ env.URL_SLUG }}
             
             View snapshot changes at [kitdiff](https://rerun-io.github.io/kitdiff/?url=${{ github.event.pull_request.html_url }})
-          comment_tag: 'egui-preview'
+          comment-tag: 'egui-preview'
 

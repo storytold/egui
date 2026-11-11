@@ -23,14 +23,14 @@ jobs:
         with:
           egress-policy: audit
       - name: Check for a "do-not-merge" label
-        uses: mheap/github-action-required-labels@v3
+        uses: step-security/github-action-required-labels@7531212c96acadbb59d70313e686dfe4d539c3e8 # v5.6.0
         with:
           mode: exactly
           count: 0
           labels: "do-not-merge"
 
       - name: Require at least one label
-        uses: mheap/github-action-required-labels@v3
+        uses: step-security/github-action-required-labels@7531212c96acadbb59d70313e686dfe4d539c3e8 # v5.6.0
         with:
           mode: minimum
           count: 1
