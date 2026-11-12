@@ -8,7 +8,7 @@ use epaint::emath::TSTransform;
 
 use crate::{
     EventFilter, Id, IdMap, LayerId, Order, PointerButton, Pos2, Rangef, RawInput, Rect, Style,
-    Vec2, ViewportId, ViewportIdMap, ViewportIdSet, area, vec2,
+    SurrenderFocusOn, Vec2, ViewportId, ViewportIdMap, ViewportIdSet, area, vec2,
 };
 
 mod theme;
@@ -582,6 +582,10 @@ pub(crate) struct Focus {
 struct FocusWidget {
     pub id: Id,
     pub filter: EventFilter,
+
+    /// The widget's own rule for a press or click elsewhere, in place of
+    /// [`crate::InputOptions::surrender_focus_on`]; set with [`Memory::set_focus_surrender`].
+    pub surrender: Option<SurrenderFocusOn>,
 }
 
 impl FocusWidget {
@@ -589,6 +593,7 @@ impl FocusWidget {
         Self {
             id,
             filter: Default::default(),
+            surrender: None,
         }
     }
 }
@@ -996,7 +1001,30 @@ impl Memory {
         self.focus_mut().focused_widget = Some(FocusWidget {
             id,
             filter: event_filter,
+            surrender: None,
         });
+    }
+
+    /// Set the rule by which the focused widget `id` surrenders focus when the user presses or
+    /// clicks somewhere else, in place of [`crate::InputOptions::surrender_focus_on`].
+    ///
+    /// Takes effect at once and lasts while `id` keeps focus: any focus change, a request
+    /// for `id` itself included, goes back to the option. Does nothing if `id` has no focus.
+    pub fn set_focus_surrender(&mut self, id: Id, surrender: SurrenderFocusOn) {
+        if let Some(focused) = &mut self.focus_mut().focused_widget
+            && focused.id == id
+        {
+            focused.surrender = Some(surrender);
+        }
+    }
+
+    /// The rule by which the focused widget surrenders focus on a press or click elsewhere: its
+    /// own ([`Self::set_focus_surrender`]), or [`crate::InputOptions::surrender_focus_on`].
+    pub(crate) fn focus_surrender(&self) -> SurrenderFocusOn {
+        self.focus()
+            .and_then(|focus| focus.focused_widget)
+            .and_then(|focused| focused.surrender)
+            .unwrap_or(self.options.input_options.surrender_focus_on)
     }
 
     /// Defer focus until the next pass so an already rendered widget sees `gained_focus`.
