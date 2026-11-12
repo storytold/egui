@@ -145,7 +145,7 @@ impl WheelState {
                     MouseWheelUnit::Line => {
                         // A single wheel event never scrolls more than a page:
                         // a free-spinning wheel on macOS can report hundreds of lines in one
-                        // event (we have seen 1005), sometimes against the spin.
+                        // event, sometimes against the spin.
                         let page = viewport_rect.size();
                         (options.line_scroll_speed * delta).clamp(-page, page)
                     }
@@ -536,13 +536,13 @@ mod tests {
             total
         };
 
-        let total = scroll_lines(vec2(0.0, 1005.0));
+        let total = scroll_lines(vec2(0.0, 1200.0));
         assert!(
             (total.y - 600.0).abs() < 1.0,
             "at most a screen height: {total:?}"
         );
 
-        let total = scroll_lines(vec2(-1005.0, 0.0));
+        let total = scroll_lines(vec2(-1200.0, 0.0));
         assert!(
             (total.x + 800.0).abs() < 1.0,
             "at most a screen width: {total:?}"
