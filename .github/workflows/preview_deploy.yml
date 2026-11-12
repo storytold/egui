@@ -23,20 +23,20 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Harden runner
-        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        uses: step-security/harden-runner@v2.22.4
         with:
           egress-policy: audit
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.4.0
       - name: 'Download build artifact'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v4.3.0
         with:
           name: web_demo
           path: web_demo_artifact
           github-token: ${{ secrets.GITHUB_TOKEN }}
           run-id: ${{ github.event.workflow_run.id }}
       - name: 'Download build meta'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v4.3.0
         with:
           name: meta.json
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -48,7 +48,7 @@ jobs:
           echo "URL_SLUG=$(jq -r .url_slug meta.json)" >> $GITHUB_ENV
 
       - name: Deploy
-        uses: step-security/github-pages-deploy-action@fe9e6f669019bdc4519d0fe69013b428268eb30c # v4.9.0
+        uses: step-security/github-pages-deploy-action@v4.9.0
         with:
           folder: web_demo_artifact
           repository-name: egui-pr-preview/pr
@@ -60,7 +60,7 @@ jobs:
           single-commit: true
 
       - name: Comment PR
-        uses: step-security/actions-comment-pull-request@60cd38988a354b2d22b47612fb02a20e822d6048 # v3.0.2
+        uses: step-security/actions-comment-pull-request@v3.0.2
         with:
           message: |
             Preview available at https://egui-pr-preview.github.io/pr/${{ env.URL_SLUG }}

@@ -20,10 +20,10 @@ jobs:
 
     steps:
       - name: Harden runner
-        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        uses: step-security/harden-runner@v2.22.4
         with:
           egress-policy: audit
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.4.0
         with:
           lfs: true
           # We can't use the workflow token since that would prevent our commit to cause further workflows.
@@ -41,7 +41,7 @@ jobs:
       - name: Git status
         run: git status
 
-      - uses: step-security/git-auto-commit-action@e2d505468267a3cb406af729d48d664de1f16393 # v6.0.2
+      - uses: step-security/git-auto-commit-action@v6.0.2
         with:
           commit_message: 'Update snapshot images'
 
