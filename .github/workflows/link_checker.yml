@@ -9,10 +9,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Harden runner
-        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        uses: step-security/harden-runner@v2.22.4
         with:
           egress-policy: audit
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.4.0
       - name: Don't check CHANGELOG.md files
         # This is really stupid but lychee doesn't have a way of excluding files via GLOB:
         # https://github.com/lycheeverse/lychee/issues/1608
@@ -21,6 +21,6 @@ jobs:
         # to change their username.
         run: rm -r  */**/CHANGELOG.md CHANGELOG.md
       - name: Link Checker
-        uses: lycheeverse/lychee-action@v2
+        uses: lycheeverse/lychee-action@v2.9.0
         with:
           args: "'**/*.md' '**/*.toml' --exclude localhost --exclude reddit.com" # I guess reddit doesn't like github action IPs

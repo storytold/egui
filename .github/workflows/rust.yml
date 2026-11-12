@@ -19,14 +19,14 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Harden runner
-        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        uses: step-security/harden-runner@v2.22.4
         with:
           egress-policy: audit
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.4.0
         with:
           lfs: true
 
-      - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
+      - uses: step-security/dtolnay-rust-toolchain@v1.0.0
         with:
           toolchain: 1.95.0
 
@@ -39,7 +39,7 @@ jobs:
           execute_install_scripts: true
 
       - name: Set up cargo cache
-        uses: step-security/rust-cache@8871c8ba063416da7c32246932ea6ae08700453e # v2.9.2
+        uses: step-security/rust-cache@v2.9.2
         with:
           # Only `main` writes to the cache, so PR caches can't evict it (10 GB repository limit).
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -84,11 +84,11 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Harden runner
-        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        uses: step-security/harden-runner@v2.22.4
         with:
           egress-policy: audit
-      - uses: actions/checkout@v4
-      - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
+      - uses: actions/checkout@v4.4.0
+      - uses: step-security/dtolnay-rust-toolchain@v1.0.0
         with:
           toolchain: 1.95.0
           targets: wasm32-unknown-unknown
@@ -96,7 +96,7 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install libgtk-3-dev libatk1.0-dev
 
       - name: Set up cargo cache
-        uses: step-security/rust-cache@8871c8ba063416da7c32246932ea6ae08700453e # v2.9.2
+        uses: step-security/rust-cache@v2.9.2
         with:
           # Only `main` writes to the cache, so PR caches can't evict it (10 GB repository limit).
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -131,18 +131,18 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Harden runner
-        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        uses: step-security/harden-runner@v2.22.4
         with:
           egress-policy: audit
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.4.0
       - run: sudo apt-get update && sudo apt-get install libgtk-3-dev libatk1.0-dev
 
       - name: Set up cargo cache
-        uses: step-security/rust-cache@8871c8ba063416da7c32246932ea6ae08700453e # v2.9.2
+        uses: step-security/rust-cache@v2.9.2
         with:
           # Only `main` writes to the cache, so PR caches can't evict it (10 GB repository limit).
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
+      - uses: step-security/dtolnay-rust-toolchain@v1.0.0
         with:
           toolchain: ${{env.NIGHTLY_VERSION}}
           targets: wasm32-unknown-unknown
@@ -176,11 +176,11 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Harden runner
-        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        uses: step-security/harden-runner@v2.22.4
         with:
           egress-policy: audit
-      - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@v4.4.0
+      - uses: EmbarkStudios/cargo-deny-action@v2.1.1
         with:
           rust-version: "1.95.0"
           log-level: error
@@ -195,18 +195,18 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Harden runner
-        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        uses: step-security/harden-runner@v2.22.4
         with:
           egress-policy: audit
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.4.0
 
-      - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
+      - uses: step-security/dtolnay-rust-toolchain@v1.0.0
         with:
           toolchain: 1.95.0
           targets: aarch64-linux-android
 
       - name: Set up cargo cache
-        uses: step-security/rust-cache@8871c8ba063416da7c32246932ea6ae08700453e # v2.9.2
+        uses: step-security/rust-cache@v2.9.2
         with:
           # Only `main` writes to the cache, so PR caches can't evict it (10 GB repository limit).
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -224,18 +224,18 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Harden runner
-        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        uses: step-security/harden-runner@v2.22.4
         with:
           egress-policy: audit
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.4.0
 
-      - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
+      - uses: step-security/dtolnay-rust-toolchain@v1.0.0
         with:
           toolchain: 1.95.0
           targets: aarch64-apple-ios
 
       - name: Set up cargo cache
-        uses: step-security/rust-cache@8871c8ba063416da7c32246932ea6ae08700453e # v2.9.2
+        uses: step-security/rust-cache@v2.9.2
         with:
           # Only `main` writes to the cache, so PR caches can't evict it (10 GB repository limit).
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -252,16 +252,16 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Harden runner
-        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        uses: step-security/harden-runner@v2.22.4
         with:
           egress-policy: audit
-      - uses: actions/checkout@v4
-      - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
+      - uses: actions/checkout@v4.4.0
+      - uses: step-security/dtolnay-rust-toolchain@v1.0.0
         with:
           toolchain: 1.95.0
 
       - name: Set up cargo cache
-        uses: step-security/rust-cache@8871c8ba063416da7c32246932ea6ae08700453e # v2.9.2
+        uses: step-security/rust-cache@v2.9.2
         with:
           # Only `main` writes to the cache, so PR caches can't evict it (10 GB repository limit).
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -279,18 +279,18 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Harden runner
-        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        uses: step-security/harden-runner@v2.22.4
         with:
           egress-policy: audit
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.4.0
         with:
           lfs: true
-      - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
+      - uses: step-security/dtolnay-rust-toolchain@v1.0.0
         with:
           toolchain: 1.95.0
 
       - name: Set up cargo cache
-        uses: step-security/rust-cache@8871c8ba063416da7c32246932ea6ae08700453e # v2.9.2
+        uses: step-security/rust-cache@v2.9.2
         with:
           # Only `main` writes to the cache, so PR caches can't evict it (10 GB repository limit).
           save-if: ${{ github.ref == 'refs/heads/main' }}
