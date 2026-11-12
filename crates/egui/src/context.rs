@@ -1911,7 +1911,7 @@ impl Context {
             }
 
             if apply_click_away && !res.hovered() {
-                let triggered = match memory.options.input_options.surrender_focus_on {
+                let triggered = match memory.focus_surrender() {
                     SurrenderFocusOn::Presses => input.pointer.any_pressed(),
                     SurrenderFocusOn::Clicks => input.pointer.any_click(),
                     SurrenderFocusOn::Never => false,
