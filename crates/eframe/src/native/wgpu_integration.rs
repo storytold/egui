@@ -90,6 +90,7 @@ pub struct SharedState {
     viewport_from_window: HashMap<WindowId, ViewportId>,
     focused_viewport: Option<ViewportId>,
     resized_viewport: Option<ViewportId>,
+    window_event_proxy: EventLoopProxy<UserEvent>,
 
     /// Passed on to each [`egui_winit::State`]. See [`NativeOptions::clipboard_shortcuts`].
     clipboard_shortcuts: bool,
@@ -165,6 +166,7 @@ impl<'app> WgpuWinitApp<'app> {
             painter,
             viewport_from_window,
             clipboard_shortcuts,
+            window_event_proxy,
             ..
         } = &mut *shared;
 
@@ -175,6 +177,7 @@ impl<'app> WgpuWinitApp<'app> {
                 viewport_from_window,
                 painter,
                 *clipboard_shortcuts,
+                window_event_proxy,
             );
         }
     }
@@ -187,6 +190,7 @@ impl<'app> WgpuWinitApp<'app> {
             viewport_from_window,
             painter,
             clipboard_shortcuts,
+            window_event_proxy,
             ..
         } = &mut *running.shared.borrow_mut();
 
@@ -204,6 +208,7 @@ impl<'app> WgpuWinitApp<'app> {
             viewport_from_window,
             painter,
             *clipboard_shortcuts,
+            window_event_proxy,
         );
     }
 
@@ -373,6 +378,7 @@ impl<'app> WgpuWinitApp<'app> {
             focused_viewport: Some(ViewportId::ROOT),
             resized_viewport: None,
             clipboard_shortcuts: self.native_options.clipboard_shortcuts,
+            window_event_proxy: self.repaint_proxy.lock().clone(),
         }));
 
         {
@@ -1117,6 +1123,7 @@ impl Viewport {
         windows_id: &mut HashMap<WindowId, ViewportId>,
         painter: &mut egui_wgpu::winit::Painter,
         clipboard_shortcuts: bool,
+        _window_event_proxy: &EventLoopProxy<UserEvent>,
     ) {
         if self.window.is_some() {
             return; // we already have one
@@ -1126,7 +1133,14 @@ impl Viewport {
 
         let viewport_id = self.ids.this;
 
-        match egui_winit::create_window(egui_ctx, event_loop, &self.builder) {
+        let builder = &self.builder;
+        // AccessKit must be installed before the window is shown for the first time.
+        #[cfg(feature = "accesskit")]
+        let hidden_builder = builder.clone().with_visible(false);
+        #[cfg(feature = "accesskit")]
+        let builder = &hidden_builder;
+
+        match egui_winit::create_window(egui_ctx, event_loop, builder) {
             Ok(window) => {
                 windows_id.insert(window.id(), viewport_id);
 
@@ -1147,6 +1161,15 @@ impl Viewport {
                     painter.max_texture_side(),
                 );
                 egui_winit.set_clipboard_shortcuts(clipboard_shortcuts);
+
+                #[cfg(feature = "accesskit")]
+                {
+                    egui_winit.init_accesskit(event_loop, &window, _window_event_proxy.clone());
+                    if self.builder.visible.unwrap_or(true) {
+                        window.set_visible(true);
+                    }
+                }
+
                 self.egui_winit = Some(egui_winit);
 
                 egui_winit::update_viewport_info(&mut self.info, egui_ctx, &window, true);
@@ -1220,6 +1243,7 @@ fn render_immediate_viewport(
             painter,
             viewport_from_window,
             clipboard_shortcuts,
+            window_event_proxy,
             ..
         } = &mut *shared.borrow_mut();
 
@@ -1239,6 +1263,7 @@ fn render_immediate_viewport(
                     viewport_from_window,
                     painter,
                     *clipboard_shortcuts,
+                    window_event_proxy,
                 );
             });
         }
