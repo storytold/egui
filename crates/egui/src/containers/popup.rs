@@ -677,6 +677,15 @@ impl<'a> Popup<'a> {
             area = area.accessible_name(label);
         }
 
+        // A popup stays directly above the layer it opened from, which may itself be stacked by
+        // the app (`Context::set_layer_order`): a menu in a dialog never falls under that dialog.
+        if kind != PopupKind::Tooltip
+            && layer_id.order == area.layer().order
+            && layer_id != area.layer()
+        {
+            ctx.set_sublayer(layer_id, area.layer());
+        }
+
         let mut response = area.show(&ctx, |ui| {
             style.apply(ui.style_mut());
             let frame = frame.unwrap_or_else(|| Frame::popup(ui.style()));
