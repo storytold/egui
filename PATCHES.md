@@ -28,6 +28,7 @@ Drop a patch when an egui release in use contains it.
 | E20 | `23955535` | egui | widget text laid out in the language of its `Ui` | fork-only (goes with E15 and E17) | language support |
 | E21 | `a70470b0` | egui-winit, egui | `ImeEvent::DeleteSurroundingBytes`: `TextEdit` deletes the exact bytes an input method replaces, in the commit's undo step | not proposed | macOS press-and-hold and dictation, Wayland input methods; needs winit `craft/0.30.13-lang` |
 | E22 | on `craft/interact-enabled` | egui | `TextEditState::preedit`: the IME composition's pre-edit range and text, so a widget wrapping `TextEdit` can tell marked text from committed text; a new IME context (focus gained, the editor back after a pass without it, a purpose change) ends the old composition, its pre-edit text kept as typed | not proposed | craft-ui text fields (`behavior::Typing`) |
+| E32 | on `craft/ime-reset-retired` (off `craft/focus-surrender`) | egui, egui-winit, eframe | `Event::ImeResetRetired { request_id }`: an integration reports a reset request it dropped or could not complete (`PlatformOutput::retired_ime_resets`, eframe web's failed local reset), so a custom editor waiting for the completion asks again | upstreamable | craft-ui: the IME engine re-asks on the event instead of inferring a drop |
 
 E1 changes from `e7e37ad`: the hooks are installed in `init_native`, so `create_native` uses them too, and a
 unit test covers installing and replacing them. E2+E3 is the same change as `b02321d` with a `surface_fit`
