@@ -615,9 +615,16 @@ impl TextAgent {
         true
     }
 
-    pub fn fail_reset(&self) {
+    /// Drops the request this agent could not complete and reports it as retired.
+    pub(crate) fn fail_reset(
+        &self,
+        request: egui::ImeResetId,
+        events: &mut Vec<egui::Event>,
+        repaint: &NeedRepaint,
+    ) {
         self.context.listeners.borrow_mut().requests.invalidate();
         self.focus.pending.borrow_mut().take();
+        retire_reset(request, events, repaint);
     }
 
     pub fn capture_reset_focus(&self, ime: &egui::output::IMEOutput) {
@@ -793,6 +800,19 @@ impl Drop for TextAgent {
     fn drop(&mut self) {
         self.retire();
     }
+}
+
+/// Reports a reset request that will never complete in the next raw batch, so a custom editor
+/// waiting for it asks again.
+pub(crate) fn retire_reset(
+    request: egui::ImeResetId,
+    events: &mut Vec<egui::Event>,
+    repaint: &NeedRepaint,
+) {
+    events.push(egui::Event::ImeResetRetired {
+        request_id: request,
+    });
+    repaint.repaint_asap();
 }
 
 fn same_key(a: &web_sys::KeyboardEvent, b: &web_sys::KeyboardEvent) -> bool {
@@ -1409,9 +1429,16 @@ mod browser_tests {
                 TextAgent::attach_unfocused(context.clone(), &canvas, true).is_err(),
                 "failed removal blocks a second group"
             );
-            agent.fail_reset(); // same failure branch as AppRunner
+            agent.fail_reset(request, &mut events, &repaint); // same failure branch as AppRunner
             assert!(!agent.complete_reset(request, &ime, &mut events, &repaint));
-            assert!(events.is_empty());
+            assert_eq!(
+                events,
+                vec![egui::Event::ImeResetRetired {
+                    request_id: request
+                }],
+                "the failed request is reported retired, never completed"
+            );
+            events.clear();
             egui_probe_remove_failure(&old, None);
             assert!(listeners.borrow_mut().retire());
             callback
