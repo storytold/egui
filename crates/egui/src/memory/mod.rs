@@ -1516,10 +1516,10 @@ impl Areas {
     /// Mark the `child` layer as a sublayer of `parent`.
     ///
     /// Sublayers are moved directly above the parent layer at the end of the frame. This is mainly
-    /// intended for adding a new [Area](crate::Area) inside a [Window](crate::Window).
+    /// intended for adding a new [Area](crate::Area) inside a [Window](crate::Window), and a
+    /// [`crate::Popup`] makes its area a sublayer of the layer it opened from.
     ///
-    /// This currently only supports one level of nesting. If `parent` is a sublayer of another
-    /// layer, the behavior is unspecified.
+    /// Sublayers nest: a layer ends followed by its whole sublayer tree, depth first.
     ///
     /// The two layers must have the same [`LayerId::order`].
     pub fn set_sublayer(&mut self, parent: LayerId, child: LayerId) {
@@ -1544,8 +1544,9 @@ impl Areas {
     ///
     /// Applied at the end of the pass, after egui's own ordering (including
     /// [`Self::move_to_top`] and [`Self::set_sublayer`]), so those only reorder the layers
-    /// that are not in the list. An unlisted sublayer of a listed layer moves with its parent
-    /// and sits directly above it. Layers keep their [`Order`]: a listed `Middle` layer stays
+    /// that are not in the list. The unlisted sublayers of a listed layer, nested ones included,
+    /// move with it and sit directly above it; a listed sublayer takes its own list place, with
+    /// its own unlisted sublayers. Layers keep their [`Order`]: a listed `Middle` layer stays
     /// below every `Foreground` layer. Unlisted layers keep their relative order, and ids
     /// that are not known layers are ignored.
     ///
@@ -1599,29 +1600,33 @@ impl Areas {
         order.sort_by_key(|layer| (layer.order, wants_to_be_on_top.contains(layer)));
         wants_to_be_on_top.clear();
 
-        // For all layers with sublayers, put the sublayers directly after the parent layer:
-        // (it doesn't matter in which order we replace parents with their children)
+        // Each layer is followed by its whole sublayer tree, depth first, siblings in the order
+        // sorted above.
         let sublayers = core::mem::take(sublayers);
-        #[expect(clippy::iter_over_hash_type)]
-        for (parent, children) in &sublayers {
-            let mut moved_layers = vec![*parent]; // parent first…
-
-            order.retain(|l| {
-                if children.contains(l) {
-                    moved_layers.push(*l); // …followed by children
-                    false
-                } else {
-                    true
-                }
-            });
-            let Some(parent_pos) = order.iter().position(|l| l == parent) else {
-                continue;
-            };
-            order.splice(parent_pos..=parent_pos, moved_layers); // replace the parent with itself and its children
+        let sorted = core::mem::take(order);
+        let shown: ahash::HashSet<LayerId> = sorted.iter().copied().collect();
+        let has_parent = |layer: &LayerId| {
+            sublayers
+                .iter()
+                .any(|(parent, children)| children.contains(layer) && shown.contains(parent))
+        };
+        let mut placed: ahash::HashSet<LayerId> = Default::default();
+        for &layer in &sorted {
+            if !has_parent(&layer) {
+                push_tree(layer, &sorted, &sublayers, &[], &mut placed, order);
+            }
+        }
+        if placed.len() < sorted.len() {
+            // A cycle of sublayers has no root: its members end last, each still in its `Order`.
+            for &layer in &sorted {
+                push_tree(layer, &sorted, &sublayers, &[], &mut placed, order);
+            }
+            order.sort_by_key(|layer| layer.order);
         }
 
         // Move the listed layers to the end, in list order, each followed by its unlisted
-        // sublayers; the stable sort then puts them above the unlisted layers of their own `Order`.
+        // sublayer tree (a listed sublayer carries its own tree at its list place); the stable
+        // sort then puts them above the unlisted layers of their own `Order`.
         let mut listed: Vec<LayerId> = Vec::new();
         for layer in core::mem::take(layer_order) {
             if order.contains(&layer) && !listed.contains(&layer) {
@@ -1631,14 +1636,14 @@ impl Areas {
         if !listed.is_empty() {
             let mut moved = Vec::new();
             for &parent in &listed {
-                moved.push(parent);
-                if let Some(children) = sublayers.get(&parent) {
-                    moved.extend(
-                        order
-                            .iter()
-                            .filter(|l| children.contains(*l) && !listed.contains(*l)),
-                    );
-                }
+                push_tree(
+                    parent,
+                    order,
+                    &sublayers,
+                    &listed,
+                    &mut Default::default(),
+                    &mut moved,
+                );
             }
             order.retain(|layer| !moved.contains(layer));
             order.extend(moved);
@@ -1651,6 +1656,30 @@ impl Areas {
             .enumerate()
             .map(|(i, id)| (*id, i))
             .collect();
+    }
+}
+
+/// Pushes `layer` and its sublayer tree onto `out`, depth first, siblings in their `sorted` order.
+/// The tree leaves out the sublayers in `stop` and their own trees.
+fn push_tree(
+    layer: LayerId,
+    sorted: &[LayerId],
+    sublayers: &ahash::HashMap<LayerId, HashSet<LayerId>>,
+    stop: &[LayerId],
+    placed: &mut ahash::HashSet<LayerId>,
+    out: &mut Vec<LayerId>,
+) {
+    if !placed.insert(layer) {
+        return;
+    }
+    out.push(layer);
+    if let Some(children) = sublayers.get(&layer) {
+        for &child in sorted
+            .iter()
+            .filter(|l| children.contains(*l) && !stop.contains(*l))
+        {
+            push_tree(child, sorted, sublayers, stop, placed, out);
+        }
     }
 }
 
@@ -1899,6 +1928,83 @@ mod layer_order_tests {
         areas.set_layer_order(&[parent, other]);
         areas.end_pass();
         assert_eq!(areas.order(), [u1, u2, parent, child, other]);
+    }
+
+    #[test]
+    fn nested_sublayers_follow_their_listed_root() {
+        let [root, child, grandchild, unlisted, other] = [
+            layer(Order::Foreground, "root"),
+            layer(Order::Foreground, "child"),
+            layer(Order::Foreground, "grandchild"),
+            layer(Order::Foreground, "unlisted"),
+            layer(Order::Foreground, "other"),
+        ];
+        let mut areas = areas_with(&[root, unlisted, grandchild, other, child]);
+        areas.set_sublayer(child, grandchild);
+        areas.set_sublayer(root, child);
+        areas.set_layer_order(&[root, other]);
+        areas.end_pass();
+        assert_eq!(areas.order(), [unlisted, root, child, grandchild, other]);
+
+        // A listed sublayer carries its own unlisted tree, once, at its list place.
+        let mut areas = areas_with(&[root, unlisted, grandchild, child]);
+        areas.set_sublayer(child, grandchild);
+        areas.set_sublayer(root, child);
+        areas.set_layer_order(&[root, child]);
+        areas.end_pass();
+        assert_eq!(areas.order(), [unlisted, root, child, grandchild]);
+    }
+
+    #[test]
+    fn a_popup_stays_above_the_layer_it_opened_from() {
+        let ctx = crate::Context::default();
+        let [a, b] = [layer(Order::Foreground, "a"), layer(Order::Foreground, "b")];
+        let popup = |from: LayerId| Id::unique(("popup", from));
+        let run = |list: &[LayerId], opened_from: LayerId| {
+            let output = ctx.run_ui(Default::default(), |ui| {
+                for at in [a, b] {
+                    crate::Area::new(at.id)
+                        .order(at.order)
+                        .show(ui.ctx(), |ui| {
+                            ui.label("area");
+                            if at == opened_from {
+                                crate::Popup::new(
+                                    popup(at),
+                                    ui.ctx().clone(),
+                                    Pos2::ZERO,
+                                    ui.layer_id(),
+                                )
+                                .show(|ui| ui.label("popup"));
+                            }
+                        });
+                }
+                ui.ctx().set_layer_order(list);
+            });
+            output.drop_without_applying_deltas();
+        };
+        let order = || {
+            ctx.memory(|mem| {
+                mem.layer_ids()
+                    .filter(|l| l.order == Order::Foreground && mem.areas().is_visible(l))
+                    .collect::<Vec<_>>()
+            })
+        };
+
+        for _ in 0..2 {
+            run(&[a, b], a);
+        }
+        let popup_a = LayerId::new(Order::Foreground, popup(a));
+        assert_eq!(
+            order(),
+            [a, popup_a, b],
+            "a popup from a lower listed layer stays with it"
+        );
+
+        for _ in 0..2 {
+            run(&[a, b], b);
+        }
+        let popup_b = LayerId::new(Order::Foreground, popup(b));
+        assert_eq!(order(), [a, b, popup_b]);
     }
 
     #[test]
