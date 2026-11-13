@@ -2098,6 +2098,8 @@ impl State {
             .or_default()
             .native_pixels_per_point = Some(window.scale_factor() as f32);
 
+        self.ime_reset.drain_retired(&mut self.egui_input.events);
+
         self.egui_input.take()
     }
 
@@ -3307,7 +3309,9 @@ impl State {
             accesskit_update,
             num_completed_passes: _,    // `egui::Context::run` handles this
             request_discard_reasons: _, // `egui::Context::run` handles this
+            retired_ime_resets,
         } = platform_output;
+        self.ime_reset.retire(retired_ime_resets);
 
         let selection = output_selector::select_clipboard_commands(&commands);
         let generation = self.clipboard_paste.generation();

@@ -531,6 +531,12 @@ pub struct PlatformOutput {
     /// If empty, there was never any calls.
     #[cfg_attr(feature = "serde", serde(skip))]
     pub request_discard_reasons: Vec<RepaintCause>,
+
+    /// Reset requests that [`Self::append`] dropped because a later pass replaced or left their
+    /// IME context. The integration never dispatches them and reports each as
+    /// [`crate::Event::ImeResetRetired`].
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub retired_ime_resets: Vec<crate::ImeResetId>,
 }
 
 impl PlatformOutput {
@@ -564,6 +570,7 @@ impl PlatformOutput {
             accesskit_update,
             num_completed_passes,
             mut request_discard_reasons,
+            mut retired_ime_resets,
         } = newer;
 
         self.commands.append(&mut commands);
@@ -606,6 +613,17 @@ impl PlatformOutput {
                 ime.should_interrupt_composition = true;
             }
         }
+        let dropped = self
+            .ime
+            .as_ref()
+            .and_then(|previous| previous.reset_request)
+            .filter(|previous| {
+                ime.as_ref()
+                    .and_then(|next| next.reset_request)
+                    .is_none_or(|kept| kept != *previous)
+            });
+        self.retired_ime_resets.extend(dropped);
+        self.retired_ime_resets.append(&mut retired_ime_resets);
         self.ime = ime;
         self.num_completed_passes += num_completed_passes;
         self.request_discard_reasons
@@ -1416,6 +1434,50 @@ mod tests {
         let output = platform_output.ime.as_ref().unwrap();
         assert_eq!(output.context_generation, 2);
         assert_eq!(output.surrounding_text.available().unwrap().text, "new");
+    }
+
+    #[test]
+    fn append_retires_a_reset_that_a_later_pass_drops() {
+        let owner = Id::unique(1);
+        let request = crate::ImeResetId::allocate(crate::ViewportId::ROOT).unwrap();
+        let with_reset = |generation| {
+            let mut ime = ime(owner, generation, IMESurroundingText::Unavailable);
+            ime.reset_request = Some(request);
+            ime
+        };
+
+        let mut platform_output = PlatformOutput {
+            ime: Some(with_reset(1)),
+            ..Default::default()
+        };
+        platform_output.append(PlatformOutput {
+            ime: Some(ime(owner, 1, IMESurroundingText::Unavailable)),
+            ..Default::default()
+        });
+        assert!(
+            platform_output.retired_ime_resets.is_empty(),
+            "the same context carries the request"
+        );
+
+        platform_output.append(PlatformOutput {
+            ime: Some(ime(owner, 2, IMESurroundingText::Unavailable)),
+            ..Default::default()
+        });
+        assert_eq!(platform_output.retired_ime_resets, vec![request]);
+        assert_eq!(platform_output.ime.as_ref().unwrap().reset_request, None);
+
+        let mut platform_output = PlatformOutput {
+            ime: Some(with_reset(1)),
+            ..Default::default()
+        };
+        platform_output.append(PlatformOutput::default());
+        let mut accumulated = PlatformOutput::default();
+        accumulated.append(platform_output);
+        assert_eq!(
+            accumulated.retired_ime_resets,
+            vec![request],
+            "an explicit None drops the request, and later appends keep the report"
+        );
     }
 
     #[cfg(feature = "persistence")]

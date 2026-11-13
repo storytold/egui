@@ -153,6 +153,17 @@ pub enum Event {
         request_id: crate::ImeResetId,
     },
 
+    /// The integration dropped an application-requested reset without completing it: the window
+    /// lost focus or was destroyed, the IME was disallowed, a later output changed the IME
+    /// context, or a newer request replaced it.
+    ///
+    /// No [`Self::ImeResetCompleted`] for this request will follow. A custom editor still waiting
+    /// for it asks again with a new request. Stock [`crate::TextEdit`] ignores this control event.
+    ImeResetRetired {
+        /// The request that will never complete.
+        request_id: crate::ImeResetId,
+    },
+
     /// On touch screens, report this *in addition to*
     /// [`Self::PointerMoved`], [`Self::PointerButton`], [`Self::PointerGone`]
     Touch {

@@ -413,6 +413,7 @@ impl AppRunner {
             accesskit_update: _,        // not currently implemented
             num_completed_passes: _,    // handled by `Context::run`
             request_discard_reasons: _, // handled by `Context::run`
+            retired_ime_resets: _,      // the text agent keeps its own reset fence
         } = platform_output;
 
         for command in commands {
