@@ -2,7 +2,7 @@ use epaint::ColorImage;
 
 use crate::MouseWheelSource;
 use crate::{
-    Key,
+    Key, Theme,
     emath::{Pos2, Vec2},
 };
 
@@ -222,6 +222,12 @@ pub enum Event {
 
     /// The native window gained or lost focused (e.g. the user clicked alt-tab).
     WindowFocused(bool),
+
+    /// The OS's light or dark preference: sent with the first input once the integration knows
+    /// it, and again each time the OS reports it (a repeat of the same theme is possible).
+    ///
+    /// [`crate::RawInput::system_theme`] holds the same value; this event is the change notice.
+    SystemTheme(Theme),
 
     /// An assistive technology (e.g. screen reader) requested an action.
     AccessKitActionRequest(accesskit::ActionRequest),
