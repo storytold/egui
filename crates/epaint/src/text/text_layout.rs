@@ -1509,13 +1509,13 @@ fn halign_and_justify_row(
     // edge, so the anchored ink is inset by the advance instead of the
     // advance being absorbed into the row box.
     //
-    // The same rows must also hang the whitespace the alignment ignores
-    // (excluded from the ink range above) reading-forward from the anchored
-    // ink — leftward, on a right-to-left row — instead of letting it extend
-    // the box past the anchored edge. The box keeps its natural width, so
-    // the ignored whitespace sits inside the box between its reading-forward
-    // edge and the ink; the translate below re-centers the ink inside the
-    // box so no glyph moves. Justified rows and rows that keep their
+    // Rows with ignored whitespace must also hang it reading-forward from the
+    // anchored ink — leftward, on a right-to-left row — instead of letting it
+    // extend the box past the anchored edge. The box width is derived from its
+    // rounded position below so its right edge lands exactly on the galley
+    // origin; the ignored whitespace sits inside the box between its
+    // reading-forward edge and the ink. The translate below re-centers the ink
+    // inside the box so no glyph moves. Justified rows and rows that keep their
     // trailing whitespace size themselves to the anchored span instead, so
     // their boxes already hug the ink and the hang does not apply to them.
     let right_anchored_rtl =
@@ -1553,11 +1553,14 @@ fn halign_and_justify_row(
 
     // The ink range above is only for positioning: centered and right-anchored
     // rows align around their ink, so trailing whitespace must not skew them.
-    // The row's allocated size keeps counting the whitespace (except for
-    // justified rows, which fill the wrap width, and rows that
-    // `keep_trailing_whitespace`, whose aligned span is their size), so
-    // inter-widget spacing is the same in both reading directions.
-    row.size.x = if justify || keep_trailing_whitespace {
+    // Right-anchored RTL rows with ignored whitespace derive their width from
+    // the rounded position so their boxes end exactly at the galley origin.
+    // Other rows keep counting whitespace in their allocated size, except
+    // justified rows and rows that keep trailing whitespace, which use their
+    // aligned span.
+    row.size.x = if right_anchored_rtl && ignored_whitespace > 0.0 {
+        -placed_row.pos.x
+    } else if justify || keep_trailing_whitespace {
         target_max_x - target_min_x
     } else {
         natural_width
@@ -6355,6 +6358,79 @@ mod tests {
         advance_assert_close(space.pos.x + space.advance_width + placed.pos.x, -67.0);
     }
 
+    /// Fractional ink advances must not move a row carrying ignored whitespace
+    /// past its reading-start anchor in either rounding direction.
+    #[test]
+    fn right_anchored_rtl_row_box_ignores_fractional_advance_rounding() {
+        for first_advance in [10.4, 10.6] {
+            let leading_advance = 40.0;
+            let natural_width = leading_advance + 3.0 + first_advance + 9.0 + 8.0;
+            let glyphs = vec![
+                advance_glyph('ا', leading_advance + 3.0, first_advance, 1),
+                advance_glyph('ل', leading_advance + 3.0 + first_advance, 9.0, 1),
+                advance_glyph('ف', leading_advance + 3.0 + first_advance + 9.0, 8.0, 1),
+                advance_glyph(' ', leading_advance, 3.0, 1),
+            ];
+            let mut placed = PlacedRow {
+                pos: pos2(0.0, 0.0),
+                row: Arc::new(Row {
+                    section_index_at_start: 0,
+                    base_direction: TextDirection::RightToLeft,
+                    leading_advance,
+                    glyphs,
+                    rtl_paragraph: true,
+                    visual_order: Vec::new(),
+                    size: vec2(natural_width, 16.0),
+                    visuals: RowVisuals::default(),
+                }),
+                ends_with_newline: false,
+            };
+            halign_and_justify_row(
+                PointScale::new(1.0),
+                &mut placed,
+                Align::Max,
+                f32::INFINITY,
+                false,
+                false,
+            );
+
+            advance_assert_close(placed.pos.x + placed.row.size.x, 0.0);
+            let ink = aligned_advance_ink_span(&placed.row);
+            advance_assert_close(ink.1 + placed.pos.x, -leading_advance);
+            let space = &placed.row.glyphs[3];
+            advance_assert_close(
+                space.pos.x + space.advance_width + placed.pos.x,
+                ink.0 + placed.pos.x,
+            );
+        }
+
+        let mut bare = advance_row(TextDirection::RightToLeft, 40.0);
+        halign_and_justify_row(
+            PointScale::new(1.0),
+            &mut bare,
+            Align::Max,
+            f32::INFINITY,
+            false,
+            false,
+        );
+        advance_assert_close(bare.row.size.x, 67.0);
+
+        for (justify, keep_trailing_whitespace, expected_width) in
+            [(true, false, 40.0), (false, true, 30.0)]
+        {
+            let mut placed = whitespace_carry_row(0.0);
+            halign_and_justify_row(
+                PointScale::new(1.0),
+                &mut placed,
+                Align::Max,
+                40.0,
+                justify,
+                keep_trailing_whitespace,
+            );
+            advance_assert_close(placed.row.size.x, expected_width);
+        }
+    }
+
     /// Justified right-to-left rows size themselves to the anchored target
     /// width, so their boxes already hug the anchored ink: the ignored
     /// whitespace must not hang the box (the hang applies only to rows whose
@@ -6418,6 +6494,22 @@ mod tests {
         assert!(
             galley.rect.right() >= -1.0 && galley.rect.right() < 1.0,
             "the galley rect must stay anchored at the reading start (rect {:?})",
+            galley.rect
+        );
+
+        let mut unrounded_job = job.clone();
+        unrounded_job.round_output_to_gui = false;
+        unrounded_job.wrap.max_width = wrap_width + 0.5;
+        let unrounded = layout(&mut fonts, 1.0, unrounded_job.into());
+
+        assert!(
+            unrounded.rect.width() <= wrap_width + 0.5 + 1e-3,
+            "the unclamped row union must fit the effective wrap budget (rect {:?})",
+            unrounded.rect
+        );
+        assert!(
+            galley.rect.width() <= wrap_width,
+            "the breakable galley must not exceed its wrap budget (rect {:?})",
             galley.rect
         );
 
