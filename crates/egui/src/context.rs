@@ -1767,6 +1767,24 @@ impl Context {
         })
     }
 
+    /// The widget rect `id` registered in the current viewport's last finished pass.
+    ///
+    /// Between passes that is the pass that just ended; inside a pass it is the one before it.
+    /// Unlike [`Self::read_response`], which prefers the running pass, this never answers from
+    /// a pass that is still being built or from older state, and returns `None` for a widget the
+    /// last pass did not show.
+    #[must_use]
+    pub fn widget_rect_last_pass(&self, id: Id) -> Option<WidgetRect> {
+        self.read(|ctx| {
+            ctx.viewports
+                .get(&ctx.viewport_id())?
+                .prev_pass
+                .widgets
+                .get(id)
+                .copied()
+        })
+    }
+
     /// Do all interaction for an existing widget, without (re-)registering it.
     pub(crate) fn get_response(&self, widget_rect: WidgetRect) -> Response {
         self.get_response_with_focus_policy(widget_rect, false, Default::default())
