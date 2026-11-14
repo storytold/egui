@@ -705,6 +705,9 @@ impl State {
             .or_default()
             .native_pixels_per_point = native_pixels_per_point;
         slf.egui_input.system_theme = theme.map(to_egui_theme);
+        if let Some(theme) = slf.egui_input.system_theme {
+            slf.egui_input.events.push(egui::Event::SystemTheme(theme));
+        }
 
         if let Some(max_texture_side) = max_texture_side {
             slf.set_max_texture_side(max_texture_side);
@@ -2326,7 +2329,9 @@ impl State {
                 }
             }
             WindowEvent::ThemeChanged(winit_theme) => {
-                self.egui_input.system_theme = Some(to_egui_theme(*winit_theme));
+                let theme = to_egui_theme(*winit_theme);
+                self.egui_input.system_theme = Some(theme);
+                self.egui_input.events.push(egui::Event::SystemTheme(theme));
                 EventResponse {
                     repaint: true,
                     consumed: false,

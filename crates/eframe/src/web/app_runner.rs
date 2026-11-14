@@ -182,6 +182,13 @@ impl AppRunner {
             .or_default()
             .native_pixels_per_point = Some(super::native_pixels_per_point());
         runner.input.raw.system_theme = super::system_theme();
+        if let Some(theme) = runner.input.raw.system_theme {
+            runner
+                .input
+                .raw
+                .events
+                .push(egui::Event::SystemTheme(theme));
+        }
 
         Ok(runner)
     }
