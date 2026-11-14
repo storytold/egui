@@ -515,7 +515,11 @@ fn install_color_scheme_change_event(
                 |_event, runner| {
                     if let Some(theme) = super::system_theme() {
                         runner.input.raw.system_theme = Some(theme);
-                        runner.input.raw.events.push(egui::Event::SystemTheme(theme));
+                        runner
+                            .input
+                            .raw
+                            .events
+                            .push(egui::Event::SystemTheme(theme));
                         runner.needs_repaint.repaint_asap();
                     }
                 },
