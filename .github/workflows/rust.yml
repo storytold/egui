@@ -4,7 +4,6 @@ on:
   push:
     branches: ["main"]
   pull_request:
-  workflow_dispatch:
 
 name: Rust
 
@@ -247,9 +246,7 @@ jobs:
 
   tests:
     name: Run tests
-    # We run the tests on macOS because it will run with an actual GPU.
-    # macOS runners are kept for releases: the tests run on pushes to main and when started by hand, not on PRs.
-    if: github.event_name != 'pull_request'
+    # We run the tests on macOS because it will run with an actual GPU
     runs-on: macos-latest
     timeout-minutes: 60
     steps:
