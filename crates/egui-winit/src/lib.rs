@@ -2198,7 +2198,17 @@ impl State {
                     consumed: false,
                 }
             }
-            // WindowEvent::TouchpadPressure {device_id, pressure, stage, ..  } => {} // TODO(emilk)
+            WindowEvent::TouchpadPressure {
+                pressure, stage, ..
+            } => {
+                if let Some(event) = touchpad_pressure_event(*pressure, *stage) {
+                    self.egui_input.events.push(event);
+                }
+                EventResponse {
+                    repaint: true,
+                    consumed: false,
+                }
+            }
             WindowEvent::Touch(touch) => {
                 self.on_touch(window, touch);
                 let consumed = match touch.phase {
@@ -2440,7 +2450,6 @@ impl State {
             | WindowEvent::Occluded(_)
             | WindowEvent::Resized(_)
             | WindowEvent::Moved(_)
-            | WindowEvent::TouchpadPressure { .. }
             | WindowEvent::CloseRequested => EventResponse {
                 repaint: true,
                 consumed: false,
@@ -5081,6 +5090,16 @@ fn refresh_windows_non_client_activation(window: &winit::window::Window) {
 
 // ---------------------------------------------------------------------------
 
+/// winit's trackpad pressure as egui's: `None` for a reading that is not a finite number or a stage
+/// outside `u8`; the pressure is kept within 0.0..=1.0.
+fn touchpad_pressure_event(pressure: f32, stage: i64) -> Option<egui::Event> {
+    let stage = u8::try_from(stage).ok()?;
+    pressure.is_finite().then(|| egui::Event::TouchpadPressure {
+        pressure: pressure.clamp(0.0, 1.0),
+        stage,
+    })
+}
+
 /// Short and fast description of a device event.
 /// Useful for logging and profiling.
 pub fn short_device_event_description(event: &winit::event::DeviceEvent) -> &'static str {
@@ -5160,6 +5179,31 @@ mod tests {
             egui::IMEPurpose::Normal,
             "the new window starts with the default purpose"
         );
+    }
+
+    #[test]
+    fn touchpad_pressure_is_passed_on_within_range() {
+        let pressure = |pressure, stage| match touchpad_pressure_event(pressure, stage) {
+            Some(egui::Event::TouchpadPressure { pressure, stage }) => Some((pressure, stage)),
+            _ => None,
+        };
+        assert_eq!(pressure(0.5, 1), Some((0.5, 1)));
+        assert_eq!(pressure(0.25, 2), Some((0.25, 2)));
+        assert_eq!(
+            pressure(0.0, 0),
+            Some((0.0, 0)),
+            "the end of a press is passed on"
+        );
+        assert_eq!(
+            pressure(1.5, 1),
+            Some((1.0, 1)),
+            "pressure stays within 0..=1"
+        );
+        assert_eq!(pressure(-0.1, 1), Some((0.0, 1)));
+        assert_eq!(pressure(f32::NAN, 1), None);
+        assert_eq!(pressure(f32::INFINITY, 1), None);
+        assert_eq!(pressure(0.5, -1), None, "a stage outside u8 is no reading");
+        assert_eq!(pressure(0.5, 256), None);
     }
 
     #[test]

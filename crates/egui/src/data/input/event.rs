@@ -153,6 +153,21 @@ pub enum Event {
         request_id: crate::ImeResetId,
     },
 
+    /// How hard a pressure-sensing trackpad (a Force Touch trackpad on macOS) is pressed, reported
+    /// *in addition to* [`Self::PointerButton`] and only by integrations whose platform has it.
+    ///
+    /// The readings run between the press and the release of the primary button, but their order
+    /// relative to [`Self::PointerButton`] is not fixed.
+    TouchpadPressure {
+        /// How hard the trackpad is pressed within `stage`, from 0.0 to 1.0. Each stage has its
+        /// own range: the reading falls back to 0.0 when the press passes into the next stage.
+        pressure: f32,
+
+        /// The click level: 0 when the press has ended, 1 for an ordinary click, 2 for a press
+        /// through to a force click.
+        stage: u8,
+    },
+
     /// On touch screens, report this *in addition to*
     /// [`Self::PointerMoved`], [`Self::PointerButton`], [`Self::PointerGone`]
     Touch {
