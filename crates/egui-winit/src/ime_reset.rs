@@ -32,6 +32,7 @@ pub(crate) struct ResetBridge<W> {
     window: Option<W>,
     latest: Option<ImeResetId>,
     pending: Option<Pending>,
+
     /// Requests dropped without a completion, reported as [`Event::ImeResetRetired`].
     retired: Vec<ImeResetId>,
 }
