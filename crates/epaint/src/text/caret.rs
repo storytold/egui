@@ -903,6 +903,164 @@ mod tests {
         assert_eq!(words(&galley, galley.begin(), true), [0, 3, 11, 15]);
     }
 
+    /// Word arrows step between word edges in the row's visual frame, by each
+    /// word's own bidi level — the word-granularity mirror of the character
+    /// arrows' local-level stepping.
+    ///
+    /// Hand-derived sequences, from the UAX #9 levels the shaper stamps on the
+    /// logical stream (verified against this model before landing):
+    ///
+    /// * `"تقرير جميل"`, uniform right-to-left: leftward from the reading
+    ///   start visits each word's visually-left edge (0, 5, 10) and rightward
+    ///   from the reading end the mirror (10, 6, 0).
+    /// * `"عربي abc"`, right-to-left base with an embedded Latin run: leftward
+    ///   from the reading start crosses into the Latin run (0, 4, 5) and
+    ///   clamps at the row's visually-leftmost word edge; rightward from the
+    ///   reading end crosses back into the Arabic run (8, 0).
+    /// * `"Hello world"`, a Latin value under a right-to-left base (all glyphs
+    ///   share one even level, so the row reads left-to-right): the visual
+    ///   walk reproduces the historic logical walk exactly — leftward
+    ///   11, 6, 0 and rightward 0, 5, 11.
+    /// * `"hello   world"`, a run of spaces is one transparent gap: leftward
+    ///   13, 8, 0 and rightward 0, 5, 13.
+    /// * `"www.example.com"`, dots are stops under a right-to-left base too:
+    ///   rightward 0, 3, 11, 15 and leftward 15, 12, 4, 0.
+    #[test]
+    fn word_motion_steps_mixed_rows_by_word_edges() {
+        let words = |galley: &Galley, from: CCursor, rightward: bool| {
+            indices(&presses(galley, from, |c| {
+                if rightward {
+                    galley.cursor_word_right_visually(c)
+                } else {
+                    galley.cursor_word_left_visually(c)
+                }
+            }))
+        };
+
+        // "تقرير جميل", uniform right-to-left.
+        let galley = layout("تقرير جميل", TextDirection::RightToLeft, f32::INFINITY);
+        assert_eq!(words(&galley, galley.begin(), false), [0, 5, 10]);
+        assert_eq!(words(&galley, galley.end(), true), [10, 6, 0]);
+
+        // "عربي abc", mixed row in a right-to-left base.
+        let galley = layout("عربي abc", TextDirection::RightToLeft, f32::INFINITY);
+        assert_eq!(words(&galley, galley.begin(), false), [0, 4, 5]);
+        assert_eq!(words(&galley, galley.end(), true), [8, 0]);
+        assert_eq!(
+            galley.cursor_word_left_visually(&CCursor::new(5)).index.0,
+            5,
+            "leftward at the visually-leftmost word stop clamps in place"
+        );
+
+        // "Hello world" under a right-to-left base reads left-to-right, so
+        // the historic logical walk is the visual walk.
+        let galley = layout("Hello world", TextDirection::RightToLeft, f32::INFINITY);
+        assert_eq!(words(&galley, galley.end(), false), [11, 6, 0]);
+        assert_eq!(words(&galley, galley.begin(), true), [0, 5, 11]);
+
+        // A run of spaces is one transparent gap.
+        let galley = layout("hello   world", TextDirection::RightToLeft, f32::INFINITY);
+        assert_eq!(words(&galley, galley.end(), false), [13, 8, 0]);
+        assert_eq!(words(&galley, galley.begin(), true), [0, 5, 13]);
+
+        // Dots are stops under a right-to-left base too.
+        let galley = layout("www.example.com", TextDirection::RightToLeft, f32::INFINITY);
+        assert_eq!(words(&galley, galley.begin(), true), [0, 3, 11, 15]);
+        assert_eq!(words(&galley, galley.end(), false), [15, 12, 4, 0]);
+    }
+
+    /// Bounded word walks over hostile input terminate, never revisit a state
+    /// and stay within the galley's bounds — on unwrapped, wrapped and elided
+    /// layouts alike (the same corpus as the bidi hostile-input tests).
+    #[test]
+    fn word_motion_terminates_on_hostile_input() {
+        use alloc::collections::BTreeSet;
+
+        let hostile: Vec<String> = vec![
+            String::new(),
+            "\u{FFFD}".into(),
+            "\u{FFFD}\u{FFFD}a\u{FFFD}".into(),
+            "a\u{0301}".into(),
+            "\u{0301}a".into(),
+            "\u{061C}".into(),
+            "\u{200F}\u{200E}".repeat(50),
+            "aרbعc".repeat(40),
+            "\u{2066}تقرير\u{2069} pdf \u{2067}שלום\u{2069}".into(),
+            "\r\n\t\u{2029}\u{0085}".into(),
+            "…".repeat(100),
+            "تقرير ٢٠٢٦.pdf ".repeat(20),
+            "أول ٢٠٢٦ ثالث".into(),
+            "\u{2066}أول\u{2069} \u{2067}ثاني\u{2069} ثالث \u{200F}\u{200E}".repeat(6),
+        ];
+
+        for text in &hostile {
+            let unwrapped = layout(text, TextDirection::Auto, f32::INFINITY);
+
+            let mut fonts = Fonts::new(TextOptions::default(), FontDefinitions::default());
+            let mut job = LayoutJob::simple(
+                text.clone(),
+                FontId::proportional(14.0),
+                Color32::WHITE,
+                100.0,
+            );
+            job.direction = TextDirection::Auto;
+            job.wrap.max_rows = 5;
+            job.wrap.overflow_character = Some('…');
+            let wrapped = fonts.with_pixels_per_point(1.0).layout_job(job);
+
+            for galley in [&unwrapped, &wrapped] {
+                let end = galley.end().index.0;
+                for &rightward in &[true, false] {
+                    for &from in &[galley.begin().index.0, galley.end().index.0] {
+                        let mut cursor = CCursor::new(from);
+                        let mut seen = BTreeSet::new();
+                        // A walk over a bounded galley has a bounded state
+                        // space (column, affinity, x); more steps than this
+                        // means it cycles.
+                        for step in 0..=(4 * end + 16) {
+                            assert!(
+                                cursor.index.0 <= end,
+                                "a word walk landed at {} beyond the galley end \
+                                 {end} for {text:?} (step {step})",
+                                cursor.index.0
+                            );
+                            let next = if rightward {
+                                galley.cursor_word_right_visually(&cursor)
+                            } else {
+                                galley.cursor_word_left_visually(&cursor)
+                            };
+                            let state = (
+                                next.index.0,
+                                next.prefer_next_row,
+                                x(galley, next).to_bits(),
+                            );
+                            let moved = state
+                                != (
+                                    cursor.index.0,
+                                    cursor.prefer_next_row,
+                                    x(galley, cursor).to_bits(),
+                                );
+                            cursor = next;
+                            if !moved {
+                                break; // the walk stopped moving: terminated
+                            }
+                            assert!(
+                                seen.insert(state),
+                                "the word walk revisited state {state:?} for \
+                                 {text:?}: it cycles"
+                            );
+                            assert!(
+                                step < 4 * end + 16,
+                                "the word walk never settled within the step \
+                                 cap for {text:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// A combining mark moves with its base.
     #[test]
     fn arrows_skip_whole_clusters() {
@@ -912,5 +1070,108 @@ mod tests {
         let galley = auto("a\u{301}b");
         let cursors = presses(&galley, galley.begin(), |c| galley.cursor_right_visually(c));
         assert_eq!(indices(&cursors), [0, 2, 3]);
+    }
+
+    /// Mixed-direction rows step the caret visually by each embedded run's
+    /// own bidi level, not by the row's base direction (the local-level caret
+    /// stepping pin, ported to this fork's visual arrows): inside a maximal
+    /// run of one embedding level the caret moves one visual position per
+    /// press in the run's own direction, and crossing into the
+    /// visually-adjacent run continues from the shared edge, so each
+    /// edge-to-edge walk visits every stop of the row once, in on-screen
+    /// order, whatever the mix of levels.
+    ///
+    /// Oracles, hand-derived from the UAX #9 levels the shaper stamps on the
+    /// logical stream (sequences verified against this model before landing):
+    ///
+    /// * `"عربي abc"`, RTL base — on screen "abc يبرع", logical columns
+    ///   `ع=0 ر=1 ب=2 ي=3 ␣=4 a=5 b=6 c=7`: rightward from the visual left
+    ///   end walks the embedded LTR run (5, 6, 7, 8) and then the Arabic run
+    ///   right-to-left (4..0); leftward from the visual right end the mirror.
+    ///   First-strong resolution (`Auto`) produces the same row.
+    /// * `"abc عربي"`, LTR base — the exact vice-versa.
+    /// * `"تقرير"`, explicit LTR base — an all-odd row in an even base (only
+    ///   explicit-direction jobs produce this): the walks enter the mirrored
+    ///   row from its visual edges instead of clamping.
+    /// * `"Hello"`, RTL base — an all-even row in an odd base, the
+    ///   Latin-value-under-RTL-chrome shape every `TextEdit` field hits
+    ///   (task 467): `ArrowLeft` retreats one character from the end.
+    /// * `"اب١٢"`, LTR base — nested levels (Arabic-Indic digits continue at
+    ///   the higher even level inside the RTL run inside the even base):
+    ///   visual right from the shared ا|ب boundary lands on ا's right edge.
+    #[test]
+    fn explicit_base_rows_step_visually_by_local_level() {
+        assert_arrow_sequences(
+            &layout("عربي abc", TextDirection::RightToLeft, f32::INFINITY),
+            &[5, 6, 7, 8, 4, 3, 2, 1, 0],
+            &[0, 1, 2, 3, 4, 5, 7, 6, 5],
+        );
+        assert_arrow_sequences(
+            &auto("عربي abc"),
+            &[5, 6, 7, 8, 4, 3, 2, 1, 0],
+            &[0, 1, 2, 3, 4, 5, 7, 6, 5],
+        );
+        assert_arrow_sequences(
+            &layout("abc عربي", TextDirection::LeftToRight, f32::INFINITY),
+            &[0, 1, 2, 3, 4, 7, 6, 5, 4],
+            &[4, 5, 6, 7, 8, 3, 2, 1, 0],
+        );
+        assert_arrow_sequences(
+            &layout("تقرير", TextDirection::LeftToRight, f32::INFINITY),
+            &[5, 4, 3, 2, 1, 0],
+            &[0, 1, 2, 3, 4, 5],
+        );
+        assert_arrow_sequences(
+            &layout("Hello", TextDirection::RightToLeft, f32::INFINITY),
+            &[0, 1, 2, 3, 4, 5],
+            &[5, 4, 3, 2, 1, 0],
+        );
+        assert_arrow_sequences(
+            &layout("اب١٢", TextDirection::LeftToRight, f32::INFINITY),
+            &[2, 3, 4, 1, 0],
+            &[0, 1, 2, 3, 2],
+        );
+
+        // The named one-step contracts of the local-level stepping, on the
+        // visual arrows:
+        let galley = layout("عربي abc", TextDirection::RightToLeft, f32::INFINITY);
+        assert_eq!(
+            galley.cursor_left_visually(&CCursor::new(8)).index.0,
+            7,
+            "visual left from the reading end enters the embedded LTR run"
+        );
+        assert_eq!(
+            galley.cursor_right_visually(&CCursor::new(0)).index.0,
+            0,
+            "visual right from the reading start clamps at the row edge"
+        );
+
+        // Task-467 shape: ArrowLeft retreats one character from the end.
+        let galley = layout("Hello", TextDirection::RightToLeft, f32::INFINITY);
+        assert_eq!(galley.cursor_left_visually(&CCursor::new(5)).index.0, 4);
+        assert_eq!(galley.cursor_right_visually(&CCursor::new(4)).index.0, 5);
+
+        // Nested levels: visual right from the shared ا|ب boundary lands on
+        // ا's right edge.
+        let galley = layout("اب١٢", TextDirection::LeftToRight, f32::INFINITY);
+        assert_eq!(
+            galley.cursor_right_visually(&CCursor::new(1)).index.0,
+            0,
+            "visual right from the shared ا|ب boundary lands on ا's right edge"
+        );
+
+        // An all-odd row under an explicit LTR base: the arrows enter the
+        // row from its visual edges instead of clamping.
+        let galley = layout("تقرير", TextDirection::LeftToRight, f32::INFINITY);
+        assert_eq!(
+            galley.cursor_left_visually(&CCursor::new(0)).index.0,
+            1,
+            "visual left from the reading start enters the all-odd row"
+        );
+        assert_eq!(
+            galley.cursor_right_visually(&CCursor::new(5)).index.0,
+            4,
+            "visual right from the reading end steps back into the all-odd row"
+        );
     }
 }

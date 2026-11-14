@@ -182,6 +182,18 @@ mod web_ime_reset;
 #[cfg(all(test, target_arch = "wasm32"))]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
 
+/// Pure helpers for the web text agent's IME anchor direction.
+///
+/// Deliberately **not** inside the wasm-gated `web` module, so its unit tests
+/// run natively in `cargo test -p eframe --lib`. Its only caller lives in
+/// `web/text_agent.rs`, hence the dead-code expectation on non-wasm,
+/// non-test builds.
+#[cfg_attr(
+    not(any(target_arch = "wasm32", test)),
+    expect(dead_code, reason = "only caller lives in the wasm-gated `web` module")
+)]
+pub(crate) mod text_dir;
+
 // ----------------------------------------------------------------------------
 // When compiling for web
 

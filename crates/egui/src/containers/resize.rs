@@ -210,6 +210,21 @@ struct Prepared {
     state: State,
     content_ui: Ui,
     sizing_pass: bool,
+
+    /// Whether a resize drag is in flight this frame: the pointer is dragging the
+    /// corner grip, or a [`crate::Window`] edge drag stored a `requested_size` that
+    /// this frame's `begin` consumed. While it is, `end` must not re-pin the width
+    /// up to `last_content_size` — the user asked for a (possibly smaller) width,
+    /// and a measurement of width-filling content (which equals the offered rect)
+    /// would clamp the shrink back up. The height re-pins on drag frames too: on
+    /// non-sizing frames `last_content_size` is the fresh measurement at the
+    /// requested rect, so content that needs more height at the dragged size grows
+    /// the container live instead of snapping on release.
+    ///
+    /// [`crate::Window`]s are unaffected either way (they render at
+    /// `last_content_size`, and the sizing-pass seed pins that at the requested
+    /// size on the frames that consume a fresh request).
+    actively_resizing: bool,
 }
 
 /// A rect of `size` with its top-left corner at `anchor`,
@@ -225,7 +240,10 @@ fn anchored_rect(anchor: Pos2, size: Vec2, grip_on_left: bool) -> Rect {
 impl Resize {
     fn begin(&self, ui: &mut Ui) -> Prepared {
         // With the grip at the bottom-left, the right edge stays put while resizing.
-        let grip_on_left = ui.style().right_to_left && self.resizable.any();
+        // Every container anchors on its reading-start edge under RTL — including the
+        // window interior, whose container is `resizable(false)` because a window is
+        // resized through its edge strips.
+        let grip_on_left = ui.style().right_to_left;
         let available = ui.available_rect_before_wrap();
         let anchor = if grip_on_left {
             available.right_top()
@@ -281,6 +299,29 @@ impl Resize {
 
         let is_actively_resizing = user_requested_size.is_some();
 
+        // Tell anchored parent areas (a centered `Modal` wrapping this `Resize`, for
+        // instance) that a user resize is in flight, so they can pin their anchored
+        // placement — the reading-start edge — instead of re-centering while the drag
+        // changes their size. Same exemption the window's reading-edge compensation
+        // uses (`edge_drag_in_flight`). The flag is set after this frame's `Area::begin`
+        // has read it, so the first read is the first move frame — harmless, since the
+        // press frame's request reproduces the current size exactly and the frozen
+        // placement size is therefore the pre-drag size.
+        if is_actively_resizing {
+            ui.ctx().data_mut(|d| {
+                d.insert_temp(ui.layer_id().id.with("resize_drag_in_flight"), ());
+            });
+        } else {
+            // No drag in flight: drop the flag so a stale entry can't outlive the drag.
+            // Safe against racing the area's read: this runs after the parent area's
+            // `begin` has read the flag this frame, and the pinned placement is frozen
+            // into the area state from the first in-flight frame, so clearing the flag
+            // never unfreezes an existing pin.
+            ui.ctx().data_mut(|d| {
+                d.remove_temp::<()>(ui.layer_id().id.with("resize_drag_in_flight"));
+            });
+        }
+
         // Drag just started: we don't yet know what the content's minimum width is.
         // Run a one-frame sizing pass below to discover it.
         let needs_sizing_pass = is_actively_resizing && state.min_content_width.is_none();
@@ -328,9 +369,25 @@ impl Resize {
         // In those cases we don't want the clip_rect to be smaller, because
         // then we will clip the contents of the region even thought the result gets larger. This is simply ugly!
         // So we use the memory of last_content_size to make the clip rect large enough.
-        content_clip_rect.max = content_clip_rect
+        // The growth mirrors the anchor: a left-to-right container grows
+        // rightward from its left edge, a right-to-left one grows leftward from
+        // its fixed right edge (the reading-start anchor). The y growth is
+        // direction-neutral (the container is top-anchored).
+        if grip_on_left {
+            content_clip_rect.min.x = content_clip_rect
+                .min
+                .x
+                .min(inner_rect.max.x - state.last_content_size.x);
+        } else {
+            content_clip_rect.max.x = content_clip_rect
+                .max
+                .x
+                .max(inner_rect.min.x + state.last_content_size.x);
+        }
+        content_clip_rect.max.y = content_clip_rect
             .max
-            .max(inner_rect.min + state.last_content_size);
+            .y
+            .max(inner_rect.min.y + state.last_content_size.y);
 
         content_clip_rect = content_clip_rect.intersect(ui.clip_rect()); // Respect parent region
 
@@ -343,6 +400,13 @@ impl Resize {
         let mut content_ui = ui.new_child(ui_builder);
         content_ui.set_clip_rect(content_clip_rect);
 
+        // Under RTL the container's content is measured from its reading-start
+        // corner, so the container's reported size hugs right-anchored content,
+        // mirroring the window-body seeding in the window container.
+        if ui.is_rtl() && !needs_sizing_pass {
+            crate::containers::window::seed_min_rect_at_reading_start(&mut content_ui);
+        }
+
         Prepared {
             id,
             corner_id,
@@ -351,6 +415,7 @@ impl Resize {
             state,
             content_ui,
             sizing_pass: needs_sizing_pass,
+            actively_resizing: is_actively_resizing,
         }
     }
 
@@ -370,12 +435,11 @@ impl Resize {
             mut state,
             content_ui,
             sizing_pass,
+            actively_resizing,
         } = prepared;
 
         if sizing_pass {
             // Remember the measured minimum so we can clamp the user's drag on subsequent frames.
-            // Don't touch `last_content_size`, it should keep reflecting the previously
-            // rendered content.
             state.min_content_width = Some(content_ui.min_size().x);
         } else {
             state.last_content_size = content_ui.min_size();
@@ -383,18 +447,71 @@ impl Resize {
 
         // ------------------------------
 
+        // On the sizing pass the content was measured squished (and the pass discarded), so
+        // that measurement must not become the remembered content size. What the container
+        // will present next is the `desired_size` computed in `begin`: the user's request as
+        // clamped by `min_size`/`max_size` — the `min_content_width` clamp cannot have
+        // applied (its absence is what made this a sizing pass), the width re-pin below
+        // is gated off on this frame (a sizing pass only ever runs while a drag is in
+        // flight), and the height re-pin is a no-op against this seed.
+        // Seeding it here means both the render below and the idle grow-to-content in
+        // `begin` work from the requested size, so the stale pre-drag measurement cannot
+        // feed the requested shrink back up when the drag ends within the sizing pass (e.g.
+        // a window edge drag whose `requested_size` is consumed on the frame the pointer is
+        // released). One-frame consequence: the visible pass right after a sizing pass
+        // computes its clip rect from this seeded size, so content overflowing the requested
+        // size is clipped tighter for that frame; the next frame's fresh measurement
+        // restores the looser clip.
+        if sizing_pass {
+            state.last_content_size = state.desired_size;
+        }
+
+        // On the sizing pass the content was measured squished (and the pass discarded), so
+        // that measurement must not become the remembered content size. What the container
+        // will present next is the `desired_size` computed in `begin`: the user's request as
+        // clamped by `min_size`/`max_size` — the `min_content_width` clamp cannot have
+        // applied (its absence is what made this a sizing pass), and the re-pin below is
+        // gated off on this frame (a sizing pass only ever runs while a drag is in flight).
+        // Seeding it here means both the render below and the idle grow-to-content in
+        // `begin` work from the requested size, so the stale pre-drag measurement cannot
+        // feed the requested shrink back up when the drag ends within the sizing pass (e.g.
+        // a window edge drag whose `requested_size` is consumed on the frame the pointer is
+        // released). One-frame consequence: the visible pass right after a sizing pass
+        // computes its clip rect from this seeded size, so content overflowing the requested
+        // size is clipped tighter for that frame; the next frame's fresh measurement
+        // restores the looser clip.
+        if sizing_pass {
+            state.last_content_size = state.desired_size;
+        }
+
         let mut size = state.last_content_size;
         for d in 0..2 {
             if self.with_stroke || self.resizable[d] {
                 // We show how large we are,
                 // so we must follow the contents:
 
-                state.desired_size[d] = state.desired_size[d].max(state.last_content_size[d]);
+                // Grow-only re-pin to what the content measures. On idle frames it runs
+                // for both dimensions so the container always grows to fit its content.
+                // While a drag is in flight only the height (d == 1) re-pins, and it
+                // re-pins live: on non-sizing frames `last_content_size` is the fresh
+                // measurement at the current frame's requested rect (assigned above),
+                // so content that needs more room at the dragged size — wrapped text
+                // growing taller as the container narrows — grows the container during
+                // the drag instead of snapping on release. The width (d == 0) stays
+                // pinned to the user's request: the user drives it, `begin`'s
+                // `min_content_width` clamp bounds it, and re-pinning it could grow the
+                // container back mid-drag. On the sizing-pass frame the seed above pins
+                // `last_content_size` at the request, so the re-pin is a no-op there
+                // either way.
+                if !actively_resizing || d == 1 {
+                    state.desired_size[d] = state.desired_size[d].max(state.last_content_size[d]);
+                }
 
                 // We are as large as we look
                 size[d] = state.desired_size[d];
             } else {
-                // Probably a window.
+                // Probably a window: it renders at the remembered content size, which the
+                // seed above pinned to the requested size on sizing-pass frames.
                 size[d] = state.last_content_size[d];
             }
         }
@@ -454,6 +571,10 @@ impl Resize {
 
         #[cfg(debug_assertions)]
         if ui.global_style().debug.show_resize {
+            // Build both outlines from the reading-start corner, mirroring the
+            // container itself: under a right-to-left interface the container
+            // grows leftward from its fixed right edge, so a rightward-growing
+            // outline would sit offset. `anchor` is that corner.
             ui.debug_painter().debug_rect(
                 anchored_rect(anchor, state.desired_size, grip_on_left),
                 Color32::GREEN,

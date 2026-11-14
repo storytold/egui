@@ -5,7 +5,7 @@ use crate::{
     text::{
         FontDefinitions, FontFamily, FontId, FontInsert, FontPriority, FontProvider, Galley,
         GlyphBitmap, GlyphRasterizer, GlyphRasterizerRequest, LayoutJob, LineBreaker,
-        RasterizedGlyph, SimpleLineBreaker, TextOptions, VariationCoords,
+        RasterizedGlyph, TextOptions, VariationCoords,
         face_store::{FaceStore, FontFaceKey},
         family::{Family, FamilyKey},
         font_face::{FontFace, GlyphInfo, ShapedCluster, ShapedGlyph},
@@ -544,7 +544,10 @@ impl FontsImpl {
             glyph_rasterizers: Vec::new(),
             font_providers: Default::default(),
             missing_glyph_policy: Default::default(),
-            line_breaker: Arc::new(SimpleLineBreaker),
+            #[cfg(feature = "sea_dictionary")]
+            line_breaker: Arc::new(crate::text::SeaLineBreaker),
+            #[cfg(not(feature = "sea_dictionary"))]
+            line_breaker: Arc::new(crate::text::SimpleLineBreaker),
             synthetic_tofu: GlyphRasterizer::new(
                 "epaint::synthetic_tofu",
                 |request: &GlyphRasterizerRequest<'_>| Some(synthetic_tofu(request.font_size_px)),

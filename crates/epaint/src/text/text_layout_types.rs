@@ -394,6 +394,23 @@ pub enum TextDirection {
     RightToLeft,
 }
 
+impl TextDirection {
+    /// First-strong-character inference (UAX #9 `dir=auto`): the first character with a
+    /// strong bidi class decides; `None` if the text has no strong character.
+    ///
+    /// Unlike [`Self::Auto`] resolution this asks about the text itself, without
+    /// the "paragraph before it" fallback — callers use it to tell text with a
+    /// strong opinion from direction-agnostic runs (like a check mark).
+    pub fn infer(text: &str) -> Option<Self> {
+        text.chars()
+            .find_map(|c| match unicode_bidi::bidi_class(c) {
+                unicode_bidi::BidiClass::L => Some(Self::LeftToRight),
+                unicode_bidi::BidiClass::R | unicode_bidi::BidiClass::AL => Some(Self::RightToLeft),
+                _ => None,
+            })
+    }
+}
+
 // ----------------------------------------------------------------------------
 
 /// A contiguous range of [`LayoutJob::text`] that shares the same [`TextFormat`].
@@ -832,6 +849,11 @@ pub struct Galley {
     /// * [`Align::LEFT`]: `rect.left() == 0.0`
     /// * [`Align::Center`]: `rect.center() == 0.0`
     /// * [`Align::RIGHT`]: `rect.right() == 0.0`
+    ///
+    /// The anchors hold for the aligned ink; whitespace that the alignment
+    /// ignores ([`LayoutJob::keep_trailing_whitespace`] is `false`) extends
+    /// the rect reading-forward from the anchored ink. Reading-forward
+    /// follows the row's base direction: leftward on a right-to-left row.
     pub rect: Rect,
 
     /// Tight bounding box around all the meshes in all the rows.
@@ -880,13 +902,27 @@ impl PlacedRow {
         Rect::from_min_size(self.pos, self.row.size)
     }
 
-    /// Same as [`Self::rect`] but excluding the `LayoutSection::leading_space`.
+    /// Same as [`Self::rect`] but excluding the `LayoutSection::leading_space`
+    /// ink gap.
+    ///
+    /// Direction-aware. A left-to-right row reads from the left: the trim
+    /// starts at the first glyph (the visually-leftmost one), so the leading
+    /// advance is excluded from the left edge. A right-to-left row reads
+    /// from the right: its leading advance occupies the box's right edge and
+    /// stays part of the rect (it is the reading-start indent the hit rect
+    /// gives back), so the trim only drops the empty space left of the
+    /// visually-leftmost glyph (the logically-last one).
     pub fn rect_without_leading_space(&self) -> Rect {
-        let x = self.pos.x + self.glyphs.first().map_or(0.0, |g| g.pos.x);
         let right = self.pos.x + self.size.x;
+        let leftmost = if self.row.base_direction == TextDirection::RightToLeft {
+            self.glyphs.last()
+        } else {
+            self.glyphs.first()
+        };
+        let x = self.pos.x + leftmost.map_or(0.0, |g| g.pos.x);
         Rect::from_min_max(
             Pos2::new(x, self.pos.y),
-            Pos2::new(right, self.pos.y + self.size.y),
+            Pos2::new(right, self.pos.y + self.row.size.y),
         )
     }
 }
@@ -909,7 +945,41 @@ pub struct Row {
     /// adjust `section_index` when concatting.
     pub(crate) section_index_at_start: u32,
 
+    /// The paragraph's resolved base reading direction (UAX #9 P2/P3).
+    ///
+    /// This is what lets cursor columns — which are *logical* character
+    /// offsets — be mapped onto the laid-out glyphs ([`Self::x_offset`] /
+    /// [`Self::char_at`]), together with the per-glyph bidi levels and
+    /// [`Self::visual_order`].
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub base_direction: TextDirection,
+
+    /// The `LayoutSection::leading_space` advance consumed before this row's
+    /// paragraph began, when this row carries the paragraph's first glyph.
+    /// Kept in the ink at the reading start for right-anchored rows.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub(crate) leading_advance: f32,
+
     /// One for each `char`.
+    ///
+    /// The glyphs are laid out left-to-right (their `pos.x` increases along
+    /// the slice) and listed in *logical* string order; the visual placement
+    /// per UAX #9 rule L2 lives in their `pos.x` (rewritten by
+    /// `reorder_row_visually`) and in [`Self::visual_order`], which lists the
+    /// slice indices from left to right. Consequence for cursors: a cursor
+    /// column is a *logical* character offset, and mapping it onto the
+    /// laid-out glyphs uses the row's base direction
+    /// ([`Self::base_direction`]) plus the per-glyph bidi embedding levels —
+    /// exact per glyph, so also inside runs that counteract the base (e.g.
+    /// embedded left-to-right words in a right-to-left row).
+    ///
+    /// Wrapped right-to-left text follows the reading order: wrapping walks
+    /// the glyphs in logical order and each produced row is then placed per
+    /// UAX #9 L1/L2 (`reset_whitespace_levels` + `reorder_row_visually`), so
+    /// an RTL-base `أول ثاني ثالث` wraps with `أول` leading the first row,
+    /// and the break whitespace of a right-to-left row renders at its visual
+    /// reading end. Because the levels are per glyph, that placement is also
+    /// exact inside runs that counteract the base direction.
     pub glyphs: Vec<Glyph>,
 
     /// Is the paragraph this row belongs to right-to-left?
@@ -1008,11 +1078,17 @@ pub struct Glyph {
     /// Whether this glyph carries its own color, e.g. a color emoji.
     pub is_color: bool,
 
-    /// Resolved bidi embedding level of the character (UAX #9).
+    /// The resolved UAX #9 embedding level of the directional run this glyph
+    /// was laid out for (odd = right-to-left; the row's base direction is
+    /// [`Row::base_direction`]).
     ///
-    /// `0` for plain left-to-right text; odd levels are right-to-left.
-    /// Glyphs stay in logical order in [`Row::glyphs`]; this decides where
-    /// they are placed on the row and which side of them a cursor sits.
+    /// Pure left-to-right rows stamp level 0 on every glyph. The glyphs of a
+    /// row are in logical order (the visual placement lives in their `pos.x`
+    /// and [`Row::visual_order`]), so grouping the slice by `bidi_level`
+    /// recovers the directional runs in logical order (see e.g. the
+    /// accessibility `TextRun` builder). Serialized galleys from before this
+    /// field existed degrade to all-level-0, which is today's behavior.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub bidi_level: u8,
 
     /// Index into [`LayoutJob::sections`]. Decides color etc.
@@ -1026,7 +1102,24 @@ pub struct Glyph {
     pub first_vertex: u32,
 }
 
+/// Pin the glyph size: galleys are cached per layout, so a silently growing
+/// [`Glyph`] would bloat every galley in every cache. rustc packs the two
+/// one-byte fields (`is_color`, `bidi_level`) into existing padding, keeping
+/// the struct at 72 bytes. If this assert fires, your field made every stored
+/// glyph grow — re-check the layout before shipping.
+const _: () = assert!(
+    core::mem::size_of::<Glyph>() == 72,
+    "Glyph grew beyond 72 bytes: every cached galley holds one Glyph per char",
+);
+
 impl Glyph {
+    /// True if the glyph's directional run was laid out right-to-left (odd
+    /// UAX #9 embedding level).
+    #[inline]
+    pub fn is_rtl(&self) -> bool {
+        self.bidi_level % 2 == 1
+    }
+
     #[inline]
     pub fn size(&self) -> Vec2 {
         Vec2::new(self.advance_width, self.line_height)
@@ -1041,12 +1134,6 @@ impl Glyph {
     #[inline]
     pub fn logical_rect(&self) -> Rect {
         Rect::from_min_size(self.pos - vec2(0.0, self.font_ascent), self.size())
-    }
-
-    /// Is this glyph part of a right-to-left run?
-    #[inline]
-    pub fn is_rtl(&self) -> bool {
-        self.bidi_level % 2 == 1
     }
 }
 
@@ -1374,9 +1461,17 @@ impl core::ops::Deref for Galley {
 /// ## Physical positions
 impl Galley {
     /// Zero-width rect past the last character.
+    ///
+    /// The past-the-end caret sits at the reading end: the row's visual right
+    /// edge for a left-to-right row, its visual left edge for a right-to-left
+    /// one.
     fn end_pos(&self) -> Rect {
         if let Some(row) = self.rows.last() {
-            let x = row.rect().right();
+            let x = if row.base_direction == TextDirection::RightToLeft {
+                row.rect().left()
+            } else {
+                row.rect().right()
+            };
             Rect::from_min_max(pos2(x, row.min_y()), pos2(x, row.max_y()))
         } else {
             // Empty galley
@@ -1560,6 +1655,9 @@ impl Galley {
 /// ## Cursor positions
 impl Galley {
     /// The cursor one grapheme cluster back, in logical order.
+    ///
+    /// (Mac Cmd bindings call this for `moveBackward:`-style logical motion;
+    /// the arrow keys move visually through [`Galley::cursor_left_visually`].)
     pub fn cursor_left_one_character(&self, cursor: &CCursor) -> CCursor {
         if cursor.index == CharIndex::ZERO {
             Default::default()
@@ -1572,6 +1670,9 @@ impl Galley {
     }
 
     /// The cursor one grapheme cluster forward, in logical order.
+    ///
+    /// (Mac Cmd bindings call this for `moveForward:`-style logical motion;
+    /// the arrow keys move visually through [`Galley::cursor_right_visually`].)
     pub fn cursor_right_one_character(&self, cursor: &CCursor) -> CCursor {
         CCursor {
             index: grapheme::next_boundary(self.text(), cursor.index).min(self.end().index),

@@ -420,6 +420,10 @@ impl TextAgent {
         input.set_type("text");
         input.set_attribute("autocapitalize", "off")?;
         // Keep a sibling of the canvas, including inside shadow DOM. No focus during setup.
+        // Let the browser pick the bidi base direction (and IME behavior) from
+        // the text. Without this, composition and candidate windows attach to
+        // a hard-LTR element even when the egui caret sits in RTL text.
+        input.set_attribute("dir", "auto")?;
         let style = input.style();
         for (key, value) in [
             ("background-color", "transparent"),
@@ -895,9 +899,19 @@ impl InputState {
         // scrolling, and doesn't flap when the virtual keyboard is shown on
         // mobile Safari.
 
+        // Anchor the input at the reading edge of the caret: the hidden
+        // input's value is the same string the browser runs its own
+        // `dir="auto"` first-strong scan over, so the derived edge always
+        // agrees with the base direction the browser/OS IME uses for it.
+        // RTL anchors at the caret's right edge, LTR at the left edge; a
+        // value with no strong character keeps the old center-point
+        // behavior.
+        let direction = crate::text_dir::bidi_base_direction(&self.input.value());
+        let anchor_x = crate::text_dir::anchor_x(ime.cursor_rect, direction);
+
         // Clamp the input position within the canvas width to prevent unwanted horizontal scrolling.
         let logical_canvas_width = canvas.width() as f32 / native_ppp;
-        let visible_x = ime.cursor_rect.center().x * zoom_factor;
+        let visible_x = anchor_x * zoom_factor;
         let clamped_x = visible_x.clamp(0.0, logical_canvas_width);
 
         // Clamp the input position within the canvas height to prevent unwanted vertical scrolling.

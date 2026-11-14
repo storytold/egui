@@ -77,6 +77,12 @@ struct Paragraph {
 
     /// Is the base direction of this paragraph right-to-left?
     pub rtl: bool,
+
+    /// The `LayoutSection::leading_space` advance consumed before this
+    /// paragraph's first glyph, in logical pixels. Remembered so row
+    /// anchoring can keep it in the ink of the row that carries the
+    /// paragraph's first glyph.
+    pub leading_advance: f32,
 }
 
 impl Paragraph {
@@ -87,6 +93,17 @@ impl Paragraph {
             glyphs: vec![],
             empty_paragraph_height: 0.0,
             rtl: false,
+            leading_advance: 0.0,
+        }
+    }
+
+    /// The paragraph's resolved base reading direction (UAX #9 P2/P3),
+    /// as computed by [`BidiLevels`] when the paragraphs were split.
+    pub fn base_direction(&self) -> TextDirection {
+        if self.rtl {
+            TextDirection::RightToLeft
+        } else {
+            TextDirection::LeftToRight
         }
     }
 }
@@ -216,7 +233,9 @@ struct ShapingContext {
     font_metrics: StyledMetrics,
     is_first_glyph_in_section: bool,
 
-    /// Bidi embedding level of the run being emitted.
+    /// The UAX #9 embedding level of the bidi run being laid out (odd = RTL).
+    /// Stamped onto every glyph the context creates, so continuation glyphs
+    /// carry their cluster's level too.
     bidi_level: u8,
 }
 
@@ -300,9 +319,33 @@ fn layout_shaped_run(
         positions: glyph_buffer.glyph_positions(),
     };
 
+    // The start byte of the previously emitted cluster, for descending
+    // transitions: a real shaper emits clusters in monotone byte order per
+    // run, so a descending transition (only reachable from a hand-shaped,
+    // non-monotone vector) means the outgoing cluster extends to the previous
+    // larger cluster start — or, at the run's first transition and for the
+    // logically-last cluster of such a vector, to the end of the run text.
+    // Seeded only once a cluster has actually been emitted, never from a
+    // dummy start:
+    let mut previous_cluster_start: Option<usize> = None;
     let mut clusters = logical_clusters(shaped.infos, run.bidi_level % 2 == 1).peekable();
     while let Some(glyph_range) = clusters.next() {
-        let byte_range = shaped.cluster_bytes(&glyph_range, clusters.peek());
+        let cluster_start = shaped.infos[glyph_range.start].cluster as usize;
+        let byte_range = {
+            let raw = shaped.cluster_bytes(&glyph_range, clusters.peek());
+            match (clusters.peek(), previous_cluster_start) {
+                // Ascending: the next cluster's start is this one's end:
+                (Some(_), _) if raw.start < raw.end => raw,
+                // Descending transition: end at the previous larger start,
+                // or the run text at the first transition:
+                (Some(_), previous) => raw.start..previous.unwrap_or(shaped.text.len()),
+                // The logically-last cluster of an ascending run runs to the
+                // end of the run text; a descending vector's last cluster
+                // ends at the previous larger start:
+                (None, Some(previous)) if raw.start < previous => raw.start..previous,
+                (None, _) => raw,
+            }
+        };
         let char_count = run_text
             .get(byte_range.clone())
             .map_or(0, |cluster_text| cluster_text.chars().count());
@@ -335,6 +378,7 @@ fn layout_shaped_run(
         }
 
         emit_continuation_glyphs(ctx, paragraph, run_text, byte_range, emitted, face_metrics);
+        previous_cluster_start = Some(cluster_start);
     }
 }
 
@@ -354,6 +398,11 @@ struct ShapedRun<'a> {
 impl ShapedRun<'_> {
     /// The bytes of the cluster shaped into `glyph_range`,
     /// given the cluster after it in logical order (if any).
+    ///
+    /// Clusters ascend in logical order, so the outgoing cluster ends where
+    /// the next one starts; the caller redirects descending transitions (a
+    /// hand-shaped vector can be non-monotone — a real shaper never produces
+    /// that) to the previous larger start or the end of the run text.
     fn cluster_bytes(
         &self,
         glyph_range: &Range<usize>,
@@ -735,6 +784,9 @@ fn layout_section(
     let mut paragraph = out_paragraphs.last_mut().unwrap();
     if paragraph.glyphs.is_empty() {
         paragraph.empty_paragraph_height = line_height;
+        // The advance precedes this paragraph's first glyph (a section that
+        // starts here): remember it so row anchoring can keep it in the ink.
+        paragraph.leading_advance += leading_space;
     }
     paragraph.cursor_x_px += leading_space * pixels_per_point;
 
@@ -916,6 +968,8 @@ fn rows_from_paragraphs(
                 pos: pos2(0.0, f32::NAN),
                 row: Arc::new(Row {
                     section_index_at_start: paragraph.section_index_at_start,
+                    base_direction: paragraph.base_direction(),
+                    leading_advance: 0.0,
                     glyphs: vec![],
                     rtl_paragraph: paragraph.rtl,
                     visual_order: Vec::new(),
@@ -938,13 +992,16 @@ fn rows_from_paragraphs(
                 .filter(|breaks| !fits || breaks.iter().any(|after| after.hard));
             if let Some(breaks) = breaks {
                 line_break(&paragraph, &breaks, job, &mut rows, elided);
-                let placed_row = rows.last_mut().unwrap();
-                placed_row.ends_with_newline = !is_last_paragraph;
+                if let Some(placed_row) = rows.last_mut() {
+                    placed_row.ends_with_newline = !is_last_paragraph;
+                }
             } else {
                 rows.push(PlacedRow {
                     pos: pos2(0.0, f32::NAN),
                     row: Arc::new(Row {
                         section_index_at_start: paragraph.section_index_at_start,
+                        base_direction: paragraph.base_direction(),
+                        leading_advance: paragraph.leading_advance,
                         glyphs: paragraph.glyphs,
                         rtl_paragraph: paragraph.rtl,
                         visual_order: Vec::new(),
@@ -1017,7 +1074,17 @@ fn break_opportunities(
 }
 
 /// The glyphs `range` of `paragraph` as a row, moved left by `row_start_x`.
-fn row_of_glyphs(paragraph: &Paragraph, range: Range<usize>, row_start_x: f32) -> PlacedRow {
+///
+/// `leading_advance` is the `LayoutSection::leading_space` advance the row's
+/// first glyph carries in its position (only the row holding the paragraph's
+/// first glyph has one; later rows are re-based without it), kept on the row
+/// so anchoring can re-inset it at the reading start.
+fn row_of_glyphs(
+    paragraph: &Paragraph,
+    range: Range<usize>,
+    row_start_x: f32,
+    leading_advance: f32,
+) -> PlacedRow {
     let glyphs: Vec<Glyph> = paragraph.glyphs[range]
         .iter()
         .copied()
@@ -1034,6 +1101,8 @@ fn row_of_glyphs(paragraph: &Paragraph, range: Range<usize>, row_start_x: f32) -
         pos: pos2(0.0, f32::NAN),
         row: Arc::new(Row {
             section_index_at_start,
+            base_direction: paragraph.base_direction(),
+            leading_advance,
             glyphs,
             rtl_paragraph: paragraph.rtl,
             visual_order: Vec::new(),
@@ -1061,6 +1130,12 @@ fn line_break(
     let mut row_start_x = 0.0;
     let mut row_start_idx = 0;
 
+    // The `leading_space` advance the paragraph's first glyph carries: the row
+    // holding that glyph keeps it (its glyphs carry it in their positions), so
+    // row anchoring can re-inset it at the reading start; every later row has
+    // it re-based out of its glyphs and gets 0.0.
+    let mut leading_advance = paragraph.leading_advance;
+
     for (i, &after) in breaks.iter().enumerate() {
         if job.wrap.max_rows <= out_rows.len() {
             *elided = true;
@@ -1081,6 +1156,8 @@ fn line_break(
                     pos: pos2(0.0, f32::NAN),
                     row: Arc::new(Row {
                         section_index_at_start: paragraph.section_index_at_start,
+                        base_direction: paragraph.base_direction(),
+                        leading_advance: 0.0,
                         glyphs: vec![],
                         rtl_paragraph: paragraph.rtl,
                         visual_order: Vec::new(),
@@ -1091,18 +1168,25 @@ fn line_break(
                 });
                 row_start_x += first_row_indentation;
                 first_row_indentation = 0.0;
+                // The advance was consumed with the indent (via `row_start_x`),
+                // so no row keeps it:
+                leading_advance = 0.0;
             } else if let Some(last_kept_index) = row_break_candidates.get(job.wrap.break_anywhere)
             {
                 out_rows.push(row_of_glyphs(
                     paragraph,
                     row_start_idx..last_kept_index + 1,
                     row_start_x,
+                    leading_advance,
                 ));
 
                 // Start a new row:
                 row_start_idx = last_kept_index + 1;
                 row_start_x = paragraph.glyphs[row_start_idx].pos.x;
                 row_break_candidates.forget_before_idx(row_start_idx);
+                // The advance rode the row that carried the paragraph's first
+                // glyph; later rows' glyphs are re-based without it:
+                leading_advance = 0.0;
             } else {
                 // Found no place to break, so we have to overrun wrap_width.
             }
@@ -1113,10 +1197,18 @@ fn line_break(
                 *elided = true;
                 break;
             }
-            out_rows.push(row_of_glyphs(paragraph, row_start_idx..i + 1, row_start_x));
+            out_rows.push(row_of_glyphs(
+                paragraph,
+                row_start_idx..i + 1,
+                row_start_x,
+                leading_advance,
+            ));
             row_start_idx = i + 1;
             row_start_x = paragraph.glyphs[row_start_idx].pos.x;
             row_break_candidates.forget_before_idx(row_start_idx);
+            // The advance rode the row that carried the paragraph's first
+            // glyph; later rows' glyphs are re-based without it:
+            leading_advance = 0.0;
         } else {
             row_break_candidates.add(i, after);
         }
@@ -1146,6 +1238,8 @@ fn line_break(
                 pos: pos2(paragraph_min_x, 0.0),
                 row: Arc::new(Row {
                     section_index_at_start,
+                    base_direction: paragraph.base_direction(),
+                    leading_advance,
                     glyphs,
                     rtl_paragraph: paragraph.rtl,
                     visual_order: Vec::new(),
@@ -1154,6 +1248,9 @@ fn line_break(
                 }),
                 ends_with_newline: false,
             });
+            // This is the last row: for the single-row overrun the advance has
+            // moved from the glyphs into `paragraph_min_x`/`pos.x`, and the row
+            // records it so row anchoring can re-inset it at the reading start.
         }
     }
 }
@@ -1304,6 +1401,18 @@ fn halign_and_justify_row(
         return;
     }
 
+    // The natural width of the row, whitespace included. Alignment trims the
+    // ink below, but the row keeps this size so the space after (or before,
+    // in right-to-left rows) the text is allocated like in a left-aligned row.
+    let natural_width = row.size.x;
+
+    // Read before the `Row` destructure below holds the mutable borrow:
+    // the `LayoutSection::leading_space` advance the row's first glyph
+    // carries in its position, and the row's resolved base reading
+    // direction.
+    let row_leading_advance = row.leading_advance;
+    let row_base_direction = row.base_direction;
+
     let num_leading_spaces = row
         .glyphs
         .iter()
@@ -1339,13 +1448,22 @@ fn halign_and_justify_row(
     let order = || visual_indices(visual_order, num_glyphs);
     let kept = |i: usize| glyph_range.0 <= i && i < glyph_range.1;
     let first_kept = order().position(kept).unwrap_or(0);
-    let last_kept = order().rev().find(|&i| kept(i)).unwrap_or(0);
 
-    let original_min_x = glyphs[order().nth(first_kept).unwrap_or(0)]
-        .logical_rect()
-        .min
-        .x;
-    let original_max_x = glyphs[last_kept].logical_rect().max.x;
+    // The ink span of the row, over ALL glyphs in the kept range — not just
+    // the endpoints in visual order. Shaped complex scripts (e.g. Arabic
+    // ligature glyphs with negative offsets, plus the zero-advance
+    // continuation placeholders at both ends of the glyph vector) make the
+    // glyph vector non-monotonic in x, so the first and last glyph do not
+    // bracket the ink. `f32::min`/`max` ignore NaN, so a stray NaN position
+    // cannot poison the span.
+    let original_min_x = glyphs[glyph_range.0..glyph_range.1]
+        .iter()
+        .map(|glyph| glyph.logical_rect().min.x)
+        .fold(f32::INFINITY, f32::min);
+    let original_max_x = glyphs[glyph_range.0..glyph_range.1]
+        .iter()
+        .map(|glyph| glyph.logical_rect().max.x)
+        .fold(f32::NEG_INFINITY, f32::max);
     let original_width = original_max_x - original_min_x;
 
     let target_width = if justify && num_glyphs_in_range > 1 {
@@ -1385,8 +1503,43 @@ fn halign_and_justify_row(
             / (num_spaces_in_range as f32);
     }
 
-    placed_row.pos.x = point_scale.round_to_pixel(target_min_x);
-    let mut translate_x = -original_min_x - extra_x_per_glyph * first_kept as f32;
+    // The paragraph's leading advance sits before the first glyph. For a
+    // left-anchored row it survives inside the ink positions; for a
+    // right-anchored right-to-left row the reading start is the row's RIGHT
+    // edge, so the anchored ink is inset by the advance instead of the
+    // advance being absorbed into the row box.
+    //
+    // Rows with ignored whitespace must also hang it reading-forward from the
+    // anchored ink — leftward, on a right-to-left row — instead of letting it
+    // extend the box past the anchored edge. The box width is derived from its
+    // rounded position below so its right edge lands exactly on the galley
+    // origin; the ignored whitespace sits inside the box between its
+    // reading-forward edge and the ink. The translate below re-centers the ink
+    // inside the box so no glyph moves. Justified rows and rows that keep their
+    // trailing whitespace size themselves to the anchored span instead, so
+    // their boxes already hug the ink and the hang does not apply to them.
+    let right_anchored_rtl =
+        halign == Align::RIGHT && row_base_direction == TextDirection::RightToLeft;
+    let reading_start_inset = if right_anchored_rtl {
+        row_leading_advance
+    } else {
+        0.0
+    };
+    // Measured from the glyphs' advances rather than derived from the widths,
+    // so advance-vs-ink discrepancies of the ink glyphs cannot leak into it.
+    let ignored_whitespace = if right_anchored_rtl && !justify && !keep_trailing_whitespace {
+        glyphs[..glyph_range.0]
+            .iter()
+            .chain(glyphs[glyph_range.1..].iter())
+            .map(|glyph| glyph.advance_width)
+            .sum()
+    } else {
+        0.0
+    };
+    placed_row.pos.x =
+        point_scale.round_to_pixel(target_min_x) - reading_start_inset - ignored_whitespace;
+    let mut translate_x =
+        -original_min_x + ignored_whitespace - extra_x_per_glyph * first_kept as f32;
 
     for i in order() {
         let glyph = &mut glyphs[i];
@@ -1398,8 +1551,20 @@ fn halign_and_justify_row(
         }
     }
 
-    // Note we ignore the leading/trailing whitespace here!
-    row.size.x = target_max_x - target_min_x;
+    // The ink range above is only for positioning: centered and right-anchored
+    // rows align around their ink, so trailing whitespace must not skew them.
+    // Right-anchored RTL rows with ignored whitespace derive their width from
+    // the rounded position so their boxes end exactly at the galley origin.
+    // Other rows keep counting whitespace in their allocated size, except
+    // justified rows and rows that keep trailing whitespace, which use their
+    // aligned span.
+    row.size.x = if right_anchored_rtl && ignored_whitespace > 0.0 {
+        -placed_row.pos.x
+    } else if justify || keep_trailing_whitespace {
+        target_max_x - target_min_x
+    } else {
+        natural_width
+    };
 }
 
 /// Is `row` aligned to the right because its start is there?
@@ -1412,10 +1577,40 @@ fn starts_on_the_right(job: &LayoutJob, row: &Row) -> bool {
         && !row.glyphs.is_empty()
 }
 
+/// The right edge of a row's aligned ink, in the row's own coordinates.
+///
+/// [`halign_and_justify_row`] anchors the kept ink at `[0.0, right]`;
+/// whitespace that the alignment trimmed (see
+/// [`LayoutJob::keep_trailing_whitespace`], and leading whitespace, which a
+/// right-to-left row renders at its right edge) sits outside it. A row that
+/// hangs from its reading start must therefore hang from this edge, not from
+/// its allocated width, which keeps counting the whitespace.
+fn aligned_ink_right(row: &Row) -> f32 {
+    let ink_right = row
+        .glyphs
+        .iter()
+        .filter(|glyph| !glyph.chr.is_whitespace())
+        .map(Glyph::max_x)
+        .fold(f32::NEG_INFINITY, f32::max);
+    if ink_right.is_finite() {
+        ink_right
+    } else {
+        // Only whitespace: the whole row is the ink.
+        row.size.x
+    }
+}
+
 /// Puts each row that [`starts_on_the_right`] flush with the right edge of the widest row.
 ///
-/// Such a row has been aligned as `Align::RIGHT`, with its size in `row.size.x`;
-/// the other rows stay where they are. Returns `true` if any row moved.
+/// Such a row has been aligned as `Align::RIGHT`, with its ink anchored at the
+/// right edge of its `row.size.x`; the other rows stay where they are.
+/// Returns `true` if any row moved.
+///
+/// A row that carries a `leading_advance` (the `LayoutSection::leading_space`
+/// consumed before the paragraph's first glyph) hangs from its ink right edge
+/// plus that advance: the advance stays inside the reading-start edge, exactly
+/// like the leading whitespace a right-to-left row renders at its right edge,
+/// instead of floating past it as a box overhang.
 pub(crate) fn align_rtl_rows_to_start(
     job: &LayoutJob,
     rows: &mut [PlacedRow],
@@ -1427,11 +1622,14 @@ pub(crate) fn align_rtl_rows_to_start(
     {
         return false;
     }
+    let hang_from = |placed_row: &PlacedRow| {
+        aligned_ink_right(&placed_row.row) + placed_row.row.leading_advance
+    };
     let width = rows
         .iter()
         .map(|placed_row| {
             if starts_on_the_right(job, &placed_row.row) {
-                placed_row.size.x
+                hang_from(placed_row)
             } else {
                 placed_row.pos.x + placed_row.size.x
             }
@@ -1440,7 +1638,7 @@ pub(crate) fn align_rtl_rows_to_start(
     let point_scale = PointScale::new(pixels_per_point);
     for placed_row in rows {
         if starts_on_the_right(job, &placed_row.row) {
-            placed_row.pos.x = point_scale.round_to_pixel(width - placed_row.size.x);
+            placed_row.pos.x = point_scale.round_to_pixel(width - hang_from(placed_row));
         }
     }
     true
@@ -2338,11 +2536,53 @@ mod tests {
     use core::iter;
 
     use super::{super::*, *};
-    use crate::{ColorImage, text::cursor::CCursor};
+    use crate::{ColorImage, text::cursor::CCursor, text::cursor::LayoutCursor};
     use emath::Rangef;
 
+    /// The bundled fonts, installed exactly as `FontDefinitions::default` does
+    /// with the `default_fonts` feature (a no-op when the feature is on), so
+    /// the text tests exercise real shaping in every configuration.
+    fn test_font_definitions() -> FontDefinitions {
+        let mut definitions = FontDefinitions::default();
+        if definitions.families.values().all(Vec::is_empty) {
+            // The `default_fonts` feature is off (a plain `cargo test -p epaint`),
+            // so `FontDefinitions::default` installed nothing. Install the bundled
+            // fonts exactly as it does with the feature (see `font_definitions.rs`).
+            definitions.font_data.insert(
+                "Hack".to_owned(),
+                Arc::new(FontData::from_static(epaint_default_fonts::HACK_REGULAR)),
+            );
+            definitions.font_data.insert(
+                "Ubuntu-Light".to_owned(),
+                Arc::new(FontData::from_static(epaint_default_fonts::UBUNTU_LIGHT)),
+            );
+            definitions.font_data.insert(
+                "egui-icons".to_owned(),
+                Arc::new(
+                    FontData::from_static(epaint_default_fonts::EGUI_ICONS).tweak(FontTweak {
+                        scale: 0.90, // Make smaller
+                        ..Default::default()
+                    }),
+                ),
+            );
+            definitions.families.insert(
+                FontFamily::Monospace,
+                vec![
+                    "Hack".to_owned(),
+                    "Ubuntu-Light".to_owned(), // fallback for √ etc
+                    "egui-icons".to_owned(),
+                ],
+            );
+            definitions.families.insert(
+                FontFamily::Proportional,
+                vec!["Ubuntu-Light".to_owned(), "egui-icons".to_owned()],
+            );
+        }
+        definitions
+    }
+
     fn test_fonts() -> FontsImpl {
-        FontsImpl::new(TextOptions::default(), FontDefinitions::default())
+        FontsImpl::new(TextOptions::default(), test_font_definitions())
     }
 
     fn layout_without_fonts(text: &str, policy: MissingGlyphPolicy) -> Arc<Galley> {
@@ -3516,6 +3756,134 @@ mod tests {
         assert!(xs.is_sorted(), "{xs:?}");
     }
 
+    /// A row ending in whitespace allocates the same width in both reading
+    /// directions: the ink is trimmed for alignment, but the row's size keeps
+    /// counting the whitespace, so a widget following at zero item spacing
+    /// keeps its gap under right-to-left layout too.
+    #[test]
+    fn rtl_row_allocates_trailing_whitespace_like_its_ltr_twin() {
+        let mut fonts = tofu_fonts(Arc::new(SimpleLineBreaker));
+        let pixels_per_point = 2.0;
+        let font_id = FontId::proportional(14.0);
+        // Half a physical pixel: glyph positions are pixel-rounded.
+        let tol = 0.5 / pixels_per_point;
+
+        let mut ltr_job =
+            LayoutJob::simple_singleline("abc ".into(), font_id.clone(), Color32::WHITE);
+        ltr_job.direction = TextDirection::LeftToRight;
+        let ltr = layout(&mut fonts, pixels_per_point, ltr_job.into());
+
+        let mut rtl_job = LayoutJob::simple_singleline("abc ".into(), font_id, Color32::WHITE);
+        rtl_job.direction = TextDirection::RightToLeft;
+        let rtl = layout(&mut fonts, pixels_per_point, rtl_job.into());
+
+        assert_eq!(ltr.rows.len(), 1);
+        assert_eq!(rtl.rows.len(), 1);
+        assert_eq!(
+            rtl.size().x,
+            ltr.size().x,
+            "the rtl row must allocate the same width as its ltr twin"
+        );
+        // The ink is the same in both directions: the trailing whitespace sits
+        // outside it, but the row still allocates room for it. A single row
+        // hangs from its own reading start, so its box's reading-start edge
+        // (the right edge under rtl, the left under ltr) is the common hang
+        // edge, and the ink sits flush against it: the ignored whitespace
+        // hangs reading-forward from the anchored ink (leftward, for a
+        // right-to-left row), inside the rect, and only the allocated width
+        // grows to cover the whitespace:
+        let ltr_ink = ink_rect(&ltr);
+        let rtl_ink = ink_rect(&rtl);
+        assert!(
+            (rtl_ink.width() - ltr_ink.width()).abs() <= tol,
+            "the ink is the same size in both directions: {rtl_ink:?} vs {ltr_ink:?}"
+        );
+        assert!(
+            (rtl_ink.right() - rtl.rect.right()).abs() <= tol
+                && (ltr_ink.left() - ltr.rect.left()).abs() <= tol,
+            "each row's box hugs its ink at the reading-start edge (the right \
+             edge under rtl, the left under ltr), with the ignored whitespace \
+             inside the box at the reading-forward end: rtl {rtl_ink:?} vs \
+             {:?}, ltr {ltr_ink:?} vs {:?}",
+            rtl.rect,
+            ltr.rect
+        );
+        assert!(
+            rtl.size().x > rtl_ink.width(),
+            "the whitespace must be allocated: {:?} vs {rtl_ink:?}",
+            rtl.size()
+        );
+    }
+
+    /// The bounding rect of the non-whitespace glyphs ("the ink"), in galley
+    /// space.
+    fn ink_rect(galley: &Galley) -> Rect {
+        galley
+            .rows
+            .iter()
+            .map(|row| {
+                row.glyphs
+                    .iter()
+                    .filter(|glyph| !glyph.chr.is_whitespace())
+                    .map(|glyph| glyph.logical_rect())
+                    .fold(Rect::NOTHING, Rect::union)
+                    .translate(row.pos.to_vec2())
+            })
+            .fold(Rect::NOTHING, Rect::union)
+    }
+
+    /// Trailing whitespace never skews the ink of centered or right-anchored
+    /// rows: they align around their ink (whitespace excluded), while the
+    /// allocated width still includes it.
+    #[test]
+    fn trailing_whitespace_does_not_skew_center_or_right_ink() {
+        let mut fonts = tofu_fonts(Arc::new(SimpleLineBreaker));
+        let pixels_per_point = 2.0;
+        let font_id = FontId::proportional(14.0);
+        // Half a physical pixel: glyph positions are pixel-rounded.
+        let tol = 0.5 / pixels_per_point;
+
+        let mut left_job =
+            LayoutJob::simple_singleline("abc ".into(), font_id.clone(), Color32::WHITE);
+        left_job.direction = TextDirection::LeftToRight;
+        let ink_width = ink_rect(&layout(&mut fonts, pixels_per_point, left_job.into())).width();
+
+        for halign in [Align::Center, Align::RIGHT] {
+            let mut job =
+                LayoutJob::simple_singleline("abc ".into(), font_id.clone(), Color32::WHITE);
+            job.direction = TextDirection::LeftToRight;
+            job.halign = halign;
+            let galley = layout(&mut fonts, pixels_per_point, job.into());
+            assert_eq!(galley.rows.len(), 1);
+
+            // The ink, in galley space: the non-whitespace glyphs, offset by
+            // the row position.
+            let ink = ink_rect(&galley);
+            match halign {
+                Align::Center => {
+                    assert!(
+                        (ink.center().x).abs() <= tol,
+                        "center ink skewed: {:?}",
+                        ink.center().x
+                    );
+                }
+                Align::RIGHT => {
+                    assert!(
+                        ink.right().abs() <= tol,
+                        "right ink skewed: {:?}",
+                        ink.right()
+                    );
+                }
+                Align::LEFT => unreachable!(),
+            }
+            assert!(
+                (ink.width() - ink_width).abs() <= tol,
+                "ink width changed: {:?} vs {ink_width:?}",
+                ink.width()
+            );
+        }
+    }
+
     #[test]
     fn rtl_cursor_sits_on_the_right_side_of_its_glyph() {
         let mut fonts = test_fonts();
@@ -3746,7 +4114,7 @@ mod tests {
         }
 
         // `Fonts` lays out each paragraph on its own, then joins them:
-        let joined = Fonts::new(TextOptions::default(), FontDefinitions::default())
+        let joined = Fonts::new(TextOptions::default(), test_font_definitions())
             .with_pixels_per_point(1.0)
             .layout_job(job(Align::LEFT, true));
         let joined_ranges: Vec<Rangef> = joined.rows.iter().map(visible_x_range).collect();
@@ -3798,20 +4166,17 @@ mod tests {
 
             let ellipsis = row.glyphs.last().unwrap();
             let others = &row.glyphs[..row.glyphs.len() - 1];
-            // Without fonts the overflow character has no width, and goes along with
-            // the glyph before it:
-            let visible = 0.0 < ellipsis.advance_width;
-            assert_eq!(visible, cfg!(feature = "default_fonts"));
-            if visible {
-                let at_visual_end = |g: &Glyph| {
-                    if rtl {
-                        ellipsis.max_x() <= g.pos.x
-                    } else {
-                        g.max_x() <= ellipsis.pos.x
-                    }
-                };
-                assert!(others.iter().all(at_visual_end), "{kept:?}");
-            }
+            // The bundled fonts installed by `test_font_definitions` include the
+            // overflow character, so it always has width:
+            assert!(0.0 < ellipsis.advance_width, "{kept:?}");
+            let at_visual_end = |g: &Glyph| {
+                if rtl {
+                    ellipsis.max_x() <= g.pos.x
+                } else {
+                    g.max_x() <= ellipsis.pos.x
+                }
+            };
+            assert!(others.iter().all(at_visual_end), "{kept:?}");
         }
     }
 
@@ -4059,6 +4424,735 @@ mod tests {
         }
     }
 
+    /// The cursor layer maps *logical* columns over the bidi-reordered
+    /// row: under a right-to-left base direction the text-start caret (logical
+    /// column 0) sits at the visual RIGHT edge and the text-end caret in the
+    /// visual left half, clicks map visual x back to the logical column
+    /// (clicking the visual middle of the Arabic word lands on the right
+    /// grapheme boundary), and every column round-trips through its caret x.
+    #[test]
+    fn bidi_cursor_hit_test_follows_logical_order() {
+        let mut fonts = test_fonts();
+        let galley = layout_with_direction(&mut fonts, "عربي 123", TextDirection::Auto);
+        assert_eq!(galley.rows.len(), 1);
+        let row = &galley.rows[0];
+        let n = row.row.char_count_excluding_newline().0;
+        assert_eq!(n, 8, "one cursor column per character");
+        let mid_y = (row.min_y() + row.max_y()) * 0.5;
+
+        // Text start (logical column 0) sits at the visual RIGHT edge, the text
+        // end (logical column n) in the visual left half:
+        let pos = |column: usize| {
+            galley
+                .pos_from_layout_cursor(&LayoutCursor {
+                    row: 0,
+                    column: CharIndex(column),
+                })
+                .min
+                .x
+        };
+        assert!(
+            pos(0) > galley.rect.center().x,
+            "the text-start caret must sit in the visual right half, got {} (rect {:?})",
+            pos(0),
+            galley.rect
+        );
+        assert!(
+            pos(n) < galley.rect.center().x,
+            "the text-end caret must sit in the visual left half, got {} (rect {:?})",
+            pos(n),
+            galley.rect
+        );
+
+        // Caret x decreases as the logical column advances through the
+        // right-to-left run (reading right to left). Inside an embedded
+        // left-to-right run the caret reads forward with that run — the
+        // per-glyph caret mapping follows each glyph's own direction — so the
+        // strict decrease is pinned for the Arabic prefix only:
+        for column in 0..4 {
+            assert!(
+                pos(column) > pos(column + 1),
+                "caret x must decrease from column {column} to {}: {} vs {}",
+                column + 1,
+                pos(column),
+                pos(column + 1)
+            );
+        }
+
+        // Clicking the visual middle of the Arabic word: the center of the `ب`
+        // glyph (logical column 2) snaps the caret onto `ب`'s reading-start
+        // (right) edge, between `ر` and `ب`:
+        let ba = &row.row.glyphs[2];
+        assert_eq!(ba.chr, 'ب');
+        let ba_center = ba.pos.x + ba.advance_width * 0.5 + row.pos.x;
+        let clicked = galley.cursor_from_pos(vec2(ba_center, mid_y));
+        assert_eq!(
+            clicked.index.0, 2,
+            "clicking the visual center of `ب` must put the caret at its reading-start edge"
+        );
+
+        // x round-trip: every caret position maps back to its own column:
+        for column in 0..=n {
+            let back = galley.cursor_from_pos(vec2(pos(column), mid_y));
+            assert_eq!(
+                back.index.0, column,
+                "clicking the caret x of column {column} must return that column"
+            );
+        }
+    }
+
+    /// One glyph slot per character: the continuation-glyph bookkeeping of RTL
+    /// runs (whose shaper output is in descending cluster order) used to
+    /// over-emit zero-advance duplicates for every character but the first,
+    /// breaking the `glyphs.len() == char_count` invariant that all cursor
+    /// code relies on.
+    #[test]
+    fn rtl_rows_have_one_glyph_slot_per_char() {
+        let mut fonts = test_fonts();
+        for text in ["تقرير", "عربي 123", "سلام"] {
+            for direction in [TextDirection::Auto, TextDirection::RightToLeft] {
+                let galley = layout_with_direction(&mut fonts, text, direction);
+                assert_eq!(galley.rows.len(), 1);
+                let count = galley.rows[0].row.glyphs.len();
+                assert_eq!(
+                    count,
+                    text.chars().count(),
+                    "glyph slots must equal the char count for {text:?} (direction {direction:?})"
+                );
+            }
+        }
+    }
+
+    /// Every glyph is stamped with its bidi run's UAX #9 embedding level, so a
+    /// row's visual glyph stream can be split back into directional runs at
+    /// level changes (consumers: the accessibility `TextRun` builder). LTR rows
+    /// stay all-zero (pure metadata — rendering is unaffected).
+    #[test]
+    fn bidi_levels_partition_rows_into_directional_runs() {
+        let mut fonts = test_fonts();
+        fn level_runs(galley: &Galley) -> Vec<(u8, String)> {
+            assert_eq!(galley.rows.len(), 1, "expected a single-row galley");
+            let mut runs: Vec<(u8, String)> = Vec::new();
+            for glyph in &galley.rows[0].row.glyphs {
+                match runs.last_mut() {
+                    Some((level, text)) if *level == glyph.bidi_level => {
+                        text.push(glyph.chr);
+                    }
+                    _ => runs.push((glyph.bidi_level, glyph.chr.to_string())),
+                }
+            }
+            runs
+        }
+
+        // LTR base with an embedded RTL run: 0 / 1 / 0. Glyphs are stored
+        // in logical order, so the runs come out in logical order:
+        assert_eq!(
+            level_runs(&layout_with_direction(
+                &mut fonts,
+                "Hello שלום world",
+                TextDirection::Auto
+            )),
+            vec![
+                (0, "Hello ".to_owned()),
+                (1, "שלום".to_owned()),
+                (0, " world".to_owned()),
+            ]
+        );
+        // Two runs suffice when the RTL text ends the row:
+        assert_eq!(
+            level_runs(&layout_with_direction(
+                &mut fonts,
+                "Hello שלום",
+                TextDirection::Auto
+            )),
+            vec![(0, "Hello ".to_owned()), (1, "שלום".to_owned())]
+        );
+
+        // RTL base with European numbers: the space between them resolves to
+        // the base level, so it belongs to the RTL run, and the digits sit at
+        // level 2 (even). Logical order: the Arabic run first, the digits after:
+        assert_eq!(
+            level_runs(&layout_with_direction(
+                &mut fonts,
+                "عربي 123",
+                TextDirection::Auto
+            )),
+            vec![(1, "عربي ".to_owned()), (2, "123".to_owned())]
+        );
+
+        // Pure RTL: every glyph at the odd base level:
+        for direction in [TextDirection::Auto, TextDirection::RightToLeft] {
+            for glyph in &layout_with_direction(&mut fonts, "تقرير", direction).rows[0]
+                .row
+                .glyphs
+            {
+                assert!(
+                    glyph.is_rtl(),
+                    "pure-RTL glyph {:?} must carry an odd level",
+                    glyph.chr
+                );
+            }
+        }
+
+        // Pure LTR: every glyph at level 0 (also with an explicit LTR pin):
+        for direction in [TextDirection::Auto, TextDirection::LeftToRight] {
+            for glyph in &layout_with_direction(&mut fonts, "Hello World 123", direction).rows[0]
+                .row
+                .glyphs
+            {
+                assert_eq!(
+                    glyph.bidi_level, 0,
+                    "pure-LTR glyph {:?} must carry level 0",
+                    glyph.chr
+                );
+            }
+        }
+    }
+
+    /// Continuation glyphs (zero-width stand-ins that keep
+    /// `glyphs.len() == char_count` for multi-char clusters) carry their
+    /// cluster's bidi level: they belong to the same directional run as the
+    /// glyphs before them. No bundled font shapes a multi-glyph cluster, so
+    /// this uses the synthetic shaper vector (see
+    /// `descending_run_first_emitted_cluster_keeps_its_continuation_glyphs`).
+    #[test]
+    fn continuation_glyphs_carry_their_cluster_bidi_level() {
+        let run_text = "ab\u{E000}";
+        let mut fonts = test_fonts();
+        let codepoints = [('b', 1), ('\u{E000}', 1), ('a', 0)];
+        let (glyph_buffer, face_key, face_metrics) = shape_synthetic_run(&mut fonts, &codepoints);
+
+        let family = fonts.family_key(&FontFamily::Proportional);
+        // An odd level stands in for any RTL run: the point is that every
+        // glyph of the run — continuations included — carries the run's level.
+        let mut ctx = ShapingContext {
+            family,
+            pixels_per_point: 1.0,
+            font_size: 14.0,
+            line_height: face_metrics.row_height,
+            extra_letter_spacing: 0.0,
+            section_index: 0,
+            font_metrics: face_metrics.clone(),
+            is_first_glyph_in_section: true,
+            bidi_level: 3,
+        };
+        let run = TextRun {
+            font_key: face_key,
+            byte_range: ByteRangeExt::full(run_text),
+            bidi_level: 3,
+            raster: None,
+        };
+        let mut paragraph = Paragraph::from_section_index(0);
+        layout_shaped_run(
+            &mut fonts,
+            &run,
+            run_text,
+            &glyph_buffer,
+            &face_metrics,
+            &mut ctx,
+            &mut paragraph,
+        );
+
+        assert_eq!(paragraph.glyphs.len(), run_text.chars().count());
+        for glyph in &paragraph.glyphs {
+            assert_eq!(glyph.bidi_level, 3, "glyph {:?}", glyph.chr);
+            assert!(glyph.is_rtl());
+        }
+        // The continuation glyph (the zero-advance one) is covered too:
+        assert!(paragraph.glyphs.iter().any(|g| g.advance_width == 0.0));
+    }
+
+    /// Shape `codepoints` — (char, cluster byte offset) pairs in output order —
+    /// with hand-picked cluster values, so a cluster can be given fewer glyphs
+    /// than characters. No bundled font produces a multi-char→fewer-glyphs
+    /// cluster (no lam-alef ligature; flag RIs keep one glyph per char), so the
+    /// continuation-glyph bookkeeping needs a synthetic glyph vector to
+    /// exercise that shape. Non-monotone cluster levels keep the hand-picked
+    /// (descending) values instead of rewriting them.
+    fn shape_synthetic_run(
+        fonts: &mut FontsImpl,
+        codepoints: &[(char, u32)],
+    ) -> (harfrust::GlyphBuffer, FontFaceKey, StyledMetrics) {
+        let family = fonts.family_key(&FontFamily::Proportional);
+        let face_key = fonts.resolve_face(family, 'a');
+        let coords = VariationCoords::default();
+        let face_metrics = fonts
+            .face(face_key)
+            .expect("the test font must resolve 'a'")
+            .styled_metrics(1.0, 14.0, &coords);
+
+        let mut buffer = harfrust::UnicodeBuffer::default();
+        for (chr, cluster) in codepoints {
+            buffer.add(*chr, *cluster);
+        }
+        buffer.set_cluster_level(harfrust::BufferClusterLevel::Characters);
+        buffer.set_direction(harfrust::Direction::LeftToRight);
+        buffer.guess_segment_properties();
+
+        let face = fonts
+            .face(face_key)
+            .expect("the test font must resolve 'a'");
+        let shaper = face.shaper_data().shaper(face.skrifa_font_ref()).build();
+        let glyph_buffer = shaper.shape(buffer, harfrust::ShapeOptions::new());
+        (glyph_buffer, face_key, face_metrics)
+    }
+
+    /// A multi-char cluster with fewer glyphs than chars at the logically-last
+    /// position of a descending-order run keeps its continuation glyph.
+    ///
+    /// The synthetic vector emits two clusters in descending byte order:
+    /// cluster 1 covers the two chars "b" + U+E000 with a single glyph (the
+    /// second codepoint maps to no glyph, like a dropped mark), then cluster 0
+    /// covers "a". The first descending transition's outgoing cluster extends
+    /// to the end of the run text; the previous-cluster bookkeeping used to
+    /// seed itself with the dummy start `0` there, emitting an inverted
+    /// `1..0` range that silently dropped the continuation glyph (2 slots for
+    /// 3 chars).
+    #[test]
+    fn descending_run_first_emitted_cluster_keeps_its_continuation_glyphs() {
+        let run_text = "ab\u{E000}";
+        let mut fonts = test_fonts();
+        let codepoints = [('b', 1), ('\u{E000}', 1), ('a', 0)];
+        let (glyph_buffer, face_key, face_metrics) = shape_synthetic_run(&mut fonts, &codepoints);
+
+        // Precondition: the synthetic vector is what the bookkeeping expects —
+        // three glyphs in descending clusters, the second one unmapped (so the
+        // run emits one glyph for the two-char cluster 1):
+        let infos = glyph_buffer.glyph_infos();
+        assert_eq!(infos.len(), 3, "infos: {infos:?}");
+        let clusters: Vec<u32> = infos.iter().map(|info| info.cluster).collect();
+        assert_eq!(clusters, [1, 1, 0], "infos: {infos:?}");
+        assert_eq!(
+            infos[1].glyph_id, 0,
+            "U+E000 must have no glyph in the test font for this vector to be synthetic"
+        );
+
+        let family = fonts.family_key(&FontFamily::Proportional);
+        let mut ctx = ShapingContext {
+            family,
+            pixels_per_point: 1.0,
+            font_size: 14.0,
+            line_height: face_metrics.row_height,
+            extra_letter_spacing: 0.0,
+            section_index: 0,
+            font_metrics: face_metrics.clone(),
+            is_first_glyph_in_section: true,
+            bidi_level: 0,
+        };
+        let run = TextRun {
+            font_key: face_key,
+            byte_range: ByteRangeExt::full(run_text),
+            bidi_level: 0,
+            raster: None,
+        };
+        let mut paragraph = Paragraph::from_section_index(0);
+        layout_shaped_run(
+            &mut fonts,
+            &run,
+            run_text,
+            &glyph_buffer,
+            &face_metrics,
+            &mut ctx,
+            &mut paragraph,
+        );
+
+        let chars = run_text.chars().count();
+        assert_eq!(
+            paragraph.glyphs.len(),
+            chars,
+            "the continuation glyph of the logically-last cluster must not be lost: \
+             glyphs {:?}",
+            paragraph.glyphs.iter().map(|g| g.chr).collect::<Vec<_>>()
+        );
+
+        // The continuation is grouped with its cluster: it carries the cluster's
+        // byte start (1, like the 'b' glyph before it, not 0), zero advance (it
+        // draws nothing), and the char it stands in for:
+        // The continuation is grouped with its cluster: the glyph slice lists
+        // the cluster's chars in logical order, then 'a' of cluster 0:
+        assert_eq!(
+            paragraph.glyphs.iter().map(|g| g.chr).collect::<Vec<_>>(),
+            ['b', '\u{E000}', 'a'],
+            "the continuation glyph must belong to cluster 1, with 'a' in cluster 0"
+        );
+        let continuation = &paragraph.glyphs[1];
+        assert_eq!(continuation.chr, '\u{E000}');
+        assert_eq!(
+            continuation.advance_width, 0.0,
+            "a continuation glyph is zero-width"
+        );
+        assert!(
+            paragraph.glyphs[2].pos.x >= continuation.pos.x,
+            "the glyph vector stays in visual order: {:?}",
+            paragraph.glyphs.iter().map(|g| g.pos.x).collect::<Vec<_>>()
+        );
+    }
+
+    /// The caret boundaries of a pure-RTL row mirror the reading direction: the
+    /// first column sits at the ink's right edge, the last at the ink's left
+    /// edge, and the LTR twin keeps the historic left-to-right geometry.
+    #[test]
+    fn rtl_caret_positions_mirror_the_reading_direction() {
+        let mut fonts = test_fonts();
+        let rtl = layout_with_direction(&mut fonts, "تقرير", TextDirection::Auto);
+        assert_eq!(rtl.rows.len(), 1);
+        let row = &rtl.rows[0];
+        let n = row.row.char_count_excluding_newline().0;
+        let ink_min = row
+            .glyphs
+            .iter()
+            .map(|glyph| glyph.pos.x)
+            .fold(f32::INFINITY, f32::min);
+        let ink_max = row
+            .glyphs
+            .iter()
+            .map(|glyph| glyph.max_x())
+            .fold(f32::NEG_INFINITY, f32::max);
+
+        let x = |column: usize| row.row.x_offset(CharIndex(column));
+        assert!(
+            (x(0) - ink_max).abs() < 1.0,
+            "column 0 (reading start) at the ink right edge: {} vs {ink_max}",
+            x(0)
+        );
+        assert!(
+            (x(n) - ink_min).abs() < 1.0,
+            "column {n} (reading end) at the ink left edge: {} vs {ink_min}",
+            x(n)
+        );
+
+        // The LTR twin keeps the historic geometry: column 0 at the ink's left
+        // edge, column n at the row width:
+        let ltr = layout_with_direction(&mut fonts, "abcde", TextDirection::LeftToRight);
+        let ltr_row = &ltr.rows[0];
+        let ltr_n = ltr_row.row.char_count_excluding_newline().0;
+        let ltr_x = |column: usize| ltr_row.row.x_offset(CharIndex(column));
+        assert!(
+            (ltr_x(0) - ltr_row.glyphs[0].pos.x).abs() < 1e-3,
+            "LTR column 0 keeps its glyph-left caret"
+        );
+        assert!(
+            (ltr_x(ltr_n) - ltr_row.size.x).abs() < 1e-3,
+            "LTR column {ltr_n} keeps the end-of-row caret"
+        );
+    }
+
+    /// A mixed row under an RTL base direction keeps exact caret geometry at
+    /// the reading edges (the per-glyph caret mapping follows each glyph's own
+    /// bidi level), and clicks inside the Arabic run land on the right
+    /// grapheme boundary. This pins the edges.
+    #[test]
+    fn mixed_rtl_base_caret_edges() {
+        let mut fonts = test_fonts();
+        let galley = layout_with_direction(&mut fonts, "عربي abc", TextDirection::Auto);
+        assert_eq!(galley.rows.len(), 1);
+        let row = &galley.rows[0];
+        let n = row.row.char_count_excluding_newline().0;
+        assert_eq!(n, 8);
+        let mid_y = (row.min_y() + row.max_y()) * 0.5;
+
+        let pos = |column: usize| {
+            galley
+                .pos_from_layout_cursor(&LayoutCursor {
+                    row: 0,
+                    column: CharIndex(column),
+                })
+                .min
+                .x
+        };
+        assert!(
+            pos(0) > galley.rect.center().x,
+            "reading start at the visual right"
+        );
+        assert!(
+            pos(n) < galley.rect.center().x,
+            "reading end at the visual left"
+        );
+
+        // Clicking the visual center of `ب` (logical column 2) puts the caret
+        // at `ب`'s reading-start (right) edge, between `ر` and `ب`:
+        let ba = &row.glyphs[2];
+        assert_eq!(ba.chr, 'ب');
+        let ba_center = ba.pos.x + ba.advance_width * 0.5 + row.pos.x;
+        let clicked = galley.cursor_from_pos(vec2(ba_center, mid_y));
+        assert_eq!(
+            clicked.index.0, 2,
+            "the click inside the Arabic run must land on the right grapheme boundary"
+        );
+    }
+
+    /// The caret geometry of a mixed row maps every logical column by the
+    /// *local* bidi level of the glyph displaying it (not the row's base
+    /// parity): inside an embedded run the carets walk in that run's own
+    /// reading direction, the reading-exit caret sits at the last-read
+    /// glyph's exit edge — strictly inside the row, not at the opposite
+    /// visual edge — and every column round-trips through its caret x.
+    /// Relational pins only: absolute pixels are font-dependent.
+    #[test]
+    fn mixed_row_caret_geometry_maps_by_local_level() {
+        let mut fonts = test_fonts();
+
+        // RTL base with an embedded LTR run (first-strong inference):
+        let galley = layout_with_direction(&mut fonts, "ملف PDF", TextDirection::Auto);
+        assert_eq!(galley.rows.len(), 1);
+        let placed = &galley.rows[0];
+        let row = &placed.row;
+        assert!(
+            row.glyphs[0].is_rtl(),
+            "first-strong inference must resolve the row right-to-left"
+        );
+        let n = row.char_count_excluding_newline().0;
+        assert_eq!(n, 7, "one cursor column per character");
+        let mid_y = (placed.min_y() + placed.max_y()) * 0.5;
+        let x_of = |column: usize| {
+            galley
+                .pos_from_layout_cursor(&LayoutCursor {
+                    row: 0,
+                    column: CharIndex(column),
+                })
+                .min
+                .x
+        };
+        let ink_min = row
+            .glyphs
+            .iter()
+            .map(|g| g.pos.x)
+            .fold(f32::INFINITY, f32::min)
+            + placed.pos.x;
+        let ink_max = row
+            .glyphs
+            .iter()
+            .map(|g| g.max_x())
+            .fold(f32::NEG_INFINITY, f32::max)
+            + placed.pos.x;
+
+        // The embedded Latin run reads left-to-right: its caret columns walk
+        // with *increasing* x:
+        assert!(
+            x_of(4) < x_of(5) && x_of(5) < x_of(6) && x_of(6) < x_of(7),
+            "the Latin run's carets must walk left-to-right: {} {} {} {}",
+            x_of(4),
+            x_of(5),
+            x_of(6),
+            x_of(7)
+        );
+        // The Arabic run shares the base direction and walks right-to-left;
+        // its reading-start caret (column 0) sits at the ink's right edge:
+        assert!(
+            (x_of(0) - ink_max).abs() < 1.0,
+            "column 0 (the reading start) must sit at the ink right edge: {} vs {ink_max}",
+            x_of(0)
+        );
+        assert!(
+            x_of(0) > x_of(1) && x_of(1) > x_of(2) && x_of(2) > x_of(3),
+            "the Arabic run's carets must walk right-to-left: {} {} {} {}",
+            x_of(0),
+            x_of(1),
+            x_of(2),
+            x_of(3)
+        );
+        // The reading exit (column 7) sits at the last-read Latin glyph's
+        // right edge — strictly inside the row, not at the visual left edge:
+        assert!(
+            x_of(7) > ink_min && x_of(7) < x_of(3),
+            "the reading exit must anchor at the Latin run's right edge: {} \
+             (ink min {ink_min}, the Arabic run's exit {})",
+            x_of(7),
+            x_of(3)
+        );
+        // The run boundary teleports the caret from the Arabic run's exit
+        // edge to the Latin run's entry edge:
+        assert!(
+            x_of(3) > x_of(4),
+            "the boundary must drop the caret from the Arabic run's exit edge \
+             to the Latin run's entry edge: {} vs {}",
+            x_of(3),
+            x_of(4)
+        );
+        // Hit-test round-trips: every run-owned caret x maps back to its
+        // column. The reading exit's caret x is not run-owned on this row: it
+        // coincides with the run-boundary space's shaped box, so its click
+        // resolves by the space's parity rather than back to the exit.
+        for column in 0..n {
+            let back = galley.cursor_from_pos(vec2(x_of(column), mid_y));
+            assert_eq!(
+                back.index.0, column,
+                "clicking the caret x of column {column} must return that column"
+            );
+        }
+        // Direct hit-test pins (row-relative `char_at`): the ink's left edge
+        // lands on the first-read Latin glyph, the ink's right edge on the
+        // Arabic reading start, a click past the run-boundary space's center
+        // snaps to the space's reading-start edge (the space resolves to the
+        // paragraph level, so it reads with the Arabic run), and a click on
+        // the last-read Latin glyph resolves to the reading exit:
+        let char_at = |x: f32| row.char_at(x).0;
+        assert_eq!(
+            char_at(ink_min - placed.pos.x),
+            4,
+            "a click at the ink's left edge must land on the first-read Latin glyph (P)"
+        );
+        assert_eq!(
+            char_at(ink_max - placed.pos.x),
+            0,
+            "a click at the ink's right edge must land on the reading start (م)"
+        );
+        let space = &row.glyphs[3];
+        assert_eq!(space.chr, ' ', "logical slot 3 is the run-boundary space");
+        assert!(
+            space.is_rtl(),
+            "the run-boundary space must take the paragraph level"
+        );
+        let space_center = space.pos.x + space.advance_width * 0.5;
+        assert_eq!(
+            char_at(space_center),
+            3,
+            "a click past the space's center must snap to its reading-start edge"
+        );
+        let last_latin = &row.glyphs[6];
+        assert_eq!(last_latin.chr, 'F');
+        let last_latin_center = last_latin.pos.x + last_latin.advance_width * 0.5;
+        assert_eq!(
+            char_at(last_latin_center),
+            n,
+            "a click inside the last-read Latin glyph must land on the reading exit"
+        );
+
+        // The LTR twin: an embedded RTL run under a left-to-right base reads
+        // right-to-left — its carets DESCEND with the column — and the
+        // reading start (ع's entry) anchors at the ink's right edge while the
+        // reading exit anchors at the run's visual left edge:
+        let galley = layout_with_direction(&mut fonts, "abc عربي", TextDirection::LeftToRight);
+        assert_eq!(galley.rows.len(), 1);
+        let placed = &galley.rows[0];
+        let row = &placed.row;
+        let n = row.char_count_excluding_newline().0;
+        assert_eq!(n, 8);
+        let x_of = |column: usize| {
+            galley
+                .pos_from_layout_cursor(&LayoutCursor {
+                    row: 0,
+                    column: CharIndex(column),
+                })
+                .min
+                .x
+        };
+        let ink_max = row
+            .glyphs
+            .iter()
+            .map(|g| g.max_x())
+            .fold(f32::NEG_INFINITY, f32::max)
+            + placed.pos.x;
+        let run_left = row
+            .glyphs
+            .iter()
+            .filter(|g| g.is_rtl())
+            .map(|g| g.pos.x)
+            .fold(f32::INFINITY, f32::min)
+            + placed.pos.x;
+        assert!(
+            x_of(4) > x_of(5) && x_of(5) > x_of(6) && x_of(6) > x_of(7) && x_of(7) > x_of(8),
+            "the embedded RTL run's carets must walk right-to-left: {} {} {} {} {}",
+            x_of(4),
+            x_of(5),
+            x_of(6),
+            x_of(7),
+            x_of(8)
+        );
+        assert!(
+            (x_of(4) - ink_max).abs() < 1.0,
+            "column 4 (ع's entry) must sit at the ink right edge: {} vs {ink_max}",
+            x_of(4)
+        );
+        assert!(
+            (x_of(8) - run_left).abs() < 1.0,
+            "the reading exit must anchor at the RTL run's visual left edge: {} vs {run_left}",
+            x_of(8)
+        );
+        // The LTR prefix keeps today's ascending geometry:
+        assert!(
+            x_of(0) < x_of(1) && x_of(1) < x_of(2) && x_of(2) < x_of(3),
+            "the LTR prefix's carets must keep their left-to-right walk"
+        );
+
+        // All-even twin under an RTL base (every Latin/digit value in an RTL
+        // field): the content counteracts the base, so the mapping is by the
+        // glyphs' own level — column 0 paints at the ink's left edge and the
+        // reading exit at the ink's right edge:
+        let galley = layout_with_direction(&mut fonts, "Hello", TextDirection::RightToLeft);
+        assert_eq!(galley.rows.len(), 1);
+        let placed = &galley.rows[0];
+        let row = &placed.row;
+        let n = row.char_count_excluding_newline().0;
+        assert_eq!(n, 5);
+        let x_of = |column: usize| {
+            galley
+                .pos_from_layout_cursor(&LayoutCursor {
+                    row: 0,
+                    column: CharIndex(column),
+                })
+                .min
+                .x
+        };
+        let ink_min = row
+            .glyphs
+            .iter()
+            .map(|g| g.pos.x)
+            .fold(f32::INFINITY, f32::min)
+            + placed.pos.x;
+        let ink_max = row
+            .glyphs
+            .iter()
+            .map(|g| g.max_x())
+            .fold(f32::NEG_INFINITY, f32::max)
+            + placed.pos.x;
+        assert!(
+            (x_of(0) - ink_min).abs() < 1.0,
+            "column 0 must sit at the ink's left edge for all-even content in \
+             an RTL base: {} vs {ink_min}",
+            x_of(0)
+        );
+        assert!(
+            (x_of(n) - ink_max).abs() < 1.0,
+            "column {n} must sit at the ink's right edge for all-even content \
+             in an RTL base: {} vs {ink_max}",
+            x_of(n)
+        );
+    }
+
+    /// Arrow-key movement is visual: under a right-to-left base direction,
+    /// moving toward the visual left steps to the logically NEXT character and
+    /// vice versa ([`Galley::cursor_left_visually`] /
+    /// [`Galley::cursor_right_visually`], what the arrow keys call). The
+    /// logical one-character step ([`Galley::cursor_left_one_character`])
+    /// keeps grapheme order for the Mac Cmd bindings.
+    #[test]
+    fn rtl_arrow_keys_move_visually() {
+        let mut fonts = test_fonts();
+        let rtl = layout_with_direction(&mut fonts, "تقرير", TextDirection::RightToLeft);
+        assert_eq!(rtl.rows.len(), 1);
+        assert_eq!(rtl.end().index.0, 5);
+        assert_eq!(
+            rtl.cursor_left_visually(&rtl.begin()).index.0,
+            1,
+            "visual left from the reading start enters the text"
+        );
+        assert_eq!(
+            rtl.cursor_right_visually(&rtl.begin()).index.0,
+            0,
+            "the reading start is the visual right edge"
+        );
+        assert_eq!(
+            rtl.cursor_right_visually(&rtl.end()).index.0,
+            4,
+            "visual right from the reading end steps back into the text"
+        );
+
+        let ltr = layout_with_direction(&mut fonts, "abcde", TextDirection::LeftToRight);
+        assert_eq!(ltr.cursor_left_visually(&ltr.begin()).index.0, 0);
+        assert_eq!(ltr.cursor_right_visually(&ltr.end()).index.0, 5);
+    }
+
     /// A right-to-left shaper puts a mark before its base. The base must still be drawn
     /// and carry the char index, and the mark move with it when the row is reordered.
     #[test]
@@ -4153,6 +5247,7 @@ mod tests {
     }
 
     /// The chars of the advancing glyphs of a row, left to right as drawn.
+    #[cfg(feature = "default_fonts")]
     fn drawn(row: &Row) -> String {
         let mut glyphs: Vec<&Glyph> = row
             .glyphs
@@ -4286,12 +5381,14 @@ mod tests {
                 ));
             }
         }
-        // As laid out by egui 0.37.0, before bidi:
+        // As laid out by egui 0.37.0, before bidi. Since the trailing-whitespace
+        // fix, centered rows keep their natural whitespace-included size (their
+        // ink is unchanged, and so are all glyph positions):
         let expected = [
             "0.00,0.00 233.75x16.00: 0.00 9.00 17.00 21.00 24.00 32.00 36.00 39.00 50.00 58.00 63.00 67.00 75.00 79.00 82.00 91.00 90.00 94.00 108.00 108.00 108.00 111.00 119.00 127.00 134.00 138.00 142.00 149.00 153.00 156.00 170.00 174.00 182.00 189.00 201.00 210.00 218.00 226.00",
-            "-18.00,0.00 35.44x16.00: 0.00 9.00 17.00 21.00 24.00 32.00 36.00",
-            "-35.00,16.00 69.00x16.00: 0.00 11.00 19.00 24.00 28.00 36.00 40.00 43.00 52.00 51.00 55.00 69.00 69.00 69.00",
-            "-29.00,32.00 58.94x16.00: 0.00 8.00 16.00 23.00 27.00 31.00 38.00 42.00 45.00 59.00",
+            "-18.00,0.00 39.19x16.00: 0.00 9.00 17.00 21.00 24.00 32.00 36.00",
+            "-35.00,16.00 72.19x16.00: 0.00 11.00 19.00 24.00 28.00 36.00 40.00 43.00 52.00 51.00 55.00 69.00 69.00 69.00",
+            "-29.00,32.00 62.19x16.00: 0.00 8.00 16.00 23.00 27.00 31.00 38.00 42.00 45.00 59.00",
             "-30.00,48.00 59.69x16.00: 0.00 8.00 15.00 27.00 36.00 44.00 52.00",
             "0.00,0.00 80.00x16.00: 0.00 18.00 35.00 48.00 60.00 77.00 89.00",
             "0.00,16.00 80.00x16.00: 0.00 11.00 19.00 24.00 28.00 36.00 40.00 49.00 58.00 57.00 66.00 80.00 80.00 80.00",
@@ -4770,5 +5867,1970 @@ mod tests {
             galley.rows[0].rect(),
             galley.rows[1].rect()
         );
+    }
+
+    /// Shaped complex scripts emit glyph vectors that are NOT sorted by x:
+    /// zero-advance continuation placeholders at both ends and real glyphs
+    /// with negative x offsets in between. `halign_and_justify_row` used to
+    /// take the ink span from only the first and last glyph, so a right- or
+    /// center-aligned row (what an RTL label gets) computed a too-narrow
+    /// width and left its ink positioned outside the allocated rect —
+    /// button hover fills then failed to cover the ink.
+    ///
+    /// No Arabic font is bundled (fonts are never committed), so this test
+    /// builds a row by hand with the geometry measured from shaping the
+    /// Arabic word "ملف" with a real Arabic font (Noto Sans Arabic, 14 px):
+    /// a placeholder at 0, the ligature glyph drawn 10 px left of the pen,
+    /// the remaining glyphs, and trailing placeholders at the natural width.
+    /// The row keeps its glyphs in stored order (`visual_order` empty, i.e.
+    /// the identity), which is what `halign_and_justify_row` measures over.
+    #[test]
+    fn halign_uses_full_ink_span_of_non_monotonic_glyph_vector() {
+        /// Only self-consistent metrics are needed: `logical_rect` spans
+        /// `[pos.x, pos.x + advance_width]` around the baseline.
+        fn glyph(chr: char, x: f32, advance: f32) -> Glyph {
+            Glyph {
+                chr,
+                pos: pos2(x, 0.0),
+                advance_width: advance,
+                line_height: 16.0,
+                font_ascent: 13.0,
+                font_height: 16.0,
+                font_face_ascent: 13.0,
+                font_face_height: 16.0,
+                font_face_align: FallbackAlign::default(),
+                uv_rect: Default::default(),
+                is_color: false,
+                bidi_level: 0,
+                section_index: 0,
+                first_vertex: 0,
+            }
+        }
+
+        fn placed_row(
+            glyphs: Vec<Glyph>,
+            natural_width: f32,
+            base_direction: TextDirection,
+            leading_advance: f32,
+        ) -> PlacedRow {
+            PlacedRow {
+                pos: pos2(0.0, 0.0),
+                row: Arc::new(Row {
+                    section_index_at_start: 0,
+                    base_direction,
+                    leading_advance,
+                    glyphs,
+                    rtl_paragraph: false,
+                    visual_order: Vec::new(),
+                    size: vec2(natural_width, 16.0),
+                    visuals: RowVisuals::default(),
+                }),
+                ends_with_newline: false,
+            }
+        }
+
+        fn assert_close(got: f32, want: f32) {
+            assert!((got - want).abs() < 1e-3, "got {got:.4}, want {want:.4}");
+        }
+
+        fn ink_span(row: &Row) -> (f32, f32) {
+            (
+                row.glyphs
+                    .iter()
+                    .map(|glyph| glyph.logical_rect().min.x)
+                    .fold(f32::INFINITY, f32::min),
+                row.glyphs
+                    .iter()
+                    .map(|glyph| glyph.logical_rect().max.x)
+                    .fold(f32::NEG_INFINITY, f32::max),
+            )
+        }
+
+        /// The measured row-relative geometry of an Arabic "ملف" label,
+        /// in stored (left-to-right) order: a zero-advance placeholder, the
+        /// ligature glyph drawn left of the pen (negative offset), the
+        /// remaining glyphs, trailing zero-advance continuations.
+        fn shaped_arabic() -> Vec<Glyph> {
+            vec![
+                glyph('ف', 0.0, 0.0),
+                glyph('ف', -10.0, 15.37),
+                glyph('ل', 5.0, 4.2),
+                glyph('م', 9.0, 7.35),
+                glyph('ل', 17.0, 0.0),
+                glyph('ف', 17.0, 0.0),
+            ]
+        }
+
+        let natural_width: f32 = shaped_arabic().iter().map(|g| g.advance_width).sum();
+        // The first glyph starts at 0 and the last ends at 17, but the real
+        // ink spans [-10, 17]: the vector is non-monotonic and the endpoints
+        // do not bracket it. Sanity-check the premise:
+        let (ink_min, ink_max) = ink_span(&Row {
+            section_index_at_start: 0,
+            base_direction: TextDirection::LeftToRight,
+            leading_advance: 0.0,
+            glyphs: shaped_arabic(),
+            rtl_paragraph: false,
+            visual_order: Vec::new(),
+            size: vec2(natural_width, 16.0),
+            visuals: RowVisuals::default(),
+        });
+        assert_close(ink_min, -10.0);
+        assert_close(ink_max, 17.0);
+
+        let point_scale = PointScale::new(1.0);
+
+        // `Align::Max` is what a right-to-left label is laid out with. The
+        // row must be anchored as if 27 wide (the true ink span), not 17:
+        let mut placed = placed_row(
+            shaped_arabic(),
+            natural_width,
+            TextDirection::LeftToRight,
+            0.0,
+        );
+        halign_and_justify_row(
+            point_scale,
+            &mut placed,
+            Align::Max,
+            f32::INFINITY,
+            false,
+            false,
+        );
+        assert_close(placed.pos.x, -27.0);
+        // The ink is repositioned to end at the galley origin (right
+        // alignment) and to start exactly at the row's left edge — before
+        // the fix it extended 10 px to the left of the allocated rect:
+        let (ink_min, ink_max) = ink_span(&placed.row);
+        assert_close(ink_min + placed.pos.x, placed.pos.x);
+        assert_close(ink_max + placed.pos.x, 0.0);
+        // The allocation keeps the natural width (trailing-whitespace
+        // semantics), so inter-widget spacing is unchanged:
+        assert_close(placed.row.size.x, natural_width);
+
+        // Centered rows must center the true ink on the galley origin:
+        let mut placed = placed_row(
+            shaped_arabic(),
+            natural_width,
+            TextDirection::LeftToRight,
+            0.0,
+        );
+        halign_and_justify_row(
+            point_scale,
+            &mut placed,
+            Align::Center,
+            f32::INFINITY,
+            false,
+            false,
+        );
+        assert_close(placed.pos.x, -14.0); // round_to_pixel(-13.5)
+        let (ink_min, ink_max) = ink_span(&placed.row);
+        // Centered on the galley origin, up to pixel rounding:
+        assert!(((ink_min + ink_max) * 0.5 + placed.pos.x).abs() <= 0.5);
+
+        // A monotonic row (endpoints bracket the ink) is laid out exactly as
+        // before the fix:
+        let mut placed = placed_row(
+            vec![glyph('a', 0.0, 17.0)],
+            17.0,
+            TextDirection::LeftToRight,
+            0.0,
+        );
+        halign_and_justify_row(
+            point_scale,
+            &mut placed,
+            Align::Max,
+            f32::INFINITY,
+            false,
+            false,
+        );
+        assert_close(placed.pos.x, -17.0);
+        assert_close(placed.row.size.x, 17.0);
+        assert_close(placed.row.glyphs[0].pos.x, 0.0);
+
+        // Composition with the trailing-whitespace semantics: a trailing
+        // space is trimmed from the ink range (the row stays anchored on the
+        // ink, at -27) while the allocation keeps counting it:
+        let mut with_trailing_space = shaped_arabic();
+        with_trailing_space.push(glyph(' ', 17.0, 3.0));
+        let natural_with_space = natural_width + 3.0;
+
+        let mut placed = placed_row(
+            with_trailing_space.clone(),
+            natural_with_space,
+            TextDirection::LeftToRight,
+            0.0,
+        );
+        halign_and_justify_row(
+            point_scale,
+            &mut placed,
+            Align::Max,
+            f32::INFINITY,
+            false,
+            false,
+        );
+        assert_close(placed.pos.x, -27.0);
+        assert_close(placed.row.size.x, natural_with_space);
+
+        // With `keep_trailing_whitespace` the space is part of the aligned
+        // span, so the row is anchored on [-10, 20] and sized to it:
+        let mut placed = placed_row(
+            with_trailing_space,
+            natural_with_space,
+            TextDirection::LeftToRight,
+            0.0,
+        );
+        halign_and_justify_row(
+            point_scale,
+            &mut placed,
+            Align::Max,
+            f32::INFINITY,
+            false,
+            true,
+        );
+        assert_close(placed.pos.x, -30.0);
+        assert_close(placed.row.size.x, 30.0);
+    }
+
+    // -------------------------------------------------------------------------
+    // Leading-advance threading (the row field, the anchoring inset and the
+    // wrap path), pinned with hand-built rows — no fonts needed:
+    // `halign_and_justify_row` anchors from glyph-relative ink and
+    // `line_break` is called directly on hand-built paragraphs.
+
+    /// A self-consistent synthetic glyph: `logical_rect` spans
+    /// `[pos.x, pos.x + advance_width]` around the baseline.
+    fn advance_glyph(chr: char, x: f32, advance: f32, bidi_level: u8) -> Glyph {
+        Glyph {
+            chr,
+            pos: pos2(x, 0.0),
+            advance_width: advance,
+            line_height: 16.0,
+            font_ascent: 13.0,
+            font_height: 16.0,
+            font_face_ascent: 13.0,
+            font_face_height: 16.0,
+            font_face_align: FallbackAlign::default(),
+            uv_rect: Default::default(),
+            is_color: false,
+            bidi_level,
+            section_index: 0,
+            first_vertex: 0,
+        }
+    }
+
+    fn advance_assert_close(got: f32, want: f32) {
+        assert!((got - want).abs() < 1e-3, "got {got:.4}, want {want:.4}");
+    }
+
+    fn advance_ink_span(row: &Row) -> (f32, f32) {
+        (
+            row.glyphs
+                .iter()
+                .map(|glyph| glyph.logical_rect().min.x)
+                .fold(f32::INFINITY, f32::min),
+            row.glyphs
+                .iter()
+                .map(|glyph| glyph.logical_rect().max.x)
+                .fold(f32::NEG_INFINITY, f32::max),
+        )
+    }
+
+    /// The ink span over the row's non-whitespace glyphs: the span the
+    /// alignment anchors, with the whitespace it ignores excluded.
+    fn aligned_advance_ink_span(row: &Row) -> (f32, f32) {
+        row.glyphs
+            .iter()
+            .filter(|glyph| !glyph.chr.is_whitespace())
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(min, max), glyph| {
+                (
+                    min.min(glyph.logical_rect().min.x),
+                    max.max(glyph.logical_rect().max.x),
+                )
+            })
+    }
+
+    /// A row shaped as production leaves it: the glyph positions start at
+    /// `leading_advance` (the `leading_space` cursor advance precedes
+    /// shaping), the row box spans advance plus ink, and the advance gap is
+    /// the box tail beyond the ink.
+    fn advance_row(base_direction: TextDirection, leading_advance: f32) -> PlacedRow {
+        let glyphs = vec![
+            advance_glyph('ا', leading_advance, 13.0, 1),
+            advance_glyph('ب', leading_advance + 13.0, 14.0, 1),
+        ];
+        PlacedRow {
+            pos: pos2(0.0, 0.0),
+            row: Arc::new(Row {
+                section_index_at_start: 0,
+                base_direction,
+                leading_advance,
+                glyphs,
+                rtl_paragraph: base_direction == TextDirection::RightToLeft,
+                visual_order: Vec::new(),
+                size: vec2(leading_advance + 27.0, 16.0),
+                visuals: RowVisuals::default(),
+            }),
+            ends_with_newline: false,
+        }
+    }
+
+    /// A right-anchored right-to-left row keeps the leading advance inside
+    /// the reading start: the anchored ink is inset by the advance (its
+    /// galley-frame right edge lands at `-advance`), the row box still ends
+    /// at the galley origin, and the allocation keeps the natural width.
+    #[test]
+    fn right_anchored_rtl_row_keeps_the_leading_advance_in_the_ink() {
+        let mut placed = advance_row(TextDirection::RightToLeft, 40.0);
+        halign_and_justify_row(
+            PointScale::new(1.0),
+            &mut placed,
+            Align::RIGHT,
+            f32::INFINITY,
+            false,
+            false,
+        );
+
+        let (ink_min, ink_max) = advance_ink_span(&placed.row);
+        advance_assert_close(ink_max + placed.pos.x, -40.0);
+        advance_assert_close(ink_min + placed.pos.x, -40.0 - 27.0);
+        advance_assert_close(placed.pos.x + placed.row.size.x, 0.0);
+        advance_assert_close(placed.row.size.x, 67.0);
+    }
+
+    /// The no-blast-radius condition: a zero leading advance leaves the
+    /// anchoring exactly as before (ink right at the galley origin).
+    #[test]
+    fn zero_leading_advance_leaves_anchoring_unchanged() {
+        let mut placed = advance_row(TextDirection::RightToLeft, 0.0);
+        halign_and_justify_row(
+            PointScale::new(1.0),
+            &mut placed,
+            Align::RIGHT,
+            f32::INFINITY,
+            false,
+            false,
+        );
+
+        let (ink_min, ink_max) = advance_ink_span(&placed.row);
+        advance_assert_close(ink_max + placed.pos.x, 0.0);
+        advance_assert_close(ink_min + placed.pos.x, -27.0);
+    }
+
+    /// Left-to-right rows ignore the reading-start inset (the advance stays
+    /// absorbed, exactly as before).
+    #[test]
+    fn ltr_row_ignores_the_reading_start_inset() {
+        let mut placed = advance_row(TextDirection::LeftToRight, 40.0);
+        halign_and_justify_row(
+            PointScale::new(1.0),
+            &mut placed,
+            Align::RIGHT,
+            f32::INFINITY,
+            false,
+            false,
+        );
+
+        let (ink_min, ink_max) = advance_ink_span(&placed.row);
+        advance_assert_close(ink_max + placed.pos.x, 0.0);
+        advance_assert_close(ink_min + placed.pos.x, -27.0);
+    }
+
+    /// Center-anchored rows still absorb the advance (which edge would a
+    /// Center inset even use?).
+    #[test]
+    fn center_anchored_rows_still_absorb_the_advance() {
+        let mut placed = advance_row(TextDirection::RightToLeft, 40.0);
+        halign_and_justify_row(
+            PointScale::new(1.0),
+            &mut placed,
+            Align::Center,
+            f32::INFINITY,
+            false,
+            false,
+        );
+
+        let (ink_min, ink_max) = advance_ink_span(&placed.row);
+        assert!(((ink_min + ink_max) * 0.5 + placed.pos.x).abs() <= 0.5);
+    }
+
+    /// A wrapped right-to-left row as production leaves it after
+    /// `reorder_row_visually`: the glyphs in logical order in the vector,
+    /// the break space re-penned at the row's reading-forward (left) end
+    /// with the ink after it, and the natural width covering both. Like
+    /// [`advance_row`], a nonzero `leading_advance` precedes the first
+    /// glyph in the glyph positions (production leaves the `leading_space`
+    /// cursor advance in them).
+    fn whitespace_carry_row(leading_advance: f32) -> PlacedRow {
+        let glyphs = vec![
+            advance_glyph('ا', leading_advance + 3.0, 10.0, 1),
+            advance_glyph('ل', leading_advance + 13.0, 9.0, 1),
+            advance_glyph('ف', leading_advance + 22.0, 8.0, 1),
+            advance_glyph(' ', leading_advance, 3.0, 1),
+        ];
+        PlacedRow {
+            pos: pos2(0.0, 0.0),
+            row: Arc::new(Row {
+                section_index_at_start: 0,
+                base_direction: TextDirection::RightToLeft,
+                leading_advance,
+                glyphs,
+                rtl_paragraph: true,
+                visual_order: Vec::new(),
+                size: vec2(leading_advance + 30.0, 16.0),
+                visuals: RowVisuals::default(),
+            }),
+            ends_with_newline: false,
+        }
+    }
+
+    /// A right-anchored right-to-left row hangs the whitespace the
+    /// alignment ignores reading-forward from the anchored ink: the box's
+    /// right edge stays at the galley origin, the ink stays flush at it,
+    /// and the ignored space sits inside the box on its reading-forward
+    /// (left) side. The glyphs keep their absolute positions — only the
+    /// box bookkeeping moves.
+    #[test]
+    fn right_anchored_rtl_row_hangs_ignored_whitespace_reading_forward() {
+        let point_scale = PointScale::new(1.0);
+        let mut placed = whitespace_carry_row(0.0);
+        halign_and_justify_row(
+            point_scale,
+            &mut placed,
+            Align::Max,
+            f32::INFINITY,
+            false,
+            false,
+        );
+
+        // The box keeps the natural width and its right edge lands exactly
+        // on the galley origin:
+        advance_assert_close(placed.row.size.x, 30.0);
+        advance_assert_close(placed.pos.x, -30.0);
+        advance_assert_close(placed.pos.x + placed.row.size.x, 0.0);
+
+        // The aligned ink (the non-whitespace glyphs) stays flush at the
+        // galley origin:
+        let ink = aligned_advance_ink_span(&placed.row);
+        advance_assert_close(ink.0 + placed.pos.x, -27.0);
+        advance_assert_close(ink.1 + placed.pos.x, 0.0);
+
+        // The ignored space sits inside the box on the reading-forward
+        // (left) side:
+        let space = &placed.row.glyphs[3];
+        advance_assert_close(space.pos.x + placed.pos.x, -30.0);
+        advance_assert_close(space.pos.x + space.advance_width + placed.pos.x, -27.0);
+    }
+
+    /// The same hang composed with a leading advance: the advance rides the
+    /// first glyph's position (production leaves the `leading_space` cursor
+    /// advance in it), the anchored ink is inset by it at the reading start,
+    /// and the ignored whitespace hangs reading-forward of the ink, inside
+    /// the box.
+    #[test]
+    fn right_anchored_rtl_row_composes_leading_advance_with_ignored_whitespace() {
+        let point_scale = PointScale::new(1.0);
+        let mut placed = whitespace_carry_row(40.0);
+        halign_and_justify_row(
+            point_scale,
+            &mut placed,
+            Align::Max,
+            f32::INFINITY,
+            false,
+            false,
+        );
+
+        // The box keeps the natural width (advance + space + ink) and its
+        // right edge lands exactly on the galley origin:
+        advance_assert_close(placed.row.size.x, 70.0);
+        advance_assert_close(placed.pos.x, -70.0);
+        advance_assert_close(placed.pos.x + placed.row.size.x, 0.0);
+
+        // The aligned ink keeps its pinned anchor: its right edge is inset
+        // by the leading advance at the reading start:
+        let ink = aligned_advance_ink_span(&placed.row);
+        advance_assert_close(ink.0 + placed.pos.x, -67.0);
+        advance_assert_close(ink.1 + placed.pos.x, -40.0);
+
+        // The ignored space sits between the box's reading-forward edge and
+        // the ink:
+        let space = &placed.row.glyphs[3];
+        advance_assert_close(space.pos.x + placed.pos.x, -70.0);
+        advance_assert_close(space.pos.x + space.advance_width + placed.pos.x, -67.0);
+    }
+
+    /// Fractional ink advances must not move a row carrying ignored whitespace
+    /// past its reading-start anchor in either rounding direction.
+    #[test]
+    fn right_anchored_rtl_row_box_ignores_fractional_advance_rounding() {
+        for first_advance in [10.4, 10.6] {
+            let leading_advance = 40.0;
+            let natural_width = leading_advance + 3.0 + first_advance + 9.0 + 8.0;
+            let glyphs = vec![
+                advance_glyph('ا', leading_advance + 3.0, first_advance, 1),
+                advance_glyph('ل', leading_advance + 3.0 + first_advance, 9.0, 1),
+                advance_glyph('ف', leading_advance + 3.0 + first_advance + 9.0, 8.0, 1),
+                advance_glyph(' ', leading_advance, 3.0, 1),
+            ];
+            let mut placed = PlacedRow {
+                pos: pos2(0.0, 0.0),
+                row: Arc::new(Row {
+                    section_index_at_start: 0,
+                    base_direction: TextDirection::RightToLeft,
+                    leading_advance,
+                    glyphs,
+                    rtl_paragraph: true,
+                    visual_order: Vec::new(),
+                    size: vec2(natural_width, 16.0),
+                    visuals: RowVisuals::default(),
+                }),
+                ends_with_newline: false,
+            };
+            halign_and_justify_row(
+                PointScale::new(1.0),
+                &mut placed,
+                Align::Max,
+                f32::INFINITY,
+                false,
+                false,
+            );
+
+            advance_assert_close(placed.pos.x + placed.row.size.x, 0.0);
+            let ink = aligned_advance_ink_span(&placed.row);
+            advance_assert_close(ink.1 + placed.pos.x, -leading_advance);
+            let space = &placed.row.glyphs[3];
+            advance_assert_close(
+                space.pos.x + space.advance_width + placed.pos.x,
+                ink.0 + placed.pos.x,
+            );
+        }
+
+        let mut bare = advance_row(TextDirection::RightToLeft, 40.0);
+        halign_and_justify_row(
+            PointScale::new(1.0),
+            &mut bare,
+            Align::Max,
+            f32::INFINITY,
+            false,
+            false,
+        );
+        advance_assert_close(bare.row.size.x, 67.0);
+
+        for (justify, keep_trailing_whitespace, expected_width) in
+            [(true, false, 40.0), (false, true, 30.0)]
+        {
+            let mut placed = whitespace_carry_row(0.0);
+            halign_and_justify_row(
+                PointScale::new(1.0),
+                &mut placed,
+                Align::Max,
+                40.0,
+                justify,
+                keep_trailing_whitespace,
+            );
+            advance_assert_close(placed.row.size.x, expected_width);
+        }
+    }
+
+    /// Justified right-to-left rows size themselves to the anchored target
+    /// width, so their boxes already hug the anchored ink: the ignored
+    /// whitespace must not hang the box (the hang applies only to rows whose
+    /// size keeps the natural width).
+    #[test]
+    fn justified_rtl_row_keeps_its_anchored_box() {
+        let point_scale = PointScale::new(1.0);
+        let mut placed = whitespace_carry_row(0.0);
+        halign_and_justify_row(point_scale, &mut placed, Align::Max, 40.0, true, false);
+
+        // The justified row fills the wrap width and its box right stays at
+        // the galley origin, flush with the justified ink:
+        advance_assert_close(placed.row.size.x, 40.0);
+        advance_assert_close(placed.pos.x + placed.row.size.x, 0.0);
+        let ink = aligned_advance_ink_span(&placed.row);
+        advance_assert_close(ink.1 + placed.pos.x, 0.0);
+    }
+
+    /// A wrapped right-to-left galley keeps every row box and the galley
+    /// rect anchored at the reading start: each row hangs its ignored
+    /// break-space reading-forward instead of extending its box past the
+    /// anchored edge, so the galley rect's right edge stays at the origin.
+    /// The measured width must not grow relative to the left-to-right twin
+    /// of the same job (beyond the per-row pixel rounding wobble on the
+    /// union's two edges). The asserts are property-style: font advances
+    /// are not stable literals, the discriminator is the side and magnitude
+    /// of the anchored edge.
+    #[test]
+    fn wrapped_rtl_galley_right_edge_stays_at_zero() {
+        // Long enough to wrap into several rows at the wrap width, with a
+        // space at every break candidate. Whether the bundled fonts shape
+        // the Arabic glyphs or substitute replacement glyphs, the wrapped
+        // rows still carry real space advances and non-whitespace ink.
+        let text = "النص العربي الطويل يلتف على عدة أسطر داخل النافذة الضيقة عند كل مسافة";
+        let wrap_width = 120.0;
+        let mut job = LayoutJob::simple(
+            text.to_owned(),
+            FontId::proportional(14.0),
+            Color32::WHITE,
+            wrap_width,
+        );
+        job.halign = Align::Max;
+        let mut fonts = test_fonts();
+        let galley = layout(&mut fonts, 1.0, job.clone().into());
+
+        assert!(
+            galley.rows.len() > 1,
+            "the paragraph must wrap into several rows (got {})",
+            galley.rows.len()
+        );
+        for placed in &galley.rows {
+            let box_right = placed.pos.x + placed.row.size.x;
+            assert!(
+                box_right <= 0.5 + emath::GUI_ROUNDING,
+                "every row box must end at the anchored edge, not extend past \
+                 it (box right {box_right}, row pos {:?}, size {:?})",
+                placed.pos,
+                placed.row.size
+            );
+        }
+        assert!(
+            galley.rect.right() >= -1.0 && galley.rect.right() < 1.0,
+            "the galley rect must stay anchored at the reading start (rect {:?})",
+            galley.rect
+        );
+
+        let mut unrounded_job = job.clone();
+        unrounded_job.round_output_to_gui = false;
+        unrounded_job.wrap.max_width = wrap_width + 0.5;
+        let unrounded = layout(&mut fonts, 1.0, unrounded_job.into());
+
+        assert!(
+            unrounded.rect.width() <= wrap_width + 0.5 + 1e-3,
+            "the unclamped row union must fit the effective wrap budget (rect {:?})",
+            unrounded.rect
+        );
+        assert!(
+            galley.rect.width() <= wrap_width,
+            "the breakable galley must not exceed its wrap budget (rect {:?})",
+            galley.rect
+        );
+
+        // The left-to-right twin of the same job measures the same width
+        // (its rows keep their natural widths and anchor their left edges,
+        // so its union is exactly the widest row):
+        job.direction = TextDirection::LeftToRight;
+        let ltr_twin = layout(&mut fonts, 1.0, job.into());
+        assert!(
+            (galley.rect.width() - ltr_twin.rect.width()).abs() <= 1.5,
+            "the rtl galley must not measure wider than its ltr twin beyond \
+             the rounding wobble (rtl {:.3}, ltr {:.3})",
+            galley.rect.width(),
+            ltr_twin.rect.width()
+        );
+    }
+
+    /// The wrap path threads the paragraph's leading advance onto the row
+    /// that carries the paragraph's first glyph — the advance stays in that
+    /// row's glyphs (production leaves it in the first glyph's position) and
+    /// in its `leading_advance` — and every later row is re-based without
+    /// it. The empty-first-row escape consumes the advance: no row keeps it.
+    #[test]
+    fn line_break_threads_the_leading_advance_onto_the_first_glyph_row() {
+        fn advance_paragraph() -> Paragraph {
+            // "ab cd ef" with a 40 px indent in the first glyph's position,
+            // as production leaves it (the `leading_space` cursor advance
+            // precedes shaping).
+            let mut paragraph = Paragraph::from_section_index(0);
+            paragraph.rtl = true;
+            paragraph.leading_advance = 40.0;
+            paragraph.glyphs = vec![
+                advance_glyph('a', 40.0, 10.0, 0),
+                advance_glyph('b', 50.0, 10.0, 0),
+                advance_glyph(' ', 60.0, 5.0, 0),
+                advance_glyph('c', 65.0, 10.0, 0),
+                advance_glyph('d', 75.0, 10.0, 0),
+                advance_glyph(' ', 85.0, 5.0, 0),
+                advance_glyph('e', 90.0, 10.0, 0),
+                advance_glyph('f', 100.0, 10.0, 0),
+            ];
+            paragraph
+        }
+
+        fn fork_job(max_width: f32) -> LayoutJob {
+            LayoutJob {
+                text: "ab cd ef".to_owned(),
+                sections: vec![LayoutSection {
+                    leading_space: 0.0,
+                    byte_range: index::ByteIndex(0)..index::ByteIndex(8),
+                    format: TextFormat::default(),
+                }],
+                wrap: TextWrapping {
+                    max_width,
+                    ..Default::default()
+                },
+                direction: TextDirection::RightToLeft,
+                round_output_to_gui: false,
+                ..Default::default()
+            }
+        }
+
+        // At width 65 the first break lands on the first space (after the
+        // words "ab" fit beside the indent): the first row carries the
+        // advance.
+        let job = fork_job(65.0);
+        let paragraph = advance_paragraph();
+        let breaks = break_opportunities(&paragraph, &job, &SimpleLineBreaker);
+        let mut rows = Vec::new();
+        let mut elided = false;
+        line_break(&paragraph, &breaks, &job, &mut rows, &mut elided);
+        assert!(!elided);
+        assert_eq!(
+            rows.len(),
+            2,
+            "two rows: {:?}",
+            rows.iter().map(|r| r.size.x).collect::<Vec<_>>()
+        );
+        advance_assert_close(rows[0].leading_advance, 40.0);
+        advance_assert_close(rows[0].glyphs[0].pos.x, 40.0);
+        advance_assert_close(rows[1].leading_advance, 0.0);
+        advance_assert_close(rows[1].glyphs[0].pos.x, 0.0);
+
+        // Below one word plus the indent, the empty-first-row escape fires
+        // and consumes the advance: every row lands at 0.0 (mirroring the
+        // LTR arm's pre-existing loss of the indent in this edge case).
+        let narrow = fork_job(45.0);
+        let paragraph = advance_paragraph();
+        let breaks = break_opportunities(&paragraph, &narrow, &SimpleLineBreaker);
+        let mut rows = Vec::new();
+        let mut elided = false;
+        line_break(&paragraph, &breaks, &narrow, &mut rows, &mut elided);
+        assert!(!elided);
+        assert!(rows.len() >= 2);
+        assert!(
+            rows.iter().all(|placed| placed.leading_advance == 0.0),
+            "the escape consumes the advance: {:?}",
+            rows.iter().map(|r| r.leading_advance).collect::<Vec<_>>()
+        );
+    }
+
+    /// End to end with real fonts: a wrapping right-to-left paragraph whose
+    /// first section carries a `leading_space` hangs the advance inside the
+    /// reading-start edge. Every row's box right lands on the common
+    /// reading edge (no overhang), the first row's text is inset by the
+    /// advance from that edge, and later rows hug the edge.
+    #[test]
+    fn wrapped_rtl_leading_space_hangs_at_the_reading_start() {
+        let mut job = LayoutJob::simple(
+            "مرحبا بالعالم من اجل الاختبار الطويل".to_owned(),
+            FontId::proportional(14.0),
+            Color32::WHITE,
+            120.0,
+        );
+        job.halign = Align::Min;
+        job.halign_min_is_start = true;
+        job.sections[0].leading_space = 30.0;
+        let mut fonts_base = Fonts::new(TextOptions::default(), test_font_definitions());
+        let mut fonts = fonts_base.with_pixels_per_point(2.0);
+        let galley = fonts.layout_job(job);
+        assert!(galley.rows.len() >= 2, "the paragraph must wrap");
+
+        let ink_right = |placed: &PlacedRow| -> f32 {
+            placed
+                .glyphs
+                .iter()
+                .map(|glyph| glyph.max_x())
+                .fold(f32::NEG_INFINITY, f32::max)
+                + placed.pos.x
+        };
+        let box_right = |placed: &PlacedRow| placed.pos.x + placed.size.x;
+        let row0_ink_right = ink_right(&galley.rows[0]);
+        for row in galley.rows.iter().skip(1) {
+            // Later rows hug the reading-start edge (up to the row's
+            // trailing wobble), exactly the advance further right than the
+            // first row's text:
+            assert!(
+                (ink_right(row) - row0_ink_right - 30.0).abs() <= 1.0,
+                "later rows hug the edge, the first row is inset by the \
+                 advance: row0 {row0_ink_right:.2}, later {:.2}",
+                ink_right(row)
+            );
+        }
+        // All rows' boxes end on the common reading edge up to each row's
+        // trailing break-space wobble (a wrapped row keeps its break space
+        // in its box; ~3 px for the bundled font's space at 14 px — before
+        // the fix the advance-carrying row's box overhung the edge by the
+        // whole advance):
+        let box_rights: Vec<f32> = galley.rows.iter().map(box_right).collect();
+        let min_box_right = box_rights.iter().copied().fold(f32::INFINITY, f32::min);
+        let max_box_right = box_rights.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            max_box_right - min_box_right <= 4.0,
+            "every row hangs from the same reading edge (up to trailing \
+             wobble): {box_rights:?}"
+        );
+
+        // The zero-advance twin keeps the pre-existing anchoring: every
+        // row's text is flush at the common edge (up to wobble).
+        let mut job = LayoutJob::simple(
+            "مرحبا بالعالم من اجل الاختبار الطويل".to_owned(),
+            FontId::proportional(14.0),
+            Color32::WHITE,
+            120.0,
+        );
+        job.halign = Align::Min;
+        job.halign_min_is_start = true;
+        let mut fonts_base = Fonts::new(TextOptions::default(), test_font_definitions());
+        let mut fonts = fonts_base.with_pixels_per_point(2.0);
+        let galley = fonts.layout_job(job);
+        assert!(galley.rows.len() >= 2, "the paragraph must wrap");
+        let row0_ink_right = ink_right(&galley.rows[0]);
+        for row in galley.rows.iter().skip(1) {
+            assert!(
+                (ink_right(row) - row0_ink_right).abs() <= 1.0,
+                "without an advance every row's text is flush: row0 \
+                 {row0_ink_right:.2}, later {:.2}",
+                ink_right(row)
+            );
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Per-paragraph directional-run pins: glyphs are stored in logical order
+    // with a per-glyph `bidi_level`, wrapping already walks the logical
+    // stream, and the visual placement per UAX #9 L1/L2 is derived from
+    // those levels per row (`reset_whitespace_levels` +
+    // `reorder_row_visually`). The directional runs are exactly recoverable
+    // by grouping the row's glyphs on `bidi_level`, in logical order, for
+    // any wrap width (there is nothing to gate on a finite one).
+
+    /// The directional runs of a row's glyphs, recovered by grouping
+    /// consecutive glyphs on their `bidi_level`: (level, chars).
+    fn runs_by_level(row: &Row) -> Vec<(u8, String)> {
+        let mut runs: Vec<(u8, String)> = Vec::new();
+        for glyph in &row.glyphs {
+            match runs.last_mut() {
+                Some((level, text)) if *level == glyph.bidi_level => {
+                    text.push(glyph.chr);
+                }
+                _ => runs.push((glyph.bidi_level, glyph.chr.to_string())),
+            }
+        }
+        runs
+    }
+
+    /// A mixed-run shape decomposes into its four directional runs in
+    /// logical order: the Arabic word plus the neutral
+    /// space and dot at the odd (right-to-left) base level, the Arabic-Indic
+    /// digits and the latin extension at even levels — one glyph slot per
+    /// char, bytes contiguous. The visual order
+    /// (`pdf.٢٠٢٦ تقرير`) is exactly this run list reversed, which the
+    /// per-row L2 reversal then produces.
+    #[test]
+    fn bidi_runs_are_recoverable_from_logical_glyph_levels() {
+        let mut fonts = tofu_fonts(Arc::new(SimpleLineBreaker));
+        let mut job = LayoutJob::simple(
+            "تقرير ٢٠٢٦.pdf".into(),
+            FontId::proportional(14.0),
+            Color32::WHITE,
+            10_000.0, // big enough to never overflow these shapes
+        );
+        job.direction = TextDirection::RightToLeft;
+        let galley = layout(&mut fonts, 1.0, job.into());
+
+        assert_eq!(galley.rows.len(), 1);
+        let row = &galley.rows[0].row;
+        assert_eq!(
+            row.glyphs.len(),
+            "تقرير ٢٠٢٦.pdf".chars().count(),
+            "one glyph slot per char"
+        );
+        let runs = runs_by_level(row);
+        assert_eq!(
+            runs,
+            vec![
+                (1, "تقرير ".to_owned()),
+                (2, "٢٠٢٦".to_owned()),
+                (1, ".".to_owned()),
+                (2, "pdf".to_owned()),
+            ],
+            "runs: {runs:?}"
+        );
+
+        // A mixed RTL-base segment: the level-2 latin island and the
+        // level-1 Arabic word, in logical order (the visual order is the
+        // reverse: island first, Arabic second):
+        let mut job = LayoutJob::simple(
+            "عربي aaa bbb".into(),
+            FontId::proportional(14.0),
+            Color32::WHITE,
+            10_000.0,
+        );
+        job.direction = TextDirection::RightToLeft;
+        let galley = layout(&mut fonts, 1.0, job.into());
+        let runs = runs_by_level(&galley.rows[0].row);
+        assert_eq!(
+            runs,
+            vec![(1, "عربي ".to_owned()), (2, "aaa bbb".to_owned())],
+            "runs: {runs:?}"
+        );
+
+        // Pure-LTR rows stamp level 0 on every glyph: one even-level run, no
+        // reordering (the row keeps the stored order — `visual_order` empty).
+        for text in ["Hello World 123", "Héllo wörld"] {
+            let mut job = LayoutJob::simple(
+                text.into(),
+                FontId::proportional(14.0),
+                Color32::WHITE,
+                10_000.0,
+            );
+            job.direction = TextDirection::LeftToRight;
+            let galley = layout(&mut fonts, 1.0, job.into());
+            let row = &galley.rows[0].row;
+            assert_eq!(
+                runs_by_level(row),
+                vec![(0, text.to_owned())],
+                "{text:?} must be a single even-level run"
+            );
+            // No reordering happened: the stored (logical) order is the
+            // visual order.
+            assert!(
+                row.visual_order()
+                    .enumerate()
+                    .all(|(position, index)| position == index),
+                "{text:?} must not be reordered"
+            );
+            assert!(row.glyphs.iter().all(|glyph| !glyph.is_rtl()));
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Wrapped rows keep UAX #9 L1/L2 per rendered line: `line_break` walks
+    // the logical glyph vector and the visual placement happens per row
+    // afterwards; these tests pin that end-state contract.
+    //
+    // All wrap-width measurements come from an LTR-pinned twin of the wrapped
+    // job (same text, `round_output_to_gui = false`, infinite width): the
+    // twin is never reordered, so its stored order is its visual order and
+    // every measured quantity is a span or gap, never an absolute x. The
+    // synthetic tofu fonts serve every glyph with the same whole-pixel
+    // advance, so the twin's spans are bit-identical to the widths the wrap
+    // compares. Each intended row's width is its content INCLUDING its
+    // trailing break space; `W` is the maximum of those over all intended
+    // rows (the final row contributes its bare content) plus 0.5 px, with
+    // per-boundary asserts.
+    //
+    // A row's `glyphs` stay in LOGICAL order and the visual
+    // placement lives in `pos.x` + `visual_order`, so all per-row visual
+    // assertions below read the glyphs through `Row::visual_order`.
+
+    /// The visible glyphs of every row of a galley, in visual (left-to-right)
+    /// order, as `(chr, x, advance)`.
+    fn visible_glyphs_per_row(galley: &Galley) -> Vec<Vec<(char, f32, f32)>> {
+        galley
+            .rows
+            .iter()
+            .map(|placed| {
+                placed
+                    .row
+                    .visual_order()
+                    .filter(|&i| placed.row.glyphs[i].advance_width > 0.0)
+                    .map(|i| {
+                        let glyph = &placed.row.glyphs[i];
+                        (glyph.chr, glyph.pos.x, glyph.advance_width)
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// The visible non-whitespace glyphs of every row, in visual order.
+    fn visible_chars_per_row(galley: &Galley) -> Vec<Vec<char>> {
+        galley
+            .rows
+            .iter()
+            .map(|placed| {
+                placed
+                    .row
+                    .visual_order()
+                    .filter(|&i| {
+                        let glyph = &placed.row.glyphs[i];
+                        glyph.advance_width > 0.0 && !glyph.chr.is_whitespace()
+                    })
+                    .map(|i| placed.row.glyphs[i].chr)
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// The stored (logical) text of every row.
+    fn logical_text_per_row(galley: &Galley) -> Vec<String> {
+        galley.rows.iter().map(|placed| placed.row.text()).collect()
+    }
+
+    /// The glyphs of `row` in visual order, filtered to advancing ones.
+    fn visual_glyphs(row: &Row) -> Vec<(char, f32, f32)> {
+        row.visual_order()
+            .filter(|&i| row.glyphs[i].advance_width > 0.0)
+            .map(|i| {
+                let glyph = &row.glyphs[i];
+                (glyph.chr, glyph.pos.x, glyph.advance_width)
+            })
+            .collect()
+    }
+
+    /// One row with no wrapping, from the synthetic tofu fonts at ppp 1.0
+    /// (every advance a whole number of physical pixels).
+    fn layout_unwrapped(text: &str, direction: TextDirection) -> Galley {
+        let mut fonts = tofu_fonts(Arc::new(SimpleLineBreaker));
+        let mut job = LayoutJob::simple(
+            text.to_owned(),
+            FontId::proportional(14.0),
+            Color32::WHITE,
+            f32::INFINITY,
+        );
+        job.direction = direction;
+        job.round_output_to_gui = false;
+        layout(&mut fonts, 1.0, job.into())
+    }
+
+    /// Lay out with a finite wrap width, from the synthetic tofu fonts.
+    fn layout_wrapped(text: &str, direction: TextDirection, wrap_width: f32) -> Galley {
+        let mut fonts = tofu_fonts(Arc::new(SimpleLineBreaker));
+        let mut job = LayoutJob::simple(
+            text.to_owned(),
+            FontId::proportional(14.0),
+            Color32::WHITE,
+            wrap_width,
+        );
+        job.direction = direction;
+        job.round_output_to_gui = false;
+        layout(&mut fonts, 1.0, job.into())
+    }
+
+    /// The whitespace-separated visible runs of a single-row stream: each
+    /// run's span (last `max_x` − first x) and the gaps between consecutive
+    /// runs (next run's first x − previous run's last `max_x`). A run boundary
+    /// is a gap in the stream (the filtered-out space's advance). Measured on
+    /// the visual order (which for the LTR twins used here is the stored one).
+    fn visible_runs(galley: &Galley) -> (Vec<f32>, Vec<f32>) {
+        assert_eq!(galley.rows.len(), 1, "expected a single-row galley");
+        let glyphs: Vec<(char, f32, f32)> = visual_glyphs(&galley.rows[0].row)
+            .into_iter()
+            .filter(|(chr, _, _)| !chr.is_whitespace())
+            .collect();
+        let mut spans = Vec::new();
+        let mut gaps = Vec::new();
+        let mut run_first = 0usize;
+        for i in 1..=glyphs.len() {
+            let boundary =
+                i == glyphs.len() || glyphs[i].1 - (glyphs[i - 1].1 + glyphs[i - 1].2) > 0.5;
+            if boundary {
+                spans.push(glyphs[i - 1].1 + glyphs[i - 1].2 - glyphs[run_first].1);
+                if i < glyphs.len() {
+                    gaps.push(glyphs[i].1 - (glyphs[i - 1].1 + glyphs[i - 1].2));
+                }
+                run_first = i;
+            }
+        }
+        (spans, gaps)
+    }
+
+    /// Assert two glyph vectors agree within half a pixel.
+    #[track_caller]
+    fn assert_glyphs_close(got: &[(char, f32, f32)], expected: &[(char, f32, f32)]) {
+        assert_eq!(
+            got.len(),
+            expected.len(),
+            "glyph counts: {got:?} vs {expected:?}"
+        );
+        for (i, ((gc, gx, ga), (ec, ex, ea))) in core::iter::zip(got, expected).enumerate() {
+            assert_eq!(gc, ec, "glyph {i}: {got:?} vs {expected:?}");
+            assert!(
+                (gx - ex).abs() < 0.5 && (ga - ea).abs() < 0.5,
+                "glyph {i} ({gc}): got x={gx} a={ga}, expected x={ex} a={ea}"
+            );
+        }
+    }
+
+    /// Assert the visual x positions of a row's glyphs are non-decreasing.
+    #[track_caller]
+    fn assert_visual_x_nondecreasing(glyphs: &[(char, f32, f32)]) {
+        for pair in glyphs.windows(2) {
+            assert!(
+                pair[0].1 <= pair[1].1 + 0.5,
+                "visual x must be non-decreasing: {glyphs:?}"
+            );
+        }
+    }
+
+    /// A wrapped pure-RTL paragraph reads top-down: one word per row, in
+    /// logical order. (`line_break` walks the logical stream, so this pins
+    /// the existing behavior; slicing an emitted visual stream from its
+    /// visually-left, logically-last end would produce the rows bottom-up.)
+    #[test]
+    fn wrapped_pure_rtl_reads_top_down() {
+        let text = "أول ثاني ثالث";
+
+        // Wrap width measured from the LTR twin (a single run emits the same
+        // stream in both bases): `أول ␣ ثاني ␣ ثالث`, so run 0 = أول,
+        // run 1 = ثاني, run 2 = ثالث.
+        let twin = layout_unwrapped(text, TextDirection::LeftToRight);
+        let (spans, gaps) = visible_runs(&twin);
+        assert_eq!(
+            spans.len(),
+            3,
+            "the twin's stream is three words: {spans:?}"
+        );
+        assert_eq!(gaps.len(), 2, "spans {spans:?} gaps {gaps:?}");
+        let (w_awwal, w_thani, w_thalith) = (spans[0], spans[1], spans[2]);
+        let s = gaps[0];
+        assert!(
+            (gaps[1] - s).abs() < 1e-3,
+            "the tofu space advance is uniform: {spans:?} {gaps:?}"
+        );
+        let wrap_width = (w_awwal + s).max(w_thani + s).max(w_thalith) + 0.5;
+        // Per-boundary asserts: each intended row's content + break space
+        // fits, the next word overflows, and the final row's bare content
+        // fits:
+        assert!(
+            w_awwal + s <= wrap_width && w_awwal + s + w_thani > wrap_width,
+            "spans {spans:?} gaps {gaps:?} W {wrap_width}"
+        );
+        assert!(
+            w_thani + s <= wrap_width && w_thani + s + w_thalith > wrap_width,
+            "spans {spans:?} gaps {gaps:?} W {wrap_width}"
+        );
+        assert!(w_thalith <= wrap_width, "W {wrap_width}");
+
+        for direction in [TextDirection::RightToLeft, TextDirection::Auto] {
+            let galley = layout_wrapped(text, direction, wrap_width);
+            assert_eq!(galley.rows.len(), 3, "one word per row");
+            let chars = visible_chars_per_row(&galley);
+            assert_eq!(chars[0], ['ل', 'و', 'أ'], "row 0 renders أول: {chars:?}");
+            assert_eq!(
+                chars[1],
+                ['ي', 'ن', 'ا', 'ث'],
+                "row 1 renders ثاني: {chars:?}"
+            );
+            assert_eq!(
+                chars[2],
+                ['ث', 'ل', 'ا', 'ث'],
+                "row 2 renders ثالث: {chars:?}"
+            );
+            // Rows are produced in logical (reading) order:
+            assert_eq!(
+                logical_text_per_row(&galley),
+                ["أول ", "ثاني ", "ثالث"],
+                "rows must follow the reading order (direction {direction:?})"
+            );
+            // Row invariant: visual x non-decreasing, and one glyph slot per
+            // char of the row's logical slice (the word plus its trailing
+            // break space):
+            for glyphs in visible_glyphs_per_row(&galley) {
+                assert_visual_x_nondecreasing(&glyphs);
+            }
+            let counts: Vec<usize> = galley
+                .rows
+                .iter()
+                .map(|placed| placed.row.glyphs.len())
+                .collect();
+            assert_eq!(counts, vec![4, 5, 4], "glyph slots per row: {counts:?}");
+        }
+
+        // Two words then one: W = w(أول) + s + w(ثاني) + s + 0.5.
+        let wrap_width2 = w_awwal + s + w_thani + s + 0.5;
+        assert!(w_awwal + s + w_thani + s <= wrap_width2);
+        assert!(w_awwal + s + w_thani + s + w_thalith > wrap_width2);
+        assert!(w_thalith <= wrap_width2);
+        let galley = layout_wrapped(text, TextDirection::RightToLeft, wrap_width2);
+        assert_eq!(galley.rows.len(), 2);
+        let chars = visible_chars_per_row(&galley);
+        // Row 0 reads `أول ثاني` right-to-left: أول at the visual RIGHT, so
+        // the visual order is ثاني's glyphs first:
+        assert_eq!(chars[0], ['ي', 'ن', 'ا', 'ث', 'ل', 'و', 'أ'], "{chars:?}");
+        assert_eq!(chars[1], ['ث', 'ل', 'ا', 'ث'], "{chars:?}");
+        assert_eq!(logical_text_per_row(&galley), ["أول ثاني ", "ثالث"]);
+        for glyphs in visible_glyphs_per_row(&galley) {
+            assert_visual_x_nondecreasing(&glyphs);
+        }
+    }
+
+    /// Single-row visual-layout pins for the wrapped-reference strings: the
+    /// no-wrap path keeps the mirror layout — uniform
+    /// advance, glyphs at exact multiples of it in visual order. Measured
+    /// against the tofu advance rather than hard-coded.
+    #[test]
+    fn wrapped_oracle_strings_single_row_mirror_the_stream() {
+        let w = visible_glyphs_per_row(&layout_unwrapped("a", TextDirection::Auto))[0][0].2;
+
+        // An RTL-base paragraph (strong Arabic resolves Auto to RTL): the
+        // visual order is the logically-last word first, positions the
+        // exact multiples of the uniform advance:
+        let glyphs =
+            visual_glyphs(&layout_unwrapped("أول ثاني ثالث", TextDirection::Auto).rows[0].row);
+        let expected: Vec<(char, f32, f32)> = [
+            ('ث', 0.0),
+            ('ل', 1.0),
+            ('ا', 2.0),
+            ('ث', 3.0),
+            (' ', 4.0),
+            ('ي', 5.0),
+            ('ن', 6.0),
+            ('ا', 7.0),
+            ('ث', 8.0),
+            (' ', 9.0),
+            ('ل', 10.0),
+            ('و', 11.0),
+            ('أ', 12.0),
+        ]
+        .into_iter()
+        .map(|(chr, k)| (chr, k * w, w))
+        .collect();
+        assert_glyphs_close(&glyphs, &expected);
+
+        // An RTL-pinned mixed paragraph: the latin island renders at the
+        // visual left, the Arabic word reversed at the visual right:
+        let glyphs = visual_glyphs(
+            &layout_unwrapped("عربي aaa bbb", TextDirection::RightToLeft).rows[0].row,
+        );
+        let expected: Vec<(char, f32, f32)> = [
+            ('a', 0.0),
+            ('a', 1.0),
+            ('a', 2.0),
+            (' ', 3.0),
+            ('b', 4.0),
+            ('b', 5.0),
+            ('b', 6.0),
+            (' ', 7.0),
+            ('ي', 8.0),
+            ('ب', 9.0),
+            ('ر', 10.0),
+            ('ع', 11.0),
+        ]
+        .into_iter()
+        .map(|(chr, k)| (chr, k * w, w))
+        .collect();
+        assert_glyphs_close(&glyphs, &expected);
+    }
+
+    // -------------------------------------------------------------------------
+    // Mixed-direction wrapped rows keep UAX #9 L1/L2 per rendered line: the
+    // per-glyph bidi levels already express that per row, and the tests
+    // below pin the per-row UAX #9 L1/L2 contract.
+
+    /// Build a two-section job: `section_texts` are concatenated in order;
+    /// the byte ranges are derived from the concatenation.
+    fn two_section_job(
+        section_texts: &[&str],
+        formats: &[TextFormat; 2],
+        wrap_width: f32,
+        direction: TextDirection,
+    ) -> LayoutJob {
+        let mut text = String::new();
+        let mut sections = Vec::new();
+        for (i, section_text) in section_texts.iter().enumerate() {
+            let start = ByteIndex(text.len());
+            text.push_str(section_text);
+            sections.push(LayoutSection {
+                leading_space: 0.0,
+                byte_range: start..ByteIndex(text.len()),
+                format: formats[i].clone(),
+            });
+        }
+        let mut job = LayoutJob {
+            sections,
+            text,
+            wrap: TextWrapping {
+                max_width: wrap_width,
+                ..Default::default()
+            },
+            break_on_newline: true,
+            ..Default::default()
+        };
+        job.direction = direction;
+        job.round_output_to_gui = false;
+        job
+    }
+
+    /// A wrapped mixed-direction RTL-base paragraph keeps UAX #9 L1/L2
+    /// per rendered line: `عربي aaa bbb` (RTL-pinned) breaks at the logical
+    /// space after `aaa`, and row 1 must render `aaa يبرع` (the latin island
+    /// at the visual left, the Arabic word at its reading position), not a
+    /// geometric slicing of the whole-segment visual stream (`aaa bbb يبرع`),
+    /// which would strand the Arabic word alone on the last row.
+    #[test]
+    fn wrapped_mixed_rtl_base_keeps_uax9_per_row() {
+        let text = "عربي aaa bbb";
+
+        // Wrap width measured from the LTR twin: its visual stream is
+        // `يبرع ␣ aaa ␣ bbb` (the RTL run reverses to the front), so
+        // run 0 = يبرع, run 1 = aaa, run 2 = bbb. The intended row 1 is
+        // `عربي aaa ␣` (content + trailing break space); the `aaa`→`bbb`
+        // gap's space sits at an even level in both bases (level 0 in the
+        // twin, level 2 inside the island in the RTL-pinned job), so its shaping
+        // — and hence its advance — is identical in both.
+        let twin = layout_unwrapped(text, TextDirection::LeftToRight);
+        let (spans, gaps) = visible_runs(&twin);
+        assert_eq!(spans.len(), 3, "spans {spans:?}");
+        assert_eq!(gaps.len(), 2, "spans {spans:?} gaps {gaps:?}");
+        let (w_arabi, w_aaa, w_bbb) = (spans[0], spans[1], spans[2]);
+        let s = gaps[1];
+        let wrap_width = w_arabi + s + w_aaa + s + 0.5;
+        // Per-boundary asserts: row 1's content + break space fits W, the
+        // next word (bbb) overflows, and the final row's bare content fits:
+        assert!(
+            w_arabi + s + w_aaa + s <= wrap_width && w_arabi + s + w_aaa + s + w_bbb > wrap_width,
+            "spans {spans:?} gaps {gaps:?} W {wrap_width}"
+        );
+        assert!(w_bbb <= wrap_width, "W {wrap_width}");
+
+        let galley = layout_wrapped(text, TextDirection::RightToLeft, wrap_width);
+        assert_eq!(
+            galley.rows.len(),
+            2,
+            "rows: {rows:?}",
+            rows = visible_chars_per_row(&galley)
+        );
+        let chars = visible_chars_per_row(&galley);
+        assert_eq!(chars[0], ['a', 'a', 'a', 'ي', 'ب', 'ر', 'ع'], "{chars:?}");
+        assert_eq!(chars[1], ['b', 'b', 'b'], "{chars:?}");
+        for glyphs in visible_glyphs_per_row(&galley) {
+            assert_visual_x_nondecreasing(&glyphs);
+        }
+        // One glyph slot per char of each row's logical slice (row 1 =
+        // `عربي aaa ␣`, row 2 = `bbb`):
+        let counts: Vec<usize> = galley
+            .rows
+            .iter()
+            .map(|placed| placed.row.glyphs.len())
+            .collect();
+        assert_eq!(counts, vec![9, 3], "glyph slots per row: {counts:?}");
+        assert_eq!(logical_text_per_row(&galley), ["عربي aaa ", "bbb"]);
+
+        // Trailing-space pin: the kept break-candidate space survives, is
+        // L1-reset to the base level, and renders at the row's visual
+        // reading end — the visually-LEFT slot of an RTL-base row (its
+        // `pos.x` is at or before every non-space glyph's x). The row's
+        // glyphs are stored logically, so the kept space is the row's LAST
+        // stored glyph. At an under-sized wrap width
+        // this pin fails by design (the kept space becomes the row-internal
+        // one).
+        let row0 = &galley.rows[0].row;
+        assert_eq!(
+            row0.glyphs.last().map(|glyph| glyph.chr),
+            Some(' '),
+            "the break space trails the row's logical vector"
+        );
+        let min_visible_x = row0
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.advance_width > 0.0 && !glyph.chr.is_whitespace())
+            .map(|glyph| glyph.pos.x)
+            .fold(f32::INFINITY, f32::min);
+        let space_x = row0.glyphs.last().map(|glyph| glyph.pos.x).unwrap_or(0.0);
+        assert!(
+            space_x <= min_visible_x,
+            "the L1-reset break space must sit at the visual reading end: {space_x} vs {min_visible_x}"
+        );
+    }
+
+    /// An LTR-base paragraph with embedded RTL wraps correctly: the
+    /// Hebrew word renders visually reordered (`םולש`) inside whichever row
+    /// it lands, the surrounding latin words keep their logical order, and
+    /// every row keeps the visual-x invariant. The wrap width anchors on the
+    /// job's own single-row galley (an LTR-pinned job's first `w` glyph sits
+    /// at the exact logical offset of the intended break).
+    #[test]
+    fn wrapped_ltr_base_embedded_rtl_stays_uax9() {
+        let text = "Hello שלום world wrapped again";
+
+        // Break after `שלום `: the first `w` glyph of the stream (of
+        // "world") starts after 12 chars (`Hello שלום `):
+        let single = layout_unwrapped(text, TextDirection::LeftToRight);
+        let first_world_x = single.rows[0]
+            .row
+            .visual_order()
+            .find(|&i| single.rows[0].row.glyphs[i].chr == 'w')
+            .map(|i| single.rows[0].row.glyphs[i].pos.x)
+            .unwrap_or_default();
+        let wrap_width = first_world_x + 0.5;
+        // The intended row 1 (`Hello שלום `) fits, the next word overflows,
+        // and the final row's content fits (uniform tofu advances):
+        let w = first_world_x / 12.0;
+        assert!(first_world_x <= wrap_width && first_world_x + 5.0 * w > wrap_width);
+
+        let galley = layout_wrapped(text, TextDirection::LeftToRight, wrap_width);
+        assert!(galley.rows.len() >= 2);
+        let chars = visible_chars_per_row(&galley);
+        // Row 0 carries the pinned boundary: `Hello שלום ` — the Hebrew word
+        // visually reordered:
+        assert_eq!(
+            chars[0],
+            ['H', 'e', 'l', 'l', 'o', 'ם', 'ו', 'ל', 'ש'],
+            "{chars:?}"
+        );
+        // The remaining latin words keep their logical order, in whichever
+        // rows they land (the remainder is wider than W, so the partition is
+        // deliberately loose beyond row 0):
+        let words: [&[char]; 3] = [
+            &['w', 'o', 'r', 'l', 'd'],
+            &['w', 'r', 'a', 'p', 'p', 'e', 'd'],
+            &['a', 'g', 'a', 'i', 'n'],
+        ];
+        for word in words {
+            assert!(
+                chars
+                    .iter()
+                    .any(|row| row.windows(word.len()).any(|w| w == word)),
+                "{word:?} must appear in logical order in some row: {chars:?}"
+            );
+        }
+        for glyphs in visible_glyphs_per_row(&galley) {
+            assert_visual_x_nondecreasing(&glyphs);
+        }
+    }
+
+    /// D — a paragraph spanning several `LayoutSection`s wraps jointly: an
+    /// RTL word SPLIT by a color change (two sections, `عر` + `بي`) reorders
+    /// as ONE run on its row (the row's per-glyph levels are computed over
+    /// the whole text, so the section boundary does not split the run), and
+    /// the rows follow the reading order.
+    #[test]
+    fn wrapped_multi_section_rtl_reorders_jointly() {
+        let text = "عربي aaa bbb ccc ddd eee";
+        let formats = [
+            TextFormat::simple(FontId::proportional(14.0), Color32::RED),
+            TextFormat::simple(FontId::proportional(14.0), Color32::WHITE),
+        ];
+        // `عر` in the red section, the rest in the white one — the word
+        // عربي is split across the boundary:
+        assert_eq!(&text[..4], "عر");
+        let w = visible_glyphs_per_row(&layout_unwrapped("a", TextDirection::Auto))[0][0].2;
+        let job = two_section_job(
+            &[&text[..4], &text[4..]],
+            &formats,
+            (4 + 1 + 3 + 1) as f32 * w + 0.5,
+            TextDirection::RightToLeft,
+        );
+        let mut fonts = tofu_fonts(Arc::new(SimpleLineBreaker));
+        let galley = layout(&mut fonts, 1.0, job.into());
+
+        // Rows partition logically (عربي aaa / bbb ccc / ddd eee):
+        assert_eq!(galley.rows.len(), 3);
+        let chars = visible_chars_per_row(&galley);
+        // Row 0 renders `عربي aaa`: the split word as ONE run in visual
+        // order (يبرع at the right, jointly across the section boundary),
+        // the latin island at the visual left:
+        assert_eq!(chars[0], ['a', 'a', 'a', 'ي', 'ب', 'ر', 'ع'], "{chars:?}");
+        assert_eq!(chars[1], ['b', 'b', 'b', 'c', 'c', 'c'], "{chars:?}");
+        assert_eq!(chars[2], ['d', 'd', 'd', 'e', 'e', 'e'], "{chars:?}");
+        assert_eq!(
+            logical_text_per_row(&galley),
+            ["عربي aaa ", "bbb ccc ", "ddd eee"]
+        );
+        // Both sections' glyphs appear (no drops):
+        assert_eq!(
+            galley
+                .rows
+                .iter()
+                .map(|placed| placed.row.glyphs.len())
+                .sum::<usize>(),
+            text.chars().count(),
+            "one glyph slot per char across both sections"
+        );
+        for glyphs in visible_glyphs_per_row(&galley) {
+            assert_visual_x_nondecreasing(&glyphs);
+        }
+    }
+
+    /// D (unrecorded edge) — a paragraph mixing a pure-LTR lead with a
+    /// wrapped RTL section keeps every glyph and reads in order. LTR-first
+    /// order (the LTR stretch is the paragraph's head).
+    #[test]
+    fn wrapped_unrecorded_edge_ltr_first_keeps_all_glyphs() {
+        let formats = [
+            TextFormat::simple(FontId::proportional(14.0), Color32::RED),
+            TextFormat::simple(FontId::proportional(14.0), Color32::WHITE),
+        ];
+        let w = visible_glyphs_per_row(&layout_unwrapped("a", TextDirection::Auto))[0][0].2;
+        let job = two_section_job(
+            &["abcd", " عربي aaa bbb"],
+            &formats,
+            (4 + 1 + 4 + 1) as f32 * w + 0.5,
+            TextDirection::RightToLeft,
+        );
+        let mut fonts = tofu_fonts(Arc::new(SimpleLineBreaker));
+        let galley = layout(&mut fonts, 1.0, job.into());
+
+        assert_eq!(galley.rows.len(), 2);
+        let chars = visible_chars_per_row(&galley);
+        // Row 0 reads `abcd عربي `: visually ␣ يبرع ␣ abcd — the LTR word
+        // kept, the Arabic word reordered as one run:
+        assert_eq!(
+            chars[0],
+            ['ي', 'ب', 'ر', 'ع', 'a', 'b', 'c', 'd'],
+            "{chars:?}"
+        );
+        assert_eq!(chars[1], ['a', 'a', 'a', 'b', 'b', 'b'], "{chars:?}");
+        assert_eq!(logical_text_per_row(&galley), ["abcd عربي ", "aaa bbb"]);
+        // No dropped glyphs:
+        assert_eq!(
+            galley
+                .rows
+                .iter()
+                .map(|placed| placed.row.glyphs.len())
+                .sum::<usize>(),
+            "abcd عربي aaa bbb".chars().count(),
+        );
+        for glyphs in visible_glyphs_per_row(&galley) {
+            assert_visual_x_nondecreasing(&glyphs);
+        }
+    }
+
+    /// D (unrecorded edge, mirrored) — the pure-LTR stretch is the
+    /// paragraph's TAIL: the trailing section's glyphs still land in their
+    /// logical row, in logical order.
+    #[test]
+    fn wrapped_unrecorded_edge_ltr_last_keeps_all_glyphs() {
+        let formats = [
+            TextFormat::simple(FontId::proportional(14.0), Color32::RED),
+            TextFormat::simple(FontId::proportional(14.0), Color32::WHITE),
+        ];
+        let w = visible_glyphs_per_row(&layout_unwrapped("a", TextDirection::Auto))[0][0].2;
+        let job = two_section_job(
+            &["عربي aaa ", "abcd"],
+            &formats,
+            (4 + 1 + 3 + 1) as f32 * w + 0.5,
+            TextDirection::RightToLeft,
+        );
+        let mut fonts = tofu_fonts(Arc::new(SimpleLineBreaker));
+        let galley = layout(&mut fonts, 1.0, job.into());
+
+        assert_eq!(galley.rows.len(), 2);
+        let chars = visible_chars_per_row(&galley);
+        // Row 0 reads `عربي aaa ` (visually ␣ aaa ␣ يبرع), row 1 the
+        // unrecorded tail in logical order:
+        assert_eq!(chars[0], ['a', 'a', 'a', 'ي', 'ب', 'ر', 'ع'], "{chars:?}");
+        assert_eq!(chars[1], ['a', 'b', 'c', 'd'], "{chars:?}");
+        assert_eq!(logical_text_per_row(&galley), ["عربي aaa ", "abcd"]);
+        assert_eq!(
+            galley
+                .rows
+                .iter()
+                .map(|placed| placed.row.glyphs.len())
+                .sum::<usize>(),
+            "عربي aaa abcd".chars().count(),
+        );
+        for glyphs in visible_glyphs_per_row(&galley) {
+            assert_visual_x_nondecreasing(&glyphs);
+        }
+    }
+
+    /// Wrapped RTL elision is directed at the READING end: the `…` replaces
+    /// the logically-last row's trailing glyphs — including the L1-reset
+    /// break space, which must be dropped with them instead of stranding the
+    /// `…` behind it. The LTR mirror keeps the historic trailing `…`. (On the
+    /// fork the row's glyphs are stored in logical order, so the `…` is the
+    /// last STORED glyph in both directions and the direction shows in its
+    /// visual x: at the reading end — visual left — on a right-to-left row,
+    /// trailing on the visual right of a left-to-right one.)
+    #[test]
+    fn wrapped_rtl_elision_lands_at_the_reading_end() {
+        let text = "أول ثاني ثالث";
+        // The one-word-per-row width from test A:
+        let twin = layout_unwrapped(text, TextDirection::LeftToRight);
+        let (spans, gaps) = visible_runs(&twin);
+        let wrap_width = (spans[0] + gaps[0]).max(spans[1] + gaps[0]).max(spans[2]) + 0.5;
+
+        for direction in [
+            TextDirection::RightToLeft,
+            TextDirection::Auto,
+            TextDirection::LeftToRight,
+        ] {
+            let mut fonts = tofu_fonts(Arc::new(SimpleLineBreaker));
+            let mut job = LayoutJob::simple(
+                text.to_owned(),
+                FontId::proportional(14.0),
+                Color32::WHITE,
+                wrap_width,
+            );
+            job.direction = direction;
+            job.wrap.max_rows = 2;
+            job.wrap.overflow_character = Some('…');
+            let galley = layout(&mut fonts, 1.0, job.into());
+            assert!(
+                galley.elided,
+                "max_rows 2 must elide the third row (direction {direction:?})"
+            );
+            assert_eq!(galley.rows.len(), 2);
+            let last = &galley.rows[1].row;
+            let is_rtl = direction != TextDirection::LeftToRight;
+
+            // The `…` is appended after the row's surviving glyphs, so it is
+            // the last STORED glyph either way:
+            let ellipsis = last.glyphs.last().map(|glyph| glyph.chr);
+            assert_eq!(
+                ellipsis,
+                Some('…'),
+                "glyphs: {:?} (direction {direction:?})",
+                last.glyphs.iter().map(|g| g.chr).collect::<Vec<_>>()
+            );
+
+            // Visual direction, measured against the kept text (whitespace
+            // excluded): the `…` sits at the reading end of a right-to-left
+            // row (visual left, at or before every kept glyph's x), and
+            // trails the visual right edge of the LTR mirror.
+            let ellipsis_x = last.glyphs.last().map(|glyph| glyph.pos.x).unwrap_or(0.0);
+            let kept_x: Vec<f32> = last.glyphs[..last.glyphs.len() - 1]
+                .iter()
+                .filter(|glyph| glyph.advance_width > 0.0 && !glyph.chr.is_whitespace())
+                .map(|glyph| glyph.pos.x)
+                .collect();
+            if is_rtl {
+                assert!(
+                    kept_x.iter().all(|x| ellipsis_x <= *x),
+                    "the ellipsis must sit at the row's reading end (direction {direction:?}): \
+                     {ellipsis_x} vs kept {kept_x:?}"
+                );
+            } else {
+                assert!(
+                    kept_x.iter().all(|x| *x <= ellipsis_x),
+                    "the LTR mirror keeps the trailing ellipsis (direction {direction:?}): \
+                     {ellipsis_x} vs kept {kept_x:?}"
+                );
+            }
+        }
+
+        // Known tofu residual (documented, not fixed here): the tofu
+        // fonts serve the overflow character with a ZERO advance, so it fits
+        // without popping and the L1-reset break space survives at the row's
+        // visual reading end. With a real font the space is popped with the
+        // replaced glyphs — pinned below.
+        {
+            let mut fonts = tofu_fonts(Arc::new(SimpleLineBreaker));
+            let mut job = LayoutJob::simple(
+                text.to_owned(),
+                FontId::proportional(14.0),
+                Color32::WHITE,
+                wrap_width,
+            );
+            job.direction = TextDirection::RightToLeft;
+            job.wrap.max_rows = 2;
+            job.wrap.overflow_character = Some('…');
+            let galley = layout(&mut fonts, 1.0, job.into());
+            let last = &galley.rows[1].row;
+            let ellipsis_advance = last
+                .glyphs
+                .last()
+                .map(|glyph| glyph.advance_width)
+                .unwrap_or(0.0);
+            if ellipsis_advance <= 0.0 {
+                assert_eq!(
+                    last.glyphs.last().map(|glyph| glyph.chr),
+                    Some('…'),
+                    "the zero-advance tofu ellipsis still trails the row"
+                );
+            }
+        }
+    }
+
+    /// The wrapped elision contract with a real font: the `…` has a positive
+    /// advance, so popping reaches the L1-reset break space and drops it with
+    /// the replaced glyphs; the `…` lands at the row's visual reading end
+    /// (visual left) on a right-to-left row and trails the LTR mirror.
+    #[test]
+    fn wrapped_rtl_elision_drops_the_break_space_with_a_real_font() {
+        let text = "אבגד הוזח טיכל";
+
+        // Wrap width measured from the LTR-pinned twin of the same text (its
+        // stored order is its visual order): rows read `אבגד הוזח ` and
+        // `טיכל`.
+        let twin = {
+            let mut fonts = test_fonts();
+            let mut job = LayoutJob::simple(
+                text.to_owned(),
+                FontId::proportional(14.0),
+                Color32::WHITE,
+                f32::INFINITY,
+            );
+            job.direction = TextDirection::LeftToRight;
+            job.round_output_to_gui = false;
+            layout(&mut fonts, 1.0, job.into())
+        };
+        assert_eq!(twin.rows.len(), 1);
+        let glyphs: Vec<(char, f32, f32)> = twin.rows[0]
+            .row
+            .glyphs
+            .iter()
+            .filter(|g| g.advance_width > 0.0)
+            .map(|g| (g.chr, g.pos.x, g.advance_width))
+            .collect();
+        // The intended first row is `אבגד הוזח ` (content + break space);
+        // its width is the x of the first glyph of `טיכל`:
+        let first_row_end = glyphs
+            .iter()
+            .find(|(chr, _, _)| *chr == 'ט')
+            .map(|(_, x, _)| *x)
+            .unwrap_or_default();
+        let last_word_width = glyphs
+            .iter()
+            .filter(|(chr, _, _)| "טיכל".contains(*chr))
+            .map(|(_, x, a)| x + a)
+            .fold(0.0_f32, f32::max)
+            - glyphs
+                .iter()
+                .find(|(chr, _, _)| *chr == 'ט')
+                .map(|(_, x, _)| *x)
+                .unwrap_or_default();
+        let wrap_width = first_row_end.max(last_word_width) + 0.5;
+
+        for direction in [TextDirection::RightToLeft, TextDirection::LeftToRight] {
+            let mut fonts = test_fonts();
+            let mut job = LayoutJob::simple(
+                text.to_owned(),
+                FontId::proportional(14.0),
+                Color32::WHITE,
+                wrap_width,
+            );
+            job.direction = direction;
+            job.wrap.max_rows = 2;
+            job.wrap.overflow_character = Some('…');
+            let galley = layout(&mut fonts, 1.0, job.into());
+            assert!(
+                galley.elided,
+                "max_rows 2 must elide (direction {direction:?})"
+            );
+            assert_eq!(galley.rows.len(), 2);
+            let last = &galley.rows[1].row;
+
+            // The `…` is the last stored glyph and no whitespace survives
+            // next to it: the L1-reset break space was dropped with the
+            // replaced glyphs:
+            assert_eq!(
+                last.glyphs.last().map(|glyph| glyph.chr),
+                Some('…'),
+                "glyphs: {:?} (direction {direction:?})",
+                last.glyphs.iter().map(|g| g.chr).collect::<Vec<_>>()
+            );
+            assert!(
+                !last.glyphs.iter().any(|glyph| glyph.chr.is_whitespace()),
+                "no break space may survive next to the ellipsis (direction {direction:?}): {:?}",
+                last.glyphs.iter().map(|g| g.chr).collect::<Vec<_>>()
+            );
+
+            // Visual direction against the kept text:
+            let ellipsis_x = last.glyphs.last().map(|glyph| glyph.pos.x).unwrap_or(0.0);
+            let kept_x: Vec<f32> = last.glyphs[..last.glyphs.len() - 1]
+                .iter()
+                .filter(|glyph| glyph.advance_width > 0.0 && !glyph.chr.is_whitespace())
+                .map(|glyph| glyph.pos.x)
+                .collect();
+            if direction == TextDirection::RightToLeft {
+                assert!(
+                    kept_x.iter().all(|x| ellipsis_x <= *x),
+                    "the ellipsis must sit at the row's reading end: {ellipsis_x} vs {kept_x:?}"
+                );
+            } else {
+                assert!(
+                    kept_x.iter().all(|x| *x <= ellipsis_x),
+                    "the LTR mirror keeps the trailing ellipsis: {ellipsis_x} vs {kept_x:?}"
+                );
+            }
+        }
+    }
+
+    /// Hostile wrapped shapes must not panic and must keep one glyph slot per
+    /// char whenever the wrap produced all the rows (no truncation): the
+    /// digit-mixed wrapped shape and an isolate-soup wrapped at width 100,
+    /// plus two-section wrapped RTL jobs in both section orders through the
+    /// same wrap + elision gauntlet; the cursor paths are smoked on every
+    /// galley.
+    #[test]
+    fn bidi_wrapped_hostile_input_does_not_panic() {
+        // Stepping the caret one visual position (the fork's arrow keys,
+        // Galley::cursor_left/right_visually) must stay panic-free and
+        // clamped to the galley's end on hostile input: walk both arrow
+        // directions from both reading edges, max_steps + 2 presses. Row and
+        // galley edges clamp; none may ever exceed the galley's end.
+        fn assert_arrow_walk_stays_clamped(galley: &Galley, text: &str, direction: TextDirection) {
+            let end = galley.end().index;
+            let max_steps = text.chars().count().saturating_add(2).min(64);
+            let mut left_from_begin = galley.begin();
+            let mut left_from_end = galley.end();
+            let mut right_from_begin = galley.begin();
+            let mut right_from_end = galley.end();
+            for _ in 0..max_steps {
+                left_from_begin = galley.cursor_left_visually(&left_from_begin);
+                left_from_end = galley.cursor_left_visually(&left_from_end);
+                right_from_begin = galley.cursor_right_visually(&right_from_begin);
+                right_from_end = galley.cursor_right_visually(&right_from_end);
+                assert!(
+                    left_from_begin.index <= end
+                        && left_from_end.index <= end
+                        && right_from_begin.index <= end
+                        && right_from_end.index <= end,
+                    "arrow stepping must stay within the galley for {text:?} (direction {direction:?})"
+                );
+            }
+        }
+
+        // The caret geometry paths (`char_at` / `x_offset`) must stay
+        // panic-free and in-range on hostile input: probe `char_at` over a
+        // spread of x values (on-ink, row edges, far off-ink, and every glyph
+        // center) and `x_offset` over every column, on every row of the
+        // elided and untruncated layouts. NaN/inf clicks make every scan
+        // comparison false, so plain `f32` comparisons need no guard.
+        fn assert_caret_geometry_stays_in_range(
+            galley: &Galley,
+            text: &str,
+            direction: TextDirection,
+        ) {
+            for placed in &galley.rows {
+                let row = &placed.row;
+                let n = row.char_count_excluding_newline().0;
+                let mut probes = vec![0.0, row.size.x, -1000.0, 1000.0];
+                probes.extend(row.glyphs.iter().map(|g| g.pos.x + g.advance_width * 0.5));
+                for probe_x in probes {
+                    let column = row.char_at(probe_x).0;
+                    assert!(
+                        column <= n,
+                        "char_at must stay in range for {text:?} \
+                         (direction {direction:?}): {column} > {n}"
+                    );
+                }
+                for column in 0..=n {
+                    let x = row.x_offset(CharIndex(column));
+                    assert!(
+                        x.is_finite(),
+                        "x_offset must stay finite for {text:?} (direction {direction:?})"
+                    );
+                }
+            }
+        }
+
+        let mut fonts = tofu_fonts(Arc::new(SimpleLineBreaker));
+        let directions = [
+            TextDirection::Auto,
+            TextDirection::LeftToRight,
+            TextDirection::RightToLeft,
+        ];
+        let wrapped_shapes = [
+            "أول ٢٠٢٦ ثالث".to_owned(),
+            "\u{2066}أول\u{2069} \u{2067}ثاني\u{2069} ثالث \u{200F}\u{200E}".repeat(6),
+        ];
+
+        for text in &wrapped_shapes {
+            for direction in directions {
+                // Wrapped + elided at width 100 (exercises line_break and the
+                // elision path):
+                let mut job = LayoutJob::simple(
+                    text.clone(),
+                    FontId::proportional(14.0),
+                    Color32::WHITE,
+                    100.0,
+                );
+                job.direction = direction;
+                job.wrap.max_rows = 5;
+                job.wrap.overflow_character = Some('…');
+                let galley = layout(&mut fonts, 1.0, job.into());
+
+                // One glyph slot per char, preserved when the wrap produced
+                // all the rows (no truncation). The bidi format characters
+                // (LRI/PDI/RLM/LRE) are kept as zero-width glyphs on this
+                // fork, so they count; there are no Cc controls in these
+                // shapes:
+                if !galley.elided {
+                    let total: usize = galley
+                        .rows
+                        .iter()
+                        .map(|placed| placed.row.glyphs.len())
+                        .sum();
+                    assert_eq!(
+                        total,
+                        text.chars().count(),
+                        "glyph slots must equal the char count for {text:?} (direction {direction:?})"
+                    );
+                }
+
+                // Smoke the cursor paths on the elided galley:
+                let _ = galley.end();
+                let _ = galley.cursor_from_pos(vec2(0.0, 0.0));
+                let _ = galley.pos_from_cursor(galley.end());
+                assert_arrow_walk_stays_clamped(&galley, text, direction);
+                assert_caret_geometry_stays_in_range(&galley, text, direction);
+
+                // The same shape wide enough to never elide: the totals
+                // assert above then bites on the untruncated rows.
+                let mut job = LayoutJob::simple(
+                    text.clone(),
+                    FontId::proportional(14.0),
+                    Color32::WHITE,
+                    10_000.0,
+                );
+                job.direction = direction;
+                job.wrap.max_rows = 5;
+                let galley = layout(&mut fonts, 1.0, job.into());
+                assert!(!galley.elided, "10_000 px must not elide {text:?}");
+                let total: usize = galley
+                    .rows
+                    .iter()
+                    .map(|placed| placed.row.glyphs.len())
+                    .sum();
+                assert_eq!(
+                    total,
+                    text.chars().count(),
+                    "glyph slots must equal the char count for {text:?} (direction {direction:?})"
+                );
+                let _ = galley.cursor_from_pos(vec2(0.0, 0.0));
+                let _ = galley.pos_from_cursor(galley.end());
+                assert_arrow_walk_stays_clamped(&galley, text, direction);
+                assert_caret_geometry_stays_in_range(&galley, text, direction);
+            }
+        }
+
+        // Two-section wrapped RTL jobs (both section orders, mixed with a
+        // pure-LTR section) through the same wrap + elision gauntlet:
+        let formats = [
+            TextFormat::simple(FontId::proportional(14.0), Color32::RED),
+            TextFormat::simple(FontId::proportional(14.0), Color32::WHITE),
+        ];
+        for section_texts in [
+            ["تقرير ٢٠٢٦", " aaa bbb الأول ثاني"],
+            ["abcd", " عربي aaa \u{2066}שלום\u{2069} pdf"],
+        ] {
+            let mut text = String::new();
+            let mut sections = Vec::new();
+            for (i, section_text) in section_texts.iter().enumerate() {
+                let start = ByteIndex(text.len());
+                text.push_str(section_text);
+                sections.push(LayoutSection {
+                    leading_space: 0.0,
+                    byte_range: start..ByteIndex(text.len()),
+                    format: formats[i].clone(),
+                });
+            }
+            for direction in directions {
+                let mut job = LayoutJob {
+                    sections: sections.clone(),
+                    text: text.clone(),
+                    wrap: TextWrapping {
+                        max_width: 100.0,
+                        max_rows: 5,
+                        break_anywhere: true,
+                        ..Default::default()
+                    },
+                    break_on_newline: true,
+                    ..Default::default()
+                };
+                job.direction = direction;
+                job.round_output_to_gui = false;
+                job.wrap.overflow_character = Some('…');
+                let mut fonts = tofu_fonts(Arc::new(SimpleLineBreaker));
+                let galley = layout(&mut fonts, 1.0, job.into());
+                let _ = galley.end();
+                let _ = galley.cursor_from_pos(vec2(0.0, 0.0));
+                let _ = galley.pos_from_cursor(galley.end());
+                assert_arrow_walk_stays_clamped(&galley, &text, direction);
+                assert_caret_geometry_stays_in_range(&galley, &text, direction);
+            }
+        }
     }
 }

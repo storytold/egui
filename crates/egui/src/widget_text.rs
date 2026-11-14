@@ -774,22 +774,34 @@ impl WidgetText {
         self.map_rich_text(|text| text.background_color(background_color))
     }
 
+    /// Layout the text as a [`LayoutJob`], resolving fonts like
+    /// [`Self::into_galley_impl`] does: the style overrides win over
+    /// `fallback_font`, and the row height accounts for
+    /// [`Style::spacing`][crate::style::Spacing]'s `extra_text_line_spacing`.
     pub fn into_layout_job(
         self,
+        ctx: &crate::Context,
         style: &Style,
         fallback_font: FontSelection,
         default_valign: Align,
     ) -> Arc<LayoutJob> {
         match self {
-            Self::Text(text) => Arc::new(LayoutJob::simple_format(
-                text,
-                TextFormat {
-                    font_id: FontSelection::Default.resolve(style),
-                    color: crate::Color32::PLACEHOLDER,
-                    valign: default_valign,
-                    ..Default::default()
-                },
-            )),
+            Self::Text(text) => {
+                // We want the style overrides to take precedence over the fallback font
+                let font_id = FontSelection::default().resolve_with_fallback(style, fallback_font);
+                let line_height = ctx
+                    .fonts_mut(|f| f.row_height(&font_id) + style.spacing.extra_text_line_spacing);
+                Arc::new(LayoutJob::simple_format(
+                    text,
+                    TextFormat {
+                        font_id,
+                        color: crate::Color32::PLACEHOLDER,
+                        valign: default_valign,
+                        line_height: Some(line_height),
+                        ..Default::default()
+                    },
+                ))
+            }
             Self::RichText(text) => Arc::new(Arc::unwrap_or_clone(text).into_layout_job(
                 style,
                 fallback_font,
@@ -828,8 +840,13 @@ impl WidgetText {
 
     /// Layout with the given wrapping.
     ///
-    /// Text without a [`LayoutJob::language`] gets the language of the user interface
-    /// ([`crate::Context::language`]).
+    /// `language` is the BCP 47 language tag the text should be laid out in, if known;
+    /// it is stamped onto the job unless the job carries an explicit one.
+    ///
+    /// The reading direction is stamped from [`Style::right_to_left`] the same way:
+    /// in a right-to-left interface the job gets a right-to-left base direction even
+    /// when the text starts with a left-to-right character, unless the job carries an
+    /// explicit one.
     pub fn into_galley_impl(
         self,
         ctx: &crate::Context,
@@ -837,8 +854,9 @@ impl WidgetText {
         text_wrapping: TextWrapping,
         fallback_font: FontSelection,
         default_valign: Align,
+        language: Option<String>,
     ) -> Arc<Galley> {
-        let language = ctx.language();
+        let language = language.or_else(|| ctx.language());
         self.layout_with_language(
             ctx,
             style,
@@ -859,6 +877,10 @@ impl WidgetText {
         default_valign: Align,
         language: Option<String>,
     ) -> Arc<Galley> {
+        // Stamp the reading direction from the style, mirroring the language stamp
+        // below: an explicit per-job direction still wins.
+        let direction = stamped_direction(style, self.text(), DirectionStamp::Label);
+
         match self {
             Self::Text(text) => {
                 let color = style
@@ -883,6 +905,11 @@ impl WidgetText {
                 );
                 layout_job.wrap = text_wrapping;
                 layout_job.language = layout_job.language.or(language);
+                // An explicit per-job direction still wins over the ambient
+                // stamp (`Auto` is the "not specified" marker).
+                if layout_job.direction == epaint::text::TextDirection::Auto {
+                    layout_job.direction = direction.unwrap_or(layout_job.direction);
+                }
                 ctx.fonts_mut(|f| f.layout_job(layout_job))
             }
             Self::RichText(text) => {
@@ -893,15 +920,66 @@ impl WidgetText {
                 );
                 layout_job.wrap = text_wrapping;
                 layout_job.language = layout_job.language.or(language);
+                // An explicit per-job direction still wins over the ambient
+                // stamp (`Auto` is the "not specified" marker).
+                if layout_job.direction == epaint::text::TextDirection::Auto {
+                    layout_job.direction = direction.unwrap_or(layout_job.direction);
+                }
                 ctx.fonts_mut(|f| f.layout_job(layout_job))
             }
             Self::LayoutJob(job) => {
                 let mut job = Arc::unwrap_or_clone(job);
                 job.wrap = text_wrapping;
                 job.language = job.language.or(language);
+                // An explicit per-job direction still wins over the ambient
+                // stamp (`Auto` is the "not specified" marker).
+                if job.direction == epaint::text::TextDirection::Auto {
+                    job.direction = direction.unwrap_or(job.direction);
+                }
                 ctx.fonts_mut(|f| f.layout_job(job))
             }
             Self::Galley(galley) => galley,
+        }
+    }
+}
+
+/// Which text a widget stamps with the interface reading direction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DirectionStamp {
+    /// Fields follow the HTML `dir=rtl` input convention: a right-to-left
+    /// interface stamps every field paragraph unconditionally, so a
+    /// Latin-first or digits-only value still reads (and orders mixed runs)
+    /// as a right-to-left row.
+    Field,
+    /// Labels defer to first-strong inference: direction-agnostic runs (the
+    /// menu check mark, icons) keep their anchoring unchanged.
+    Label,
+}
+
+/// The base direction to stamp a job with for the given kind of text, or
+/// `None` to leave the job's direction alone (no stamping under a
+/// left-to-right interface, or nothing first-strong has an opinion about).
+///
+/// An explicit per-job direction still wins everywhere — call sites merge
+/// with `.or()`.
+pub(crate) fn stamped_direction(
+    style: &Style,
+    text: &str,
+    stamp: DirectionStamp,
+) -> Option<epaint::text::TextDirection> {
+    match stamp {
+        DirectionStamp::Field => style
+            .right_to_left
+            .then_some(epaint::text::TextDirection::RightToLeft),
+        DirectionStamp::Label => {
+            // Right-to-left, but only for text first-strong has an opinion
+            // about. For direction-agnostic runs (like the menu check mark)
+            // the ambient direction has no bidi effect, and first-strong's
+            // fallback keeps their anchoring unchanged.
+            style
+                .right_to_left
+                .then_some(epaint::text::TextDirection::RightToLeft)
+                .filter(|_| epaint::text::TextDirection::infer(text).is_some())
         }
     }
 }

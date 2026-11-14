@@ -2493,6 +2493,16 @@ impl State {
                     consumed: self.egui_ctx.egui_wants_pointer_input(),
                 }
             }
+
+            // Forward-compat: a consumer may pin a winit revision that extends
+            // `WindowEvent` with new variants (e.g. dependency-side ordered-IME-reset
+            // signals). Ignore unknown variants: no repaint, not consumed.
+            // Unreachable under the pinned winit, hence the expect.
+            #[expect(unreachable_patterns)]
+            _ => EventResponse {
+                repaint: false,
+                consumed: false,
+            },
         }
     }
 
@@ -2657,6 +2667,9 @@ impl State {
         //     }
         // }
 
+        // TODO(emilk): when we update to winit >= 0.31, forward
+        // `Ime::DeleteSurrounding { before_bytes, after_bytes }` to
+        // `ImeEvent::DeleteSurroundingBytes` (byte-exact IME deletion).
         match ime {
             // [`winit::event::Ime::Enabled`] means different things in X11 and
             // Wayland, but it does not affect event forwarding. Only the Wayland cache
@@ -3507,6 +3520,12 @@ impl State {
                     },
                 );
             }
+
+            // TODO(emilk): when winit grows a surrounding-text report API, forward
+            // `ime.surrounding_text` (diffed like `ime_cursor_rect_px`; it is an
+            // `Arc`-shared report, so an unchanged frame can be skipped for free), and map
+            // the OS "request surrounding text" event to
+            // `ImeEvent::RequestSurroundingText` + a repaint in `on_ime`.
         } else {
             self.ime_cursor_rect_px = None;
         }
@@ -4738,6 +4757,7 @@ pub fn create_winit_window_attributes(
         mouse_passthrough: _, // handled in `apply_viewport_builder_to_window`
         clamp_size_to_monitor_size: _, // Handled in `viewport_builder` in `epi_integration.rs`
         monitor: _, // Handled in `create_window` (needs ActiveEventLoop for monitor handle)
+        layout_direction: _, // Chrome hint; winit exposes no native layout-RTL support, so it is ignored
     } = viewport_builder;
 
     let mut window_attributes = winit::window::WindowAttributes::default()
@@ -5093,6 +5113,10 @@ pub fn short_device_event_description(event: &winit::event::DeviceEvent) -> &'st
         DeviceEvent::Motion { .. } => "DeviceEvent::Motion",
         DeviceEvent::Button { .. } => "DeviceEvent::Button",
         DeviceEvent::Key { .. } => "DeviceEvent::Key",
+        // Forward-compat with consumer-pinned winit revisions that extend `DeviceEvent`
+        // (unreachable under the pinned winit, hence the expect).
+        #[expect(unreachable_patterns)]
+        _ => "DeviceEvent",
     }
 }
 
@@ -5131,6 +5155,10 @@ pub fn short_window_event_description(event: &winit::event::WindowEvent) -> &'st
         WindowEvent::ThemeChanged { .. } => "WindowEvent::ThemeChanged",
         WindowEvent::Occluded { .. } => "WindowEvent::Occluded",
         WindowEvent::PanGesture { .. } => "WindowEvent::PanGesture",
+        // Forward-compat with consumer-pinned winit revisions that extend `WindowEvent`
+        // (unreachable under the pinned winit, hence the expect).
+        #[expect(unreachable_patterns)]
+        _ => "WindowEvent",
     }
 }
 

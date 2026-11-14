@@ -6,10 +6,11 @@ use epaint::text::{Galley, LayoutJob, TextWrapMode, cursor::CCursor};
 use crate::{
     Align, Align2, AsIdSalt, AtomExt as _, AtomKind, Atoms, Color32, Context, CursorIcon, Event,
     EventFilter, FontSelection, Frame, IMEPurpose, Id, IdSalt, ImeEvent, IntoAtoms,
-    IntoSizedResult, Key, KeyboardShortcut, Margin, Modifiers, NumExt as _, Response, Sense,
-    SizedAtomKind, TextBuffer, TextStyle, Ui, Vec2, Widget, WidgetAtom, WidgetInfo,
-    WidgetWithState,
+    IntoSizedResult, Key, KeyboardShortcut, MAX_TEXT_EVENT_CHARS, Margin, Modifiers, NumExt as _,
+    Response, Sense, SizedAtomKind, TextBuffer, TextStyle, Ui, Vec2, Widget, WidgetAtom,
+    WidgetInfo, WidgetText, WidgetWithState,
     class::{ClassName, Classes, HasClasses},
+    emath::ReadingDirection,
     epaint,
     os::OperatingSystem,
     output::OutputEvent,
@@ -20,6 +21,7 @@ use crate::{
     },
     vec2,
     widget_style::TextEditStyle,
+    widget_text::{DirectionStamp, stamped_direction},
 };
 
 use super::{TextEditOutput, TextEditState};
@@ -156,7 +158,7 @@ impl<'t> TextEdit<'t> {
             min_size: Vec2::ZERO,
             align: None,
             clip_text: false,
-            char_limit: usize::MAX,
+            char_limit: MAX_TEXT_EVENT_CHARS,
             return_key: Some(KeyboardShortcut::new(Modifiers::NONE, Key::Enter)),
             background_color: None,
             classes: Classes::default(),
@@ -224,7 +226,7 @@ impl<'t> TextEdit<'t> {
     /// Goes in front of any prefix already set, so `.prefix("b").prefix("a")` shows `ab`.
     #[inline]
     pub fn prefix(mut self, prefix: impl IntoAtoms<'static>) -> Self {
-        self.prefix.extend_left(prefix.into_atoms());
+        self.prefix.extend_start(prefix.into_atoms());
         self
     }
 
@@ -233,7 +235,7 @@ impl<'t> TextEdit<'t> {
     /// Goes after any suffix already set, so `.suffix("a").suffix("b")` shows `ab`.
     #[inline]
     pub fn suffix(mut self, suffix: impl IntoAtoms<'static>) -> Self {
-        self.suffix.extend_right(suffix.into_atoms());
+        self.suffix.extend_end(suffix.into_atoms());
         self
     }
 
@@ -394,9 +396,10 @@ impl<'t> TextEdit<'t> {
         self
     }
 
-    /// Sets the limit for the amount of characters can be entered
+    /// Sets the limit for the number of characters that can be entered.
     ///
-    /// This only works for singleline [`TextEdit`]
+    /// Inserted text is trimmed to this limit before it is stored (and before the text is
+    /// laid out). Defaults to [`MAX_TEXT_EVENT_CHARS`].
     #[inline]
     pub fn char_limit(mut self, limit: usize) -> Self {
         self.char_limit = limit;
@@ -404,6 +407,9 @@ impl<'t> TextEdit<'t> {
     }
 
     /// Set the align of the inner text.
+    ///
+    /// The default hugs the field's reading-start edge: left under a left-to-right
+    /// interface, right under a right-to-left one.
     #[inline]
     pub fn align(mut self, align: Align2) -> Self {
         self.align = Some(align);
@@ -582,12 +588,39 @@ impl<'t> TextEdit<'t> {
             layout_job.language = ui.language();
             // We want to keep the trailing whitespace, since hiding it feels really weird when typing
             layout_job.keep_trailing_whitespace = true;
+            layout_job.language = ui.language();
+            // Pin the paragraph direction so a Latin-first value still reads
+            // (and anchors) as a right-to-left row in a right-to-left field —
+            // the HTML `dir=rtl` input convention
+            // ([`crate::widget_text::DirectionStamp::Field`]). The job is
+            // built fresh here, so it never carries an explicit direction
+            // that this could override. An empty field also follows the
+            // keyboard layout second: an integration that reports an RTL
+            // primary layout gets RTL edits even in a default interface.
+            layout_job.direction =
+                match stamped_direction(ui.style(), &layout_job.text, DirectionStamp::Field) {
+                    Some(direction) => direction,
+                    None => layout_job.direction,
+                };
+            if ui.input(|i| i.keyboard_layout_direction()) == Some(ReadingDirection::Rtl)
+                && layout_job.direction == epaint::text::TextDirection::Auto
+            {
+                layout_job.direction = epaint::text::TextDirection::RightToLeft;
+            }
 
             for section in &mut layout_job.sections {
                 section.format.line_height = Some(line_height);
             }
 
-            ui.fonts_mut(|f| f.layout_job(layout_job))
+            let galley = ui.fonts_mut(|f| f.layout_job(layout_job));
+            if ui.is_rtl() {
+                debug_assert_eq!(
+                    galley.job.direction,
+                    epaint::text::TextDirection::RightToLeft,
+                    "a field value must keep the interface's stamped base direction"
+                );
+            }
+            galley
         };
 
         let layouter = layouter.unwrap_or(&mut default_layouter);
@@ -751,10 +784,10 @@ impl<'t> TextEdit<'t> {
             // but due to servo/rust-smallvec#146 (also see the comment below).
             let mut atoms: Atoms<'_> = Atoms::new(());
 
-            // TODO(servo/rust-smallvec#146): Use extend_right instead of the loop once we have
-            // smallvec 2.0. Using `extend_right` here won't compile, due to lifetime issues.
+            // TODO(servo/rust-smallvec#146): Use extend_end instead of the loop once we have
+            // smallvec 2.0. Using `extend_end` here won't compile, due to lifetime issues.
             for atom in prefix {
-                atoms.push_right(atom);
+                atoms.push_end(atom);
             }
 
             if text.as_str().is_empty() && !hint_text.is_empty() {
@@ -764,7 +797,45 @@ impl<'t> TextEdit<'t> {
 
                 // Since we can't set a fallback color per atom, we have to override it here.
                 // Sucks, since it means users won't be able to override it.
-                hint_text.map_texts(|t| t.color(hint_text_color));
+                hint_text.map_texts(|t| {
+                    let t = t.color(hint_text_color);
+                    // Pin the paragraph direction like `menu_item_button` does,
+                    // so a Latin-first hint still reads as a right-to-left row
+                    // under a right-to-left interface — the same HTML
+                    // `dir=rtl` input convention as the field value
+                    // ([`crate::widget_text::DirectionStamp::Field`]), with an
+                    // explicit per-job direction still winning.
+                    let Some(direction) =
+                        stamped_direction(ui.style(), t.text(), DirectionStamp::Field)
+                    else {
+                        return t;
+                    };
+                    // The default fallback font is what the atom machinery would resolve to anyway:
+                    let mut job = Arc::unwrap_or_clone(t.into_layout_job(
+                        ui.ctx(),
+                        ui.style(),
+                        FontSelection::default(),
+                        ui.text_valign(),
+                    ));
+                    // An explicit per-job direction still wins everywhere, so
+                    // only a freshly laid-out (`Auto` = unstamped on this
+                    // port) job was stamped by the merge below — scope the
+                    // assert to those:
+                    let stamped = job.direction == epaint::text::TextDirection::Auto;
+                    // Only pin jobs that don't carry an explicit direction of their own.
+                    if job.direction == epaint::text::TextDirection::Auto {
+                        job.direction = direction;
+                    }
+                    if ui.is_rtl() && stamped {
+                        debug_assert_eq!(
+                            job.direction,
+                            epaint::text::TextDirection::RightToLeft,
+                            "a freshly laid-out field hint must keep the interface's \
+                             stamped base direction"
+                        );
+                    }
+                    WidgetText::LayoutJob(Arc::new(job))
+                });
 
                 for mut atom in hint_text {
                     if !shrunk && matches!(atom.kind, AtomKind::Text(_)) {
@@ -783,8 +854,10 @@ impl<'t> TextEdit<'t> {
 
                     // Align the hint text the same as the input text so the hint, the
                     // cursor, and the typed text all share one alignment. The default
-                    // `align` is `LEFT_TOP`, which keeps multi line text edits unchanged.
-                    atoms.push_right(atom.atom_align(align));
+                    // `align` hugs the reading-start edge (see `DefaultStyle`), which
+                    // keeps multi line text edits unchanged under a left-to-right
+                    // interface.
+                    atoms.push_end(atom.atom_align(align));
                 }
 
                 // Calculate the empty galley, so it can be read later. The available width is
@@ -803,7 +876,7 @@ impl<'t> TextEdit<'t> {
                 // We need a closure here, so we can calculate the galley based on the available
                 // width (after adding suffix and prefix), for correct wrapping in multi line text
                 // edits
-                atoms.push_right(
+                atoms.push_end(
                     AtomKind::closure(|ui, args| {
                         let mut galley = layouter(ui, text, args.available_size.x);
 
@@ -833,10 +906,10 @@ impl<'t> TextEdit<'t> {
                 );
             }
 
-            // TODO(servo/rust-smallvec#146): Use extend_right instead of the loop once we have
-            // smallvec 2.0. Using `extend_right` here won't compile, due to lifetime issues.
+            // TODO(servo/rust-smallvec#146): Use extend_end instead of the loop once we have
+            // smallvec 2.0. Using `extend_end` here won't compile, due to lifetime issues.
             for atom in suffix {
-                atoms.push_right(atom);
+                atoms.push_end(atom);
             }
 
             let min_height = (min_inner_height + frame.total_margin().sum().y).at_least(min_size.y);
@@ -902,8 +975,18 @@ impl<'t> TextEdit<'t> {
                 && ui.input(|i| i.pointer.is_moving())
             {
                 // text cursor preview:
+                // Paint the would-be cursor exactly where the real cursor for
+                // the same galley-local position would paint: the galley is
+                // anchored (and, while scrolling, shifted) such that
+                // `galley_pos == inner_rect.left_top() - state.text_offset` —
+                // the same mapping `cursor_at_pointer` above inverts. (Holds by
+                // definition in the non-scrolling branch, and in the scrolling
+                // branch for the reading-start anchor — every default path.
+                // An overflowing right-to-left field with an explicit center
+                // halign breaks the invariant; the preview is displaced there
+                // both before and after this, so nothing regresses.)
                 let cursor_rect = TSTransform::from_translation(
-                    inner_rect.min.to_vec2() - vec2(galley.rect.left(), 0.0),
+                    (inner_rect.min - state.text_offset).to_vec2() - vec2(galley.rect.left(), 0.0),
                 ) * cursor_rect(&galley, &cursor_at_pointer, row_height);
                 text_selection::visuals::paint_cursor_end(&painter, ui.visuals(), cursor_rect);
             }
@@ -981,36 +1064,93 @@ impl<'t> TextEdit<'t> {
             response.mark_changed();
         }
 
-        let mut galley_pos = align
-            .align_size_within_rect(galley.size(), inner_rect)
-            .intersect(inner_rect) // limit pos to the response rect area
-            .min;
+        let mut galley_pos = {
+            let mut rect = align
+                .align_size_within_rect(galley.size(), inner_rect)
+                .intersect(inner_rect); // limit pos to the response rect area
+            // Anchor the painted galley on its resolved halign (the `Label`
+            // pattern): the default layouter stamps the job's `halign` from the
+            // widget's `align`, so when the two agree this computes the exact
+            // same position as the plain align placement, and a custom
+            // layouter's own job `halign` wins, exactly as `Label` anchors on
+            // `galley.job.halign`.
+            rect.min.x = match galley.job.halign {
+                Align::LEFT => inner_rect.left(),
+                Align::Center => inner_rect.center().x - galley.size().x / 2.0,
+                Align::RIGHT => inner_rect.right() - galley.size().x,
+            };
+            rect.min
+        };
         let align_offset = inner_rect.left_top() - galley_pos;
 
-        // Visual clipping for singleline text editor with text larger than width
-        if clip_text && align_offset.x == 0.0 {
+        // Visual clipping for singleline text editor with text larger than width.
+        //
+        // A right-to-left galley anchored on its reading start (the right edge
+        // the interface halign resolves under a right-to-left interface) is
+        // never at `align_offset.x == 0.0` when it overflows — engage the
+        // scroll for it as well, measuring the cursor from the reading start
+        // and sliding the galley the other way. The stored-offset algebra
+        // below assumes that reading-start anchoring, so a galley with any
+        // other anchor (a left-to-right interface, or an explicit center)
+        // keeps the generic anchoring below — where pointer hit-testing stays
+        // the exact inverse of the painted position — like its left-to-right
+        // twin.
+        let galley_is_rtl = galley.rows.first().is_some_and(|row| row.rtl_paragraph);
+        let rtl_reading_start_overflows = galley_is_rtl
+            && galley.job.halign == Align::Max
+            && galley.size().x > inner_rect.width();
+        if clip_text && (align_offset.x == 0.0 || rtl_reading_start_overflows) {
+            let galley_width = galley.size().x;
             let cursor_pos = match (cursor_range, ui.memory(|mem| mem.has_focus(id))) {
                 (Some(cursor_range), true) => galley.pos_from_cursor(cursor_range.primary).min.x,
                 _ => 0.0,
             };
 
-            let mut offset_x = state.text_offset.x;
+            // Distance of the cursor from the reading-start edge: for a
+            // right-to-left galley the painted x runs the other way (and is
+            // offset by the galley's own `rect.left()`), so mirror it:
+            let cursor_reading_pos = if rtl_reading_start_overflows {
+                galley_width - (cursor_pos - galley.rect.left())
+            } else {
+                cursor_pos
+            };
+
+            // The stored offset is the (unshifted) galley offset relative to
+            // the field; for right-to-left galleys that runs from the reading
+            // end, so convert it to the scroll distance:
+            let mut offset_x = if rtl_reading_start_overflows {
+                (galley_width - inner_rect.width()) - state.text_offset.x
+            } else {
+                state.text_offset.x
+            };
             let visible_range = offset_x..=offset_x + inner_rect.width();
 
-            if !visible_range.contains(&cursor_pos) {
-                if cursor_pos < *visible_range.start() {
-                    offset_x = cursor_pos;
+            if !visible_range.contains(&cursor_reading_pos) {
+                if cursor_reading_pos < *visible_range.start() {
+                    offset_x = cursor_reading_pos;
                 } else {
-                    offset_x = cursor_pos - inner_rect.width();
+                    offset_x = cursor_reading_pos - inner_rect.width();
                 }
             }
 
             offset_x = offset_x
-                .at_most(galley.size().x - inner_rect.width())
+                .at_most(galley_width - inner_rect.width())
                 .at_least(0.0);
 
-            state.text_offset = vec2(offset_x, align_offset.y);
-            galley_pos -= vec2(offset_x, 0.0);
+            if rtl_reading_start_overflows {
+                // Scroll toward the reading end: slide the galley rightward to
+                // reveal its visually-left overflow:
+                galley_pos += vec2(offset_x, 0.0);
+                // Store the offset of the *shifted* galley, so pointer
+                // hit-testing stays the exact inverse of the painted position:
+                state.text_offset = vec2(
+                    (galley_width - inner_rect.width()) - offset_x,
+                    align_offset.y,
+                );
+            } else {
+                state.text_offset = vec2(offset_x, align_offset.y);
+                galley_pos -= vec2(offset_x, 0.0);
+            }
         } else {
             state.text_offset = align_offset;
         }
@@ -1127,6 +1267,11 @@ impl<'t> TextEdit<'t> {
                                 reset_request: None,
                                 change_cause,
                                 surrounding_text,
+                                // The IME composes content, not UI chrome: report
+                                // the laid-out text's own language and resolved
+                                // base direction (the galley's rows carry it):
+                                language: galley.job.language.clone(),
+                                base_direction: galley.rows.first().map(|row| row.base_direction),
                             });
                         });
                     }
@@ -1198,12 +1343,28 @@ impl<'t> TextEdit<'t> {
             }
         });
 
+        // An active IME composition on this focused widget: the preedit text is
+        // reinserted into the buffer and the cursor range spans it (see the
+        // `ImeEvent::Preedit` handling). Exposing the range lets the
+        // accessibility bridge mark the widget as a live region and announce
+        // the composing text as an `ImeCandidate` node.
+        let composition =
+            if ui.memory(|mem| mem.has_focus(id)) && state.cursor_purpose.is_ime_composition() {
+                cursor_range
+                    .as_ref()
+                    .map(|range| range.as_sorted_char_range())
+                    .filter(|range| !range.is_empty())
+            } else {
+                None
+            };
+
         crate::text_selection::accesskit_text::update_accesskit_for_text_widget(
             ui.ctx(),
             id,
             cursor_range,
             TSTransform::from_translation(galley_pos.to_vec2()),
             &galley,
+            composition,
         );
 
         let output = TextEditOutput {
@@ -1495,8 +1656,13 @@ fn events(
                 }
 
                 match ime_event {
+                    // `RequestSurroundingText` carries no payload: the
+                    // surrounding-text report is refreshed in the IME-output
+                    // block below.
                     #[expect(deprecated)]
-                    ImeEvent::Enabled | ImeEvent::Disabled => None,
+                    ImeEvent::Enabled | ImeEvent::Disabled | ImeEvent::RequestSurroundingText => {
+                        None
+                    }
                     // Ignore `Preedit`/`Commit` events with empty text when
                     // there is no active IME composition.
                     //
@@ -1871,7 +2037,7 @@ fn check_for_mutating_key_press(
             } else if let Some(cursor) = cursor_range.single() {
                 if modifiers.alt || modifiers.ctrl {
                     // alt on mac, ctrl on windows
-                    text.delete_previous_word(cursor)
+                    text.delete_previous_word(galley, cursor)
                 } else {
                     text.delete_previous_char(cursor)
                 }
@@ -1887,7 +2053,7 @@ fn check_for_mutating_key_press(
             } else if let Some(cursor) = cursor_range.single() {
                 if modifiers.alt || modifiers.ctrl {
                     // alt on mac, ctrl on windows
-                    text.delete_next_word(cursor)
+                    text.delete_next_word(galley, cursor)
                 } else {
                     text.delete_next_char(cursor)
                 }
@@ -1918,7 +2084,7 @@ fn check_for_mutating_key_press(
 
         Key::W if modifiers.ctrl => {
             let ccursor = if let Some(cursor) = cursor_range.single() {
-                text.delete_previous_word(cursor)
+                text.delete_previous_word(galley, cursor)
             } else {
                 text.delete_selected(cursor_range)
             };

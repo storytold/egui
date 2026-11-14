@@ -2,7 +2,10 @@ use alloc::sync::Arc;
 
 use crate::{
     Align, Direction, FontSelection, Galley, Pos2, Response, Role, Sense, Stroke, TextWrapMode, Ui,
-    Widget, WidgetInfo, WidgetText, epaint, pos2, text_selection::LabelSelectionState,
+    Widget, WidgetInfo, WidgetText, epaint, pos2,
+    text_selection::LabelSelectionState,
+    vec2,
+    widget_text::{DirectionStamp, stamped_direction},
 };
 
 /// Static text.
@@ -186,6 +189,7 @@ impl Label {
 
         let valign = ui.text_valign();
         let mut layout_job = Arc::unwrap_or_clone(self.text.into_layout_job(
+            ui.ctx(),
             ui.style(),
             FontSelection::Default,
             valign,
@@ -193,14 +197,40 @@ impl Label {
         if layout_job.language.is_none() {
             layout_job.language = ui.language();
         }
+        // Stamp the interface reading direction, like
+        // [`WidgetText::into_galley_impl`] does for the galley path, so a
+        // Latin-first label still reads as a right-to-left row (first-strong
+        // gated — [`crate::widget_text::DirectionStamp::Label`]). Skipped when
+        // the user pinned an explicit halign or job direction: epaint anchors
+        // right-to-left rows at their reading start (an `Align::Min` row hangs
+        // from the right), which would re-anchor an explicit halign, and an
+        // explicit direction already decides.
+        if layout_job.direction == epaint::text::TextDirection::Auto
+            && self.halign.is_none()
+            && let Some(direction) =
+                stamped_direction(ui.style(), &layout_job.text, DirectionStamp::Label)
+        {
+            layout_job.direction = direction;
+        }
 
         let available_width = ui.available_width();
 
+        // The resolved base reading direction (Auto defers to first-strong
+        // inference), decided BEFORE layouting: the fast path below mutates
+        // the job.
+        let base_rtl = if layout_job.direction == epaint::text::TextDirection::Auto {
+            epaint::text::TextDirection::infer(&layout_job.text)
+                == Some(epaint::text::TextDirection::RightToLeft)
+        } else {
+            layout_job.direction == epaint::text::TextDirection::RightToLeft
+        };
+
         let wrap_mode = self.wrap_mode.unwrap_or_else(|| ui.wrap_mode());
         if wrap_mode == TextWrapMode::Wrap
-            && ui.layout().main_dir() == Direction::LeftToRight
             && ui.layout().main_wrap()
             && available_width.is_finite()
+            && ((ui.layout().main_dir() == Direction::LeftToRight && !base_rtl)
+                || (ui.layout().main_dir() == Direction::RightToLeft && base_rtl))
         {
             // On a wrapping horizontal layout we want text to start after the previous widget,
             // then continue on the line below! This will take some extra work:
@@ -215,15 +245,30 @@ impl Label {
             layout_job.wrap.max_width = available_width;
             layout_job.first_row_min_height = cursor.height();
             layout_job.halign = Align::Min;
-            // The text continues the row of the previous widget, from the left:
-            layout_job.halign_min_is_start = false;
+            // The text continues the row of the previous widget, from the
+            // reading start: under a left-to-right layout that is the left
+            // edge, with plain left-anchored rows; under a right-to-left
+            // layout the rows must opt into the per-row reading-start
+            // anchoring (see `LayoutJob::halign_min_is_start`), which hangs
+            // the first row's leading advance inside the reading-start edge.
+            layout_job.halign_min_is_start = base_rtl;
             layout_job.justify = false;
             if let Some(first_section) = layout_job.sections.first_mut() {
                 first_section.leading_space = first_row_indentation;
             }
             let galley = ui.fonts_mut(|fonts| fonts.layout_job(layout_job));
 
-            let pos = pos2(ui.max_rect().left(), ui.cursor().top());
+            let pos = if base_rtl {
+                // Right-to-left rows hang from the common reading-start edge
+                // of their boxes (the per-row anchoring above), with the
+                // first row's leading advance inside that edge, so anchoring
+                // the galley box's right edge at the container's
+                // reading-start edge insets the first row's ink by the
+                // indent.
+                pos2(ui.max_rect().right(), ui.cursor().top()) - vec2(galley.rect.right(), 0.0)
+            } else {
+                pos2(ui.max_rect().left(), ui.cursor().top()) - vec2(galley.rect.left(), 0.0)
+            };
             assert!(!galley.rows.is_empty(), "Galleys are never empty");
             // collect a response from many rows:
             let rect = galley.rows[0]
@@ -255,7 +300,10 @@ impl Label {
 
             if ui.is_grid() {
                 // TODO(emilk): remove special Grid hacks like these
-                layout_job.halign = Align::LEFT;
+                // An explicit halign still wins inside grids; only the default
+                // is pinned to the left (which `normalize_reading_direction`
+                // re-anchors to the reading start for right-to-left rows).
+                layout_job.halign = self.halign.unwrap_or(Align::LEFT);
                 layout_job.justify = false;
             } else {
                 layout_job.halign = self
