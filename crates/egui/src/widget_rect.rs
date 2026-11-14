@@ -87,12 +87,32 @@ pub struct InteractOptions {
     /// If we call interact on the same widget multiple times,
     /// should we move it to the top on subsequent calls?
     pub move_to_top: bool,
+
+    /// If `false`, the widget is disabled even if its [`crate::Ui`] is enabled:
+    /// it senses no input and reports itself disabled.
+    ///
+    /// Unlike [`crate::Ui::disable`], this does not fade what the [`crate::Ui`] paints,
+    /// and needs no child [`crate::Ui`] (which would shift the auto-ids of later widgets).
+    ///
+    /// Only used by [`crate::Ui::interact_opt`].
+    pub enabled: bool,
+
+    /// Does Space act as a click while the widget has keyboard focus?
+    ///
+    /// Enter always does. Set this to `false` for a link, which Space doesn't activate
+    /// (Space scrolls the page in a browser).
+    ///
+    /// Applies to the response of this call; [`crate::Context::read_response`] uses the default.
+    pub activate_on_space: bool,
 }
 
-#[expect(clippy::derivable_impls)] // Nice to be explicit
 impl Default for InteractOptions {
     fn default() -> Self {
-        Self { move_to_top: false }
+        Self {
+            move_to_top: false,
+            enabled: true,
+            activate_on_space: true,
+        }
     }
 }
 
@@ -190,7 +210,11 @@ impl WidgetRects {
             infos: _,
         } = self;
 
-        let InteractOptions { move_to_top } = options;
+        let InteractOptions {
+            move_to_top,
+            enabled: _,
+            activate_on_space: _,
+        } = options;
 
         let mut shift_layer_index_after = None;
 
