@@ -23,6 +23,9 @@ use crate::{Context, CursorIcon, Plugin, Ui};
 pub struct DragAndDrop {
     /// The current drag-and-drop payload, if any. Automatically cleared when drag ends.
     payload: Option<Arc<dyn Any + Send + Sync>>,
+
+    /// Did the Escape key clear the payload at the start of this pass?
+    aborted_by_escape: bool,
 }
 
 impl Plugin for DragAndDrop {
@@ -34,6 +37,8 @@ impl Plugin for DragAndDrop {
     ///
     /// This needs to happen at frame start so we can properly capture the escape key.
     fn on_begin_pass(&mut self, ui: &mut Ui) {
+        self.aborted_by_escape = false;
+
         let has_any_payload = self.payload.is_some();
 
         if has_any_payload {
@@ -42,6 +47,7 @@ impl Plugin for DragAndDrop {
 
             if abort_dnd_due_to_escape_key {
                 self.payload = None;
+                self.aborted_by_escape = true;
             }
         }
     }
@@ -86,6 +92,17 @@ impl DragAndDrop {
     /// Clears the payload, setting it to `None`.
     pub fn clear_payload(ctx: &Context) {
         ctx.plugin::<Self>().lock().payload = None;
+    }
+
+    /// Did the Escape key clear the payload at the start of this pass?
+    ///
+    /// The Escape key press is consumed when it clears the payload, so a widget that owns the
+    /// drag cannot see it in [`crate::InputState`]. Use this to tell a cancel by Escape from
+    /// another way the payload went away, such as [`Self::clear_payload`].
+    ///
+    /// Only `true` in the pass where Escape cleared a payload.
+    pub fn aborted_by_escape(ctx: &Context) -> bool {
+        ctx.plugin::<Self>().lock().aborted_by_escape
     }
 
     /// Retrieve the payload, if any.
@@ -133,5 +150,52 @@ impl DragAndDrop {
     /// (if there is a payload).
     pub fn has_any_payload(ctx: &Context) -> bool {
         ctx.plugin::<Self>().lock().payload.is_some()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DragAndDrop;
+    use crate::{Context, Event, Key, Modifiers, RawInput};
+
+    fn run(ctx: &Context, escape: bool) {
+        let events = if escape {
+            vec![Event::Key {
+                key: Key::Escape,
+                physical_key: Some(Key::Escape),
+                pressed: true,
+                repeat: false,
+                modifiers: Modifiers::NONE,
+            }]
+        } else {
+            vec![]
+        };
+        let mut output = ctx.run_ui(
+            RawInput {
+                events,
+                ..Default::default()
+            },
+            |_| {},
+        );
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn escape_abort_is_reported_for_one_pass() {
+        let ctx = Context::default();
+        run(&ctx, false);
+
+        DragAndDrop::set_payload(&ctx, 1_u32);
+        run(&ctx, true);
+        assert!(!DragAndDrop::has_any_payload(&ctx));
+        assert!(DragAndDrop::aborted_by_escape(&ctx));
+
+        run(&ctx, false);
+        assert!(!DragAndDrop::aborted_by_escape(&ctx));
+
+        DragAndDrop::set_payload(&ctx, 1_u32);
+        DragAndDrop::clear_payload(&ctx);
+        run(&ctx, false);
+        assert!(!DragAndDrop::aborted_by_escape(&ctx));
     }
 }

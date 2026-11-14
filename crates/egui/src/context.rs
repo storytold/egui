@@ -524,9 +524,8 @@ impl ContextImpl {
                 .collect();
             layers.sort_by(|&a, &b| self.memory.areas().compare_order(a, b));
 
-            viewport.hits = if let Some(pos) = viewport.input.pointer.interact_pos() {
-                let interact_radius = self.memory.options.style().interaction.interact_radius;
-
+            let interact_radius = self.memory.options.style().interaction.interact_radius;
+            let hit_test_at = |pos| {
                 crate::hit_test::hit_test(
                     &viewport.prev_pass.widgets,
                     &layers,
@@ -534,14 +533,37 @@ impl ContextImpl {
                     pos,
                     interact_radius,
                 )
-            } else {
-                WidgetHits::default()
             };
+
+            let interact_pos = viewport.input.pointer.interact_pos();
+            viewport.hits = interact_pos.map(hit_test_at).unwrap_or_default();
+
+            // The pointer may have moved on after a press in the same pass
+            // (a quick drag, or a slow frame), so each press goes to the widgets
+            // under its own position:
+            let press_hits: Vec<(Pos2, WidgetHits)> = viewport
+                .input
+                .pointer
+                .pointer_events
+                .iter()
+                .filter_map(|event| match event {
+                    PointerEvent::Pressed { position, button }
+                        if self.memory.press_is_swallowed(*position, *button) =>
+                    {
+                        Some((*position, WidgetHits::default()))
+                    }
+                    PointerEvent::Pressed { position, .. } if Some(*position) != interact_pos => {
+                        Some((*position, hit_test_at(*position)))
+                    }
+                    _ => None,
+                })
+                .collect();
 
             viewport.interact_widgets = crate::interaction::interact(
                 &viewport.interact_widgets,
                 &viewport.prev_pass.widgets,
                 &viewport.hits,
+                &press_hits,
                 &viewport.input,
                 self.memory.interaction_mut(),
             );
@@ -571,6 +593,8 @@ impl ContextImpl {
             viewport.this_pass.accesskit_state = Some(AccessKitPassState {
                 nodes,
                 parent_map: IdMap::default(),
+                focus_override: None,
+                created: Vec::new(),
             });
         }
 
@@ -665,28 +689,12 @@ impl ContextImpl {
         if let std::collections::hash_map::Entry::Vacant(entry) = builders.entry(id) {
             entry.insert(Default::default());
 
-            /// Find the first ancestor that already has an accesskit node.
-            fn find_accesskit_parent(
-                parent_map: &IdMap<Id>,
-                node_map: &IdMap<accesskit::Node>,
-                id: Id,
-            ) -> Option<Id> {
-                if let Some(parent_id) = parent_map.get(&id) {
-                    if node_map.contains_key(parent_id) {
-                        Some(*parent_id)
-                    } else {
-                        find_accesskit_parent(parent_map, node_map, *parent_id)
-                    }
-                } else {
-                    None
-                }
-            }
-
             let parent_id = find_accesskit_parent(&state.parent_map, builders, id)
                 .unwrap_or_else(crate::accesskit_root_id);
 
             let parent_builder = builders.get_mut(&parent_id)?;
             parent_builder.push_child(id.accesskit_id());
+            state.created.push(id);
         }
 
         builders.get_mut(&id)
@@ -782,6 +790,13 @@ impl ContextImpl {
 /// ```
 #[derive(Clone)]
 pub struct Context(Arc<RwLock<ContextImpl>>);
+
+impl Context {
+    /// Whether both handles are the same context.
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
 
 impl core::fmt::Debug for Context {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -1592,7 +1607,7 @@ impl Context {
         // Response inspection is also used to choose styling before a widget processes input.
         // Apply click-away focus changes only when the widget is actually registered, so a
         // TextEdit can preserve its selection for an action later in this pass (egui#8763).
-        let res = self.get_response_with_focus_policy(w, true);
+        let res = self.get_response_with_focus_policy(w, true, options);
 
         #[cfg(debug_assertions)]
         if res.contains_pointer() {
@@ -1754,13 +1769,14 @@ impl Context {
 
     /// Do all interaction for an existing widget, without (re-)registering it.
     pub(crate) fn get_response(&self, widget_rect: WidgetRect) -> Response {
-        self.get_response_with_focus_policy(widget_rect, false)
+        self.get_response_with_focus_policy(widget_rect, false, Default::default())
     }
 
     fn get_response_with_focus_policy(
         &self,
         widget_rect: WidgetRect,
         apply_click_away: bool,
+        options: crate::InteractOptions,
     ) -> Response {
         use response::Flags;
 
@@ -1808,7 +1824,8 @@ impl Context {
             if enabled
                 && sense.senses_click()
                 && memory.has_focus(id)
-                && (input.key_pressed(Key::Space) || input.key_pressed(Key::Enter))
+                && ((options.activate_on_space && input.key_pressed(Key::Space))
+                    || input.key_pressed(Key::Enter))
             {
                 // Space/enter works like a primary click for e.g. selected buttons
                 res.flags.set(Flags::FAKE_PRIMARY_CLICKED, true);
@@ -1887,7 +1904,7 @@ impl Context {
             }
 
             if apply_click_away && !res.hovered() {
-                let triggered = match memory.options.input_options.surrender_focus_on {
+                let triggered = match memory.focus_surrender() {
                     SurrenderFocusOn::Presses => input.pointer.any_pressed(),
                     SurrenderFocusOn::Clicks => input.pointer.any_click(),
                     SurrenderFocusOn::Never => false,
@@ -3257,10 +3274,14 @@ impl ContextImpl {
                 }
                 let root_id = crate::accesskit_root_id().accesskit_id();
                 // A widget can have focus without a node, e.g. if it requested focus while invisible.
-                let focus_id = self
-                    .memory
-                    .focused()
+                let focus_id = state
+                    .focus_override
                     .filter(|id| state.nodes.contains_key(id))
+                    .or_else(|| {
+                        self.memory
+                            .focused()
+                            .filter(|id| state.nodes.contains_key(id))
+                    })
                     .map_or(root_id, |id| id.accesskit_id());
                 // The `(id, node)` pairs of the coming `accesskit::TreeUpdate`:
                 let mut nodes: Vec<(accesskit::NodeId, accesskit::Node)> = state
@@ -3720,6 +3741,19 @@ impl Context {
     /// layer, the behavior is unspecified.
     pub fn set_sublayer(&self, parent: LayerId, child: LayerId) {
         self.memory_mut(|mem| mem.areas_mut().set_sublayer(parent, child));
+    }
+
+    /// Put the given layers above every other layer of the same [`Order`], bottom first.
+    ///
+    /// Applied at the end of the pass, after egui's own ordering, so [`Self::move_to_top`],
+    /// [`Self::set_sublayer`] and the raise-on-click of [`crate::Area`]s only reorder the layers
+    /// that are not in the list. An unlisted sublayer of a listed layer moves with its parent and
+    /// sits directly above it. Unlisted layers keep their relative order; ids that are not known
+    /// layers are ignored.
+    ///
+    /// Applies to the current viewport and to this pass only, so call it every pass.
+    pub fn set_layer_order(&self, layers: &[LayerId]) {
+        self.memory_mut(|mem| mem.areas_mut().set_layer_order(layers));
     }
 
     /// Retrieve the [`LayerId`] of the top level windows.
@@ -4303,7 +4337,32 @@ impl Context {
         })
     }
 
-    pub(crate) fn register_accesskit_parent(&self, id: Id, parent_id: Id) {
+    /// Report the widget with this id as the focused node of this pass's accessibility tree.
+    ///
+    /// This is for widgets that show an active item without taking keyboard focus, such as a
+    /// menu that is navigated with the keyboard while the focus stays where it was: screen
+    /// readers then follow the active item, as they do in native menus.
+    ///
+    /// It changes neither [`Memory::focused`] nor how events are routed.
+    /// It applies to the current pass only, so call it every pass. The last call wins.
+    /// If the widget has no accessibility node in this pass, the usual focus is reported.
+    pub fn set_accesskit_focus(&self, id: Id) {
+        self.write(|ctx| {
+            if let Some(state) = ctx.viewport().this_pass.accesskit_state.as_mut() {
+                state.focus_override = Some(id);
+            }
+        });
+    }
+
+    /// Make the AccessKit node of `id` a child of the node of `parent_id`.
+    ///
+    /// Widgets created with [`Ui::interact`] and its variants do this for you. Call it for a
+    /// member that has no egui widget, with the member's id and the [`Ui::unique_id`] of the
+    /// parent, before the first [`Self::accesskit_node_builder`] call for `id` in the pass.
+    /// A node created before the call is already attached to the nearest ancestor with a node.
+    ///
+    /// Call it every pass the member is shown.
+    pub fn register_accesskit_parent(&self, id: Id, parent_id: Id) {
         self.write(|ctx| {
             if let Some(state) = ctx.viewport().this_pass.accesskit_state.as_mut() {
                 state.parent_map.insert(id, parent_id);
@@ -4319,6 +4378,133 @@ impl Context {
     /// Disable generation of AccessKit tree updates in all future frames.
     pub fn disable_accesskit(&self) {
         self.write(|ctx| ctx.is_accesskit_enabled = false);
+    }
+}
+
+/// ## Pass records
+impl Context {
+    /// Where this pass's shapes, widget rects and AccessKit nodes stand, for [`Self::pass_records_since`].
+    pub fn pass_mark(&self) -> crate::PassMark {
+        self.write(|ctx| {
+            let viewport = ctx.viewport();
+            crate::PassMark {
+                shapes: viewport.graphics.lens().collect(),
+                widgets: viewport
+                    .this_pass
+                    .widgets
+                    .layers()
+                    .map(|(layer, rects)| (*layer, rects.len()))
+                    .collect(),
+                nodes: viewport
+                    .this_pass
+                    .accesskit_state
+                    .as_ref()
+                    .map_or(0, |state| state.created.len()),
+            }
+        })
+    }
+
+    /// What this pass added since `mark`: the shapes painted, and the widget rects and AccessKit nodes created, each
+    /// as it stands now.
+    pub fn pass_records_since(&self, mark: &crate::PassMark) -> crate::PassRecords {
+        use crate::PassMark;
+        self.write(|ctx| {
+            let viewport = ctx.viewport();
+            let graphics = &viewport.graphics;
+            let shapes: Vec<_> = graphics
+                .lens()
+                .filter(|(layer, len)| *len > PassMark::at(&mark.shapes, *layer))
+                .filter_map(|(layer, _)| {
+                    let from = PassMark::at(&mark.shapes, layer);
+                    Some((
+                        layer,
+                        graphics
+                            .get(layer)?
+                            .all_entries()
+                            .skip(from)
+                            .cloned()
+                            .collect(),
+                    ))
+                })
+                .collect();
+            let widgets: Vec<WidgetRect> = viewport
+                .this_pass
+                .widgets
+                .layers()
+                .flat_map(|(layer, rects)| {
+                    rects
+                        .get(PassMark::at(&mark.widgets, *layer)..)
+                        .unwrap_or_default()
+                        .iter()
+                        .copied()
+                })
+                .collect();
+            let mut nodes = Vec::new();
+            let mut parents = Vec::new();
+            if let Some(state) = &viewport.this_pass.accesskit_state {
+                for id in state.created.get(mark.nodes..).unwrap_or_default() {
+                    if let Some(node) = state.nodes.get(id) {
+                        nodes.push((*id, node.clone()));
+                    }
+                }
+                for id in core::iter::chain(
+                    widgets.iter().map(|widget| widget.id),
+                    nodes.iter().map(|(id, _)| *id),
+                ) {
+                    if let Some(parent) = state.parent_map.get(&id) {
+                        parents.push((id, *parent));
+                    }
+                }
+            }
+            crate::PassRecords {
+                shapes,
+                widgets,
+                nodes,
+                parents,
+            }
+        })
+    }
+
+    /// Adds `records` to this pass as the part of a pass that made them would: its shapes after what each layer
+    /// holds, its widget rects, and its AccessKit nodes under the nodes their parents have now.
+    pub fn replay_pass_records(&self, records: &crate::PassRecords) {
+        self.write(|ctx| {
+            let viewport = ctx.viewport();
+            for (layer, shapes) in &records.shapes {
+                let list = viewport.graphics.entry(*layer);
+                for shape in shapes {
+                    list.add(shape.clip_rect, shape.shape.clone());
+                }
+            }
+            for widget in &records.widgets {
+                viewport.this_pass.widgets.insert(
+                    widget.layer_id,
+                    *widget,
+                    crate::InteractOptions::default(),
+                );
+            }
+            let Some(state) = viewport.this_pass.accesskit_state.as_mut() else {
+                return;
+            };
+            state.parent_map.extend(records.parents.iter().copied());
+            let replayed: ahash::HashSet<Id> = records.nodes.iter().map(|(id, _)| *id).collect();
+            for (id, node) in &records.nodes {
+                if state.nodes.contains_key(id) {
+                    continue;
+                }
+                // A replayed parent lists the node already.
+                let parent = find_accesskit_parent(&state.parent_map, &state.nodes, *id)
+                    .unwrap_or_else(crate::accesskit_root_id);
+                if !replayed.contains(&parent) {
+                    let Some(parent) = state.nodes.get_mut(&parent) else {
+                        continue;
+                    };
+                    parent.push_child(id.accesskit_id());
+                }
+                state.nodes.insert(*id, node.clone());
+                state.created.push(*id);
+            }
+        });
     }
 }
 
@@ -5035,6 +5221,20 @@ fn warn_if_rect_changes_id(
 ///
 /// Nodes that aren't widgets themselves (e.g. text runs) inherit the visibility
 /// of their closest ancestor that is.
+/// The first ancestor of `id` that already has an AccessKit node.
+fn find_accesskit_parent(
+    parent_map: &IdMap<Id>,
+    node_map: &IdMap<accesskit::Node>,
+    id: Id,
+) -> Option<Id> {
+    let parent_id = parent_map.get(&id)?;
+    if node_map.contains_key(parent_id) {
+        Some(*parent_id)
+    } else {
+        find_accesskit_parent(parent_map, node_map, *parent_id)
+    }
+}
+
 fn is_accesskit_visible(widgets: &crate::WidgetRects, parent_map: &IdMap<Id>, mut id: Id) -> bool {
     loop {
         if let Some(widget) = widgets.get(id) {
@@ -5238,6 +5438,257 @@ mod test {
         super::warn_if_rect_changes_id(&mut shapes, &previous, &current, &[rect]);
 
         assert!(shapes.is_empty());
+    }
+
+    /// `InteractOptions::enabled: false` disables one widget of an enabled `Ui`.
+    #[test]
+    fn test_interact_opt_disabled_widget_in_enabled_ui() {
+        use crate::{Event, Id, InteractOptions, PointerButton, RawInput, Rect, Sense, pos2, vec2};
+
+        let ctx = Context::default();
+        ctx.set_fonts(FontDefinitions::empty());
+        let rect = Rect::from_min_size(pos2(10.0, 10.0), vec2(20.0, 20.0));
+        let pos = rect.center();
+        let button = |pressed| Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+
+        for enabled in [true, false] {
+            let options = InteractOptions {
+                enabled,
+                ..Default::default()
+            };
+            let mut clicked = false;
+            // The first pass registers the widget, the second clicks it.
+            for events in [
+                vec![Event::PointerMoved(pos)],
+                vec![button(true), button(false)],
+            ] {
+                let input = RawInput {
+                    events,
+                    ..Default::default()
+                };
+                let output = ctx.run_ui(input, |ui| {
+                    let response =
+                        ui.interact_opt(rect, Id::unique("widget"), Sense::click(), options);
+                    assert!(ui.is_enabled(), "the Ui stays enabled");
+                    assert_eq!(response.enabled(), enabled);
+                    clicked = response.clicked();
+                });
+                output.drop_without_applying_deltas();
+            }
+            assert_eq!(clicked, enabled, "only an enabled widget is clicked");
+        }
+    }
+
+    /// `set_accesskit_focus` moves the reported AccessKit focus for one pass only,
+    /// and leaves egui's own focus alone.
+    #[test]
+    fn test_set_accesskit_focus() {
+        use crate::{Id, RawInput};
+
+        let ctx = Context::default();
+        ctx.set_fonts(FontDefinitions::empty());
+        ctx.enable_accesskit();
+        let missing = Id::NULL.with("no node");
+        let ids = core::cell::Cell::new((Id::NULL, Id::NULL));
+
+        let run = |ctx: &Context, over: Option<Id>| {
+            let mut output = ctx.run_ui(RawInput::default(), |ui| {
+                ids.set((ui.button("a").id, ui.button("b").id));
+                if let Some(id) = over {
+                    ui.ctx().set_accesskit_focus(id);
+                }
+            });
+            output.textures_delta.clear();
+            output.platform_output.accesskit_update.unwrap().focus
+        };
+
+        run(&ctx, None);
+        let (a, b) = ids.get();
+        ctx.memory_mut(|mem| mem.request_focus(a));
+        assert_eq!(run(&ctx, None), a.accesskit_id());
+        assert_eq!(ctx.memory(|mem| mem.focused()), Some(a));
+
+        assert_eq!(run(&ctx, Some(b)), b.accesskit_id());
+        assert_eq!(ctx.memory(|mem| mem.focused()), Some(a));
+
+        assert_eq!(
+            run(&ctx, None),
+            a.accesskit_id(),
+            "applies to one pass only"
+        );
+        assert_eq!(
+            run(&ctx, Some(missing)),
+            a.accesskit_id(),
+            "no node: usual focus"
+        );
+    }
+
+    /// Enter clicks a focused widget; Space only if `InteractOptions::activate_on_space`.
+    #[test]
+    fn test_interact_opt_activate_on_space() {
+        use crate::{Event, Id, InteractOptions, Key, RawInput, Rect, Sense, pos2, vec2};
+
+        let ctx = Context::default();
+        ctx.set_fonts(FontDefinitions::empty());
+        let rect = Rect::from_min_size(pos2(10.0, 10.0), vec2(20.0, 20.0));
+        let id = Id::unique("widget");
+        ctx.memory_mut(|mem| mem.request_focus(id));
+        let press = |key| Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Default::default(),
+        };
+
+        for activate_on_space in [true, false] {
+            let options = InteractOptions {
+                activate_on_space,
+                ..Default::default()
+            };
+            for (key, expected) in [(Key::Space, activate_on_space), (Key::Enter, true)] {
+                let input = RawInput {
+                    events: vec![press(key)],
+                    ..Default::default()
+                };
+                let mut clicked = false;
+                let output = ctx.run_ui(input, |ui| {
+                    clicked = ui.interact_opt(rect, id, Sense::click(), options).clicked();
+                });
+                output.drop_without_applying_deltas();
+                assert_eq!(
+                    clicked, expected,
+                    "{key:?}, activate_on_space: {activate_on_space}"
+                );
+            }
+        }
+    }
+
+    /// A press goes to the widget under the press,
+    /// even when the pointer moves on to another widget in the same frame.
+    #[test]
+    fn test_press_goes_to_widget_under_press() {
+        use crate::{Event, Id, PointerButton, RawInput, Rect, Sense, pos2, vec2};
+
+        let ctx = Context::default();
+        ctx.set_fonts(FontDefinitions::empty());
+        let small = Rect::from_min_size(pos2(0.0, 0.0), vec2(20.0, 20.0));
+        let large = Rect::from_min_size(pos2(40.0, 40.0), vec2(200.0, 200.0));
+        let (a, b) = (small.center(), large.center());
+        let (small_id, large_id) = (Id::unique("small"), Id::unique("large"));
+
+        // The first pass registers the widgets, the second presses on `a` and moves to `b`,
+        // the third moves on.
+        for (pass, events) in [
+            vec![Event::PointerMoved(a)],
+            vec![
+                Event::PointerMoved(a),
+                Event::PointerButton {
+                    pos: a,
+                    button: PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Default::default(),
+                },
+                Event::PointerMoved(b),
+            ],
+            vec![Event::PointerMoved(b + vec2(10.0, 0.0))],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let input = RawInput {
+                events,
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| {
+                let small = ui.interact(small, small_id, Sense::click_and_drag());
+                let large = ui.interact(large, large_id, Sense::click_and_drag());
+                if pass == 0 {
+                    return;
+                }
+                assert!(small.is_pointer_button_down_on(), "pass {pass}");
+                assert!(!large.is_pointer_button_down_on(), "pass {pass}");
+                assert_eq!(small.drag_started(), pass == 1, "pass {pass}");
+                assert!(small.dragged(), "pass {pass}");
+                assert!(!large.drag_started() && !large.dragged(), "pass {pass}");
+            });
+            output.drop_without_applying_deltas();
+        }
+    }
+
+    /// A primary press outside a popup that swallows outside presses reaches no widget,
+    /// and neither does its release, unless it is in an allowed rect.
+    /// By default, and for other buttons, the widget under the press gets it.
+    #[test]
+    fn test_popup_swallows_outside_press() {
+        use crate::{
+            Event, Id, LayerId, Order, PointerButton, Popup, PopupAnchor, RawInput, Rect, Sense,
+            pos2, vec2,
+        };
+
+        // (swallow, button, allow the background's rect)
+        let cases = [
+            (false, PointerButton::Primary, false),
+            (true, PointerButton::Primary, false),
+            (true, PointerButton::Primary, true),
+            (true, PointerButton::Secondary, false),
+        ];
+        for (swallow, pointer_button, allow) in cases {
+            let reaches = !swallow || allow || pointer_button != PointerButton::Primary;
+            let button = |pressed| Event::PointerButton {
+                pos: pos2(10.0, 10.0),
+                button: pointer_button,
+                pressed,
+                modifiers: Default::default(),
+            };
+
+            let ctx = Context::default();
+            ctx.set_fonts(FontDefinitions::empty());
+            let background = Rect::from_min_size(pos2(0.0, 0.0), vec2(100.0, 100.0));
+            let background_id = Id::unique("background");
+            let popup_id = Id::unique("popup");
+
+            // Hover, press outside the popup, release.
+            let passes = [
+                vec![Event::PointerMoved(pos2(10.0, 10.0))],
+                vec![Event::PointerMoved(pos2(10.0, 10.0))],
+                vec![button(true)],
+                vec![button(false)],
+            ];
+            for (pass, events) in passes.into_iter().enumerate() {
+                let input = RawInput {
+                    events,
+                    ..Default::default()
+                };
+                let output = ctx.run_ui(input, |ui| {
+                    let response = ui.interact(background, background_id, Sense::click_and_drag());
+                    Popup::new(
+                        popup_id,
+                        ui.ctx().clone(),
+                        PopupAnchor::Position(pos2(200.0, 200.0)),
+                        LayerId::new(Order::Foreground, popup_id),
+                    )
+                    .open(true)
+                    .swallow_outside_press(swallow)
+                    .show(|ui| ui.label("popup"));
+                    if allow {
+                        ui.ctx().memory_mut(|mem| mem.allow_presses_in(background));
+                    }
+
+                    match pass {
+                        2 => assert_eq!(response.is_pointer_button_down_on(), reaches),
+                        3 => assert_eq!(response.clicked_by(pointer_button), reaches),
+                        _ => {}
+                    }
+                });
+                output.drop_without_applying_deltas();
+            }
+        }
     }
 
     /// Changing the font providers mid-pass must not drop the [`crate::text::Fonts`]

@@ -794,9 +794,14 @@ impl Response {
         })
     }
 
-    /// Use the tooltip text as the accessible description of the widget,
+    /// Use `text` as the accessible description of the widget (unless it has one),
     /// and as its name if it has none (e.g. an icon-only button).
-    fn describe_for_accessibility(&self, text: &str) {
+    ///
+    /// This is what [`Self::on_hover_text`] sets. Call it from a tooltip with other contents
+    /// to give the widget the same AccessKit description and name.
+    /// It does nothing for a widget without an AccessKit node, and leaves the name of a
+    /// `Label` or of a widget named by `labelled_by` alone.
+    pub fn describe_for_accessibility(&self, text: &str) {
         // Only widgets that already have a node; don't invent nodes for hover-only rects.
         if self.ctx.has_accesskit_node(self.id) {
             self.ctx.accesskit_node_builder(self.id, |node| {
