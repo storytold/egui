@@ -29,6 +29,7 @@ pub struct PassRecords {
     pub(crate) shapes: Vec<(LayerId, Vec<ClippedShape>)>,
     pub(crate) widgets: Vec<WidgetRect>,
     pub(crate) nodes: Vec<(Id, accesskit::Node)>,
+
     /// The AccessKit parent of each widget and node that has one.
     pub(crate) parents: Vec<(Id, Id)>,
 }
@@ -36,10 +37,10 @@ pub struct PassRecords {
 impl PassRecords {
     /// The layers the part painted on or placed widgets on.
     pub fn layers(&self) -> impl Iterator<Item = LayerId> + '_ {
-        self.shapes
-            .iter()
-            .map(|(layer, _)| *layer)
-            .chain(self.widgets.iter().map(|widget| widget.layer_id))
+        core::iter::chain(
+            self.shapes.iter().map(|(layer, _)| *layer),
+            self.widgets.iter().map(|widget| widget.layer_id),
+        )
     }
 
     /// The widget rects, in the order they were added.

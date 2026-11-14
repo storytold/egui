@@ -4447,11 +4447,10 @@ impl Context {
                         nodes.push((*id, node.clone()));
                     }
                 }
-                for id in widgets
-                    .iter()
-                    .map(|widget| widget.id)
-                    .chain(nodes.iter().map(|(id, _)| *id))
-                {
+                for id in core::iter::chain(
+                    widgets.iter().map(|widget| widget.id),
+                    nodes.iter().map(|(id, _)| *id),
+                ) {
                     if let Some(parent) = state.parent_map.get(&id) {
                         parents.push((id, *parent));
                     }
