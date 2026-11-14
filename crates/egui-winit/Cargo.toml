@@ -137,7 +137,10 @@ arboard = { workspace = true, optional = true, features = ["image-data"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 # The opt-in native clipboard probe maps a real private-compositor window without a GPU.
-softbuffer = { version = "0.4.8", default-features = false, features = ["wayland", "wayland-dlopen"] }
+softbuffer = { version = "0.4.8", default-features = false, features = [
+  "wayland",
+  "wayland-dlopen",
+] }
 
 [[example]]
 name = "clipboard_image_probe"

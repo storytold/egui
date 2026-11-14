@@ -116,7 +116,7 @@ fn discarded_pass_retains_request_only_for_same_final_context() {
                     Id::unique("replacement")
                 },
                 3,
-            ))
+            ));
         });
     });
     output.textures_delta.clear();

@@ -159,4 +159,5 @@ extend-exclude = ["web_demo/egui_demo_app.js"] # auto-generated
 [default]
 extend-ignore-re = [
   "#\\[doc\\(alias = .*", # We suggest "grey" in some doc
+  '^\s*\("[^"]*", (true|false), \d+, "[^"]*"\),$', # line-break cases in epaint text_layout tests: `|` marks a break inside a word
 ]

@@ -553,9 +553,13 @@ mod ime_reset_browser_tests {
     )]
     extern "C" {
         fn egui_probe_hidden(mode: i32);
+
         fn egui_probe_open_shadow(host: &web_sys::Element) -> web_sys::ShadowRoot;
+
         fn egui_probe_focus_body();
+
         fn egui_probe_key(kind: &str, key: &str, code: &str) -> web_sys::KeyboardEvent;
+
         fn egui_probe_shortcut(
             kind: &str,
             key: &str,
@@ -569,14 +573,18 @@ mod ime_reset_browser_tests {
         paints: Cell<usize>,
         destroys: Cell<usize>,
     }
+
     struct NoopPainter(web_sys::HtmlCanvasElement, Rc<PaintLifecycle>);
+
     impl WebPainter for NoopPainter {
         fn canvas(&self) -> &web_sys::HtmlCanvasElement {
             &self.0
         }
+
         fn max_texture_side(&self) -> usize {
             4096
         }
+
         fn paint_and_update_textures(
             &mut self,
             _: [f32; 4],
@@ -591,6 +599,7 @@ mod ime_reset_browser_tests {
             textures_delta.clear();
             Ok(())
         }
+
         fn destroy(&mut self) {
             self.1.destroys.set(self.1.destroys.get() + 1);
         }
@@ -604,11 +613,14 @@ mod ime_reset_browser_tests {
         ui_calls: usize,
         batches: Vec<Vec<egui::Event>>,
     }
+
     struct ProbeApp(Rc<RefCell<Model>>);
+
     impl epi::App for ProbeApp {
         fn raw_input_hook(&mut self, _: &egui::Context, raw: &mut egui::RawInput) {
             self.0.borrow_mut().batches.push(raw.events.clone());
         }
+
         fn logic(&mut self, ctx: &egui::Context, _: &mut epi::Frame) {
             let mut model = self.0.borrow_mut();
             model.logic_calls += 1;
@@ -620,9 +632,11 @@ mod ime_reset_browser_tests {
             }
             ctx.output_mut(|out| out.ime = model.ime.clone());
         }
+
         fn ui(&mut self, _: &mut egui::Ui, _: &mut epi::Frame) {
             self.0.borrow_mut().ui_calls += 1;
         }
+
         fn persist_egui_memory(&self) -> bool {
             false
         }
@@ -634,6 +648,7 @@ mod ime_reset_browser_tests {
         model: Rc<RefCell<Model>>,
         paint_lifecycle: Rc<PaintLifecycle>,
     }
+
     impl Fixture {
         fn new() -> Self {
             let body = web_sys::window()
@@ -644,6 +659,7 @@ mod ime_reset_browser_tests {
                 .unwrap();
             Self::new_in_parent(body.unchecked_ref())
         }
+
         fn new_in_parent(parent: &web_sys::Node) -> Self {
             egui_probe_hidden(0);
             let document = web_sys::window().unwrap().document().unwrap();
@@ -715,9 +731,11 @@ mod ime_reset_browser_tests {
                 paint_lifecycle,
             }
         }
+
         fn input(&self) -> web_sys::HtmlInputElement {
             self.runner.try_lock().unwrap().text_agent.test_input()
         }
+
         fn visibility(hidden: bool) {
             egui_probe_hidden(i32::from(hidden));
             web_sys::window()
@@ -727,10 +745,12 @@ mod ime_reset_browser_tests {
                 .dispatch_event(&web_sys::Event::new("visibilitychange").unwrap())
                 .unwrap();
         }
+
         fn reset(&self) {
             self.model.borrow_mut().request = true;
             self.runner.try_lock().unwrap().logic();
         }
+
         fn completions(&self) -> usize {
             self.runner
                 .try_lock()
@@ -743,6 +763,7 @@ mod ime_reset_browser_tests {
                 .count()
         }
     }
+
     impl Drop for Fixture {
         fn drop(&mut self) {
             if let Some(mut runner) = self.runner.try_lock() {

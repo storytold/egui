@@ -17,6 +17,7 @@ use egui::OutputCommand;
 pub(crate) enum RegularClipboardKind {
     /// `OutputCommand::CopyText`.
     Text,
+
     /// `OutputCommand::CopyImage`.
     Image,
 }
@@ -26,6 +27,7 @@ pub(crate) enum RegularClipboardKind {
 pub(crate) struct SelectedRegular {
     /// Index in [`egui::PlatformOutput::commands`].
     pub index: usize,
+
     /// Payload family of the command at [`Self::index`].
     pub kind: RegularClipboardKind,
 }

@@ -111,6 +111,7 @@ impl SurroundingText {
         }
     }
 
+    #[inline]
     fn with_cause(mut self, cause: ImeChangeCause) -> Self {
         self.cause = cause;
         self
@@ -146,6 +147,7 @@ struct ContextKey {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct BackendContext {
     key: ContextKey,
+
     /// `None` means the context is known to the backend but has no surrounding text.
     published: Option<SurroundingText>,
 }
@@ -688,6 +690,7 @@ mod tests {
         calls: Vec<Call>,
         causes: Vec<ImeChangeCause>,
         supported: bool,
+
         /// Models winit's `ime_allowed` plus its cached surrounding-text snapshot.
         allowed: bool,
         published: Option<(String, usize, usize)>,

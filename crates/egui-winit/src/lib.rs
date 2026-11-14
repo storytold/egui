@@ -394,6 +394,7 @@ enum OutputClaimOrigins {
     /// No winit Wayland transport is available for this output.
     #[default]
     NotWayland,
+
     /// One captured-or-fallback origin per selected clipboard family.
     #[cfg(all(
         feature = "clipboard",
@@ -415,6 +416,7 @@ enum OutputClaimOrigin {
     /// No winit Wayland transport is available for this output.
     #[default]
     NotWayland,
+
     /// The exact token or permitted fallback to use for this family.
     #[cfg(all(
         feature = "clipboard",
@@ -428,6 +430,7 @@ enum OutputClaimOrigin {
         ),
     ))]
     Ready(winit::platform::wayland::InputOriginToken),
+
     /// The family must fail explicitly without consulting another origin.
     #[cfg(all(
         feature = "clipboard",
@@ -2544,7 +2547,7 @@ impl State {
             // (I can't find a documentation page dedicated to this value.)
             //
             // Keep this defensive code while any supported `winit` build can
-            // still emit IME-processed presses. If a pin drops that behaviour
+            // still emit IME-processed presses. If a pin drops that behavior
             // entirely, `pressed_processed_physical_keys` and this method can
             // be removed.
             //

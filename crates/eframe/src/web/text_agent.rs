@@ -21,22 +21,9 @@ pub(super) struct TextAgentContext {
     pub listeners: Rc<RefCell<TextAgentListeners>>,
 }
 
-// A JS dispatch snapshot may retain a callback even after successful removeEventListener.
-// Gate before entering the wasm Closure, so a captured retired wrapper remains a safe no-op
-// after Rust releases the Closure. Static module code requires no unsafe-eval/CSP exception.
-#[wasm_bindgen(
-    inline_js = "export function egui_text_agent_session() { return { active: false }; }\nexport function egui_text_agent_activate(session, active) { session.active = active; }\nexport function egui_text_agent_listener(session, callback) { return event => { if (session.active) callback(event); }; }"
-)]
-extern "C" {
-    fn egui_text_agent_session() -> JsValue;
-    fn egui_text_agent_activate(session: &JsValue, active: bool);
-    fn egui_text_agent_listener(session: &JsValue, callback: &js_sys::Function)
-    -> js_sys::Function;
-}
-
 struct Session {
     active: Cell<bool>,
-    gate: JsValue,
+
     /// Only keys actually forwarded by this agent; do not reset unrelated keyboard state.
     forwarded_keys: RefCell<Vec<ForwardedKey>>,
 }
@@ -50,7 +37,6 @@ impl Default for Session {
     fn default() -> Self {
         Self {
             active: Cell::new(false),
-            gate: egui_text_agent_session(),
             forwarded_keys: Default::default(),
         }
     }
@@ -59,14 +45,17 @@ impl Default for Session {
 impl Session {
     fn set_active(&self, active: bool) {
         self.active.set(active);
-        egui_text_agent_activate(&self.gate, active);
     }
 }
 
 struct Listener {
     target: web_sys::EventTarget,
     name: &'static str,
+
+    /// The function registered with the DOM. It stays callable for the page's lifetime and
+    /// forwards to `_closure` only while `forward` is set.
     callback: js_sys::Function,
+    forward: Rc<RefCell<Option<js_sys::Function>>>,
     _closure: Closure<dyn FnMut(web_sys::Event)>,
     capture: bool,
 }
@@ -78,7 +67,6 @@ impl Listener {
         session: Weak<Session>,
         mut callback: impl FnMut(E) + 'static,
     ) -> Self {
-        let callback_session = Weak::clone(&session);
         let closure = Closure::wrap(Box::new(move |event: web_sys::Event| {
             let Some(session) = session.upgrade() else {
                 return;
@@ -88,17 +76,31 @@ impl Listener {
                 callback(event.unchecked_into::<E>());
             }
         }) as Box<dyn FnMut(web_sys::Event)>);
-        let callback = if let Some(session) = callback_session.upgrade() {
-            egui_text_agent_listener(&session.gate, closure.as_ref().unchecked_ref())
-        } else {
-            // Construction always owns its session. A retired/missing session is never active.
-            let gate = egui_text_agent_session();
-            egui_text_agent_listener(&gate, closure.as_ref().unchecked_ref())
+
+        // A JS dispatch snapshot may retain the registered function even after a successful
+        // removeEventListener, and invoking a dropped wasm closure throws. The registered function
+        // is therefore a small forwarder that is never freed; dropping the `Listener` clears
+        // `forward`, which turns a retained forwarder into a no-op.
+        let forward = Rc::new(RefCell::new(Some(
+            closure.as_ref().unchecked_ref::<js_sys::Function>().clone(),
+        )));
+        let forwarder = {
+            let forward = Rc::clone(&forward);
+            Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+                let target = forward.borrow().clone();
+                if let Some(target) = target {
+                    target.call1(&JsValue::NULL, &event).ok();
+                }
+            })
         };
+        let callback = forwarder
+            .into_js_value()
+            .unchecked_into::<js_sys::Function>();
         Self {
             target: target.clone(),
             name,
             callback,
+            forward,
             _closure: closure,
             capture: false,
         }
@@ -118,6 +120,12 @@ impl Listener {
             &self.callback,
             self.capture,
         )
+    }
+}
+
+impl Drop for Listener {
+    fn drop(&mut self) {
+        self.forward.borrow_mut().take();
     }
 }
 
@@ -370,7 +378,7 @@ impl TextAgentListeners {
 impl Drop for TextAgentListeners {
     fn drop(&mut self) {
         // Failed handles were retained while alive. Even if final JS removal fails, the
-        // private gate is now permanently closed before Rust releases their callback captures.
+        // forwarder is now permanently closed before Rust releases their callback captures.
         self.shutdown();
     }
 }
@@ -381,6 +389,7 @@ pub struct TextAgent {
     session: Rc<Session>,
     context: TextAgentContext,
     focus: Rc<FocusState>,
+
     /// The `lang` attribute of `input`.
     lang: RefCell<Option<String>>,
 }
@@ -1124,7 +1133,9 @@ mod browser_tests {
     )]
     extern "C" {
         fn egui_probe_input(kind: &str, composing: bool) -> web_sys::InputEvent;
+
         fn egui_probe_remove_failure(input: &web_sys::EventTarget, name: Option<&str>);
+
         fn egui_probe_add_failure(n: u32);
     }
 

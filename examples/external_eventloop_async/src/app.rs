@@ -32,7 +32,11 @@ pub fn run() -> io::Result<()> {
 
     let local = LocalSet::new();
     local.block_on(&rt, async {
-        let eventloop_fd = tokio::io::unix::AsyncFd::new(eventloop.as_raw_fd())?;
+        // SAFETY: the fd belongs to `eventloop`, which stays alive and keeps the same fd until
+        // `block_on` returns, i.e. for the whole lifetime of `eventloop_fd`.
+        #[expect(unsafe_code)]
+        let eventloop_fd = unsafe { tokio::io::unix::AsyncFd::register(eventloop.as_raw_fd()) }
+            .map_err(std::io::Error::from)?;
         let mut control_flow = ControlFlow::Poll;
 
         loop {
