@@ -7,8 +7,8 @@ use ahash::{HashMap, HashSet};
 use epaint::emath::TSTransform;
 
 use crate::{
-    EventFilter, Id, IdMap, LayerId, Order, Pos2, Rangef, RawInput, Rect, Style, Vec2, ViewportId,
-    ViewportIdMap, ViewportIdSet, area, vec2,
+    EventFilter, Id, IdMap, LayerId, Order, PointerButton, Pos2, Rangef, RawInput, Rect, Style,
+    SurrenderFocusOn, Vec2, ViewportId, ViewportIdMap, ViewportIdSet, area, vec2,
 };
 
 mod theme;
@@ -118,6 +118,24 @@ pub struct Memory {
     #[cfg_attr(feature = "persistence", serde(skip))]
     popups: ViewportIdMap<OpenPopup>,
 
+    /// Layers that swallow a press outside them, from the previous pass.
+    /// See [`Self::swallow_presses_outside`].
+    #[cfg_attr(feature = "persistence", serde(skip))]
+    press_swallowing_layers: ViewportIdMap<Vec<LayerId>>,
+
+    /// Layers that swallow a press outside them, registered in the current pass.
+    #[cfg_attr(feature = "persistence", serde(skip))]
+    press_swallowing_layers_current_pass: ViewportIdMap<Vec<LayerId>>,
+
+    /// Rectangles where presses are not swallowed, from the previous pass.
+    /// See [`Self::allow_presses_in`].
+    #[cfg_attr(feature = "persistence", serde(skip))]
+    press_allowed_rects: ViewportIdMap<Vec<Rect>>,
+
+    /// Rectangles where presses are not swallowed, registered in the current pass.
+    #[cfg_attr(feature = "persistence", serde(skip))]
+    press_allowed_rects_current_pass: ViewportIdMap<Vec<Rect>>,
+
     /// Whether to inform the backend to interrupt any ongoing IME composition
     /// this pass.
     #[cfg_attr(feature = "persistence", serde(skip))]
@@ -143,6 +161,10 @@ impl Default for Memory {
             popups: Default::default(),
             everything_is_visible: Default::default(),
             add_fonts: Default::default(),
+            press_swallowing_layers: Default::default(),
+            press_swallowing_layers_current_pass: Default::default(),
+            press_allowed_rects: Default::default(),
+            press_allowed_rects_current_pass: Default::default(),
             requested_interrupt_ime: Default::default(),
             requested_ime_resets: Default::default(),
         };
@@ -560,6 +582,10 @@ pub(crate) struct Focus {
 struct FocusWidget {
     pub id: Id,
     pub filter: EventFilter,
+
+    /// The widget's own rule for a press or click elsewhere, in place of
+    /// [`crate::InputOptions::surrender_focus_on`]; set with [`Memory::set_focus_surrender`].
+    pub surrender: Option<SurrenderFocusOn>,
 }
 
 impl FocusWidget {
@@ -567,6 +593,7 @@ impl FocusWidget {
         Self {
             id,
             filter: Default::default(),
+            surrender: None,
         }
     }
 }
@@ -807,6 +834,18 @@ impl Memory {
 
         self.viewport_id = new_raw_input.viewport_id;
 
+        let current = self
+            .press_swallowing_layers_current_pass
+            .remove(&self.viewport_id)
+            .unwrap_or_default();
+        self.press_swallowing_layers
+            .insert(self.viewport_id, current);
+        let current = self
+            .press_allowed_rects_current_pass
+            .remove(&self.viewport_id)
+            .unwrap_or_default();
+        self.press_allowed_rects.insert(self.viewport_id, current);
+
         // Cleanup
         self.interactions.retain(|id, _| viewports.contains(id));
         self.areas.retain(|id, _| viewports.contains(id));
@@ -949,6 +988,45 @@ impl Memory {
         self.focus_mut().focused_widget = Some(FocusWidget::new(id));
     }
 
+    /// Give keyboard focus to a specific widget, with the event filter it keeps while focused.
+    ///
+    /// Like [`Self::request_focus`] followed by [`Self::set_focus_lock_filter`], except that
+    /// the filter applies from the next pass on: `set_focus_lock_filter` only takes effect
+    /// once the widget has had focus for a pass, so e.g. an arrow key pressed in the pass after
+    /// the request would still move focus away.
+    pub fn request_focus_with_filter(&mut self, id: Id, event_filter: EventFilter) {
+        if self.focused() != Some(id) {
+            self.interrupt_ime();
+        }
+        self.focus_mut().focused_widget = Some(FocusWidget {
+            id,
+            filter: event_filter,
+            surrender: None,
+        });
+    }
+
+    /// Set the rule by which the focused widget `id` surrenders focus when the user presses or
+    /// clicks somewhere else, in place of [`crate::InputOptions::surrender_focus_on`].
+    ///
+    /// Takes effect at once and lasts while `id` keeps focus: any focus change, a request
+    /// for `id` itself included, goes back to the option. Does nothing if `id` has no focus.
+    pub fn set_focus_surrender(&mut self, id: Id, surrender: SurrenderFocusOn) {
+        if let Some(focused) = &mut self.focus_mut().focused_widget
+            && focused.id == id
+        {
+            focused.surrender = Some(surrender);
+        }
+    }
+
+    /// The rule by which the focused widget surrenders focus on a press or click elsewhere: its
+    /// own ([`Self::set_focus_surrender`]), or [`crate::InputOptions::surrender_focus_on`].
+    pub(crate) fn focus_surrender(&self) -> SurrenderFocusOn {
+        self.focus()
+            .and_then(|focus| focus.focused_widget)
+            .and_then(|focused| focused.surrender)
+            .unwrap_or(self.options.input_options.surrender_focus_on)
+    }
+
     /// Defer focus until the next pass so an already rendered widget sees `gained_focus`.
     pub(crate) fn request_focus_next_frame(&mut self, id: Id) {
         if self.focused() != Some(id) {
@@ -1062,6 +1140,61 @@ impl Memory {
         for area in self.areas.values_mut() {
             *area = Default::default();
         }
+    }
+
+    /// While this layer is shown every pass, a primary-button pointer press outside it (and outside every other layer
+    /// that called this) reaches no widget, and neither does the release that ends it:
+    /// no widget is hovered-and-pressed, dragged or clicked by it.
+    ///
+    /// This is for popups that close on the press itself, where the press should do nothing else.
+    /// The layer's area rectangle from the previous pass decides what is outside.
+    /// Presses inside the layer are unaffected, and so is the hover state.
+    /// Presses with other buttons are never swallowed, so a secondary press can still
+    /// reach the widget that opened a context menu. See also [`Self::allow_presses_in`].
+    ///
+    /// Call it every pass the layer is shown. The effect starts in the next pass
+    /// and ends in the first pass after the layer stops calling it.
+    pub fn swallow_presses_outside(&mut self, layer_id: LayerId) {
+        let layers = self
+            .press_swallowing_layers_current_pass
+            .entry(self.viewport_id)
+            .or_default();
+        if !layers.contains(&layer_id) {
+            layers.push(layer_id);
+        }
+    }
+
+    /// Let primary-button presses in this rectangle through, even while a layer that called
+    /// [`Self::swallow_presses_outside`] is shown, e.g. the widget that opened a popup.
+    ///
+    /// Call it every pass; the rectangle is in global coordinates and takes effect in the next pass.
+    pub fn allow_presses_in(&mut self, rect: Rect) {
+        self.press_allowed_rects_current_pass
+            .entry(self.viewport_id)
+            .or_default()
+            .push(rect);
+    }
+
+    /// Is a press with this button at this position swallowed by [`Self::swallow_presses_outside`]?
+    pub(crate) fn press_is_swallowed(&self, pos: Pos2, button: PointerButton) -> bool {
+        if button != PointerButton::Primary {
+            return false;
+        }
+        if self
+            .press_allowed_rects
+            .get(&self.viewport_id)
+            .is_some_and(|rects| rects.iter().any(|rect| rect.contains(pos)))
+        {
+            return false;
+        }
+        let Some(layers) = self.press_swallowing_layers.get(&self.viewport_id) else {
+            return false;
+        };
+        !layers.is_empty()
+            && !layers.iter().any(|layer_id| {
+                self.area_rect(layer_id.id)
+                    .is_some_and(|rect| rect.contains(pos))
+            })
     }
 
     /// Obtain the previous rectangle of an area.
@@ -1258,6 +1391,9 @@ pub struct Areas {
     ///
     /// The parent sublayer is moved directly above the child sublayers in the ordering.
     sublayers: ahash::HashMap<LayerId, HashSet<LayerId>>,
+
+    /// Layers ordered by the caller for this pass, bottom first. See [`Self::set_layer_order`].
+    layer_order: Vec<LayerId>,
 }
 
 impl Areas {
@@ -1380,10 +1516,10 @@ impl Areas {
     /// Mark the `child` layer as a sublayer of `parent`.
     ///
     /// Sublayers are moved directly above the parent layer at the end of the frame. This is mainly
-    /// intended for adding a new [Area](crate::Area) inside a [Window](crate::Window).
+    /// intended for adding a new [Area](crate::Area) inside a [Window](crate::Window), and a
+    /// [`crate::Popup`] makes its area a sublayer of the layer it opened from.
     ///
-    /// This currently only supports one level of nesting. If `parent` is a sublayer of another
-    /// layer, the behavior is unspecified.
+    /// Sublayers nest: a layer ends followed by its whole sublayer tree, depth first.
     ///
     /// The two layers must have the same [`LayerId::order`].
     pub fn set_sublayer(&mut self, parent: LayerId, child: LayerId) {
@@ -1402,6 +1538,22 @@ impl Areas {
         if !self.order.contains(&child) {
             self.order.push(child);
         }
+    }
+
+    /// Put the given layers above every other layer of the same [`Order`], bottom first.
+    ///
+    /// Applied at the end of the pass, after egui's own ordering (including
+    /// [`Self::move_to_top`] and [`Self::set_sublayer`]), so those only reorder the layers
+    /// that are not in the list. The unlisted sublayers of a listed layer, nested ones included,
+    /// move with it and sit directly above it; a listed sublayer takes its own list place, with
+    /// its own unlisted sublayers. Layers keep their [`Order`]: a listed `Middle` layer stays
+    /// below every `Foreground` layer. Unlisted layers keep their relative order, and ids
+    /// that are not known layers are ignored.
+    ///
+    /// The list is consumed by the end of the pass. Call it every pass.
+    pub fn set_layer_order(&mut self, layers: &[LayerId]) {
+        self.layer_order.clear();
+        self.layer_order.extend_from_slice(layers);
     }
 
     pub fn top_layer_id(&self, order: Order) -> Option<LayerId> {
@@ -1438,6 +1590,7 @@ impl Areas {
             order,
             wants_to_be_on_top,
             sublayers,
+            layer_order,
             ..
         } = self;
 
@@ -1447,24 +1600,54 @@ impl Areas {
         order.sort_by_key(|layer| (layer.order, wants_to_be_on_top.contains(layer)));
         wants_to_be_on_top.clear();
 
-        // For all layers with sublayers, put the sublayers directly after the parent layer:
-        // (it doesn't matter in which order we replace parents with their children)
-        #[expect(clippy::iter_over_hash_type)]
-        for (parent, children) in core::mem::take(sublayers) {
-            let mut moved_layers = vec![parent]; // parent first…
+        // Each layer is followed by its whole sublayer tree, depth first, siblings in the order
+        // sorted above.
+        let sublayers = core::mem::take(sublayers);
+        let sorted = core::mem::take(order);
+        let shown: ahash::HashSet<LayerId> = sorted.iter().copied().collect();
+        let has_parent = |layer: &LayerId| {
+            sublayers
+                .iter()
+                .any(|(parent, children)| children.contains(layer) && shown.contains(parent))
+        };
+        let mut placed: ahash::HashSet<LayerId> = Default::default();
+        for &layer in &sorted {
+            if !has_parent(&layer) {
+                push_tree(layer, &sorted, &sublayers, &[], &mut placed, order);
+            }
+        }
+        if placed.len() < sorted.len() {
+            // A cycle of sublayers has no root: its members end last, each still in its `Order`.
+            for &layer in &sorted {
+                push_tree(layer, &sorted, &sublayers, &[], &mut placed, order);
+            }
+            order.sort_by_key(|layer| layer.order);
+        }
 
-            order.retain(|l| {
-                if children.contains(l) {
-                    moved_layers.push(*l); // …followed by children
-                    false
-                } else {
-                    true
-                }
-            });
-            let Some(parent_pos) = order.iter().position(|l| l == &parent) else {
-                continue;
-            };
-            order.splice(parent_pos..=parent_pos, moved_layers); // replace the parent with itself and its children
+        // Move the listed layers to the end, in list order, each followed by its unlisted
+        // sublayer tree (a listed sublayer carries its own tree at its list place); the stable
+        // sort then puts them above the unlisted layers of their own `Order`.
+        let mut listed: Vec<LayerId> = Vec::new();
+        for layer in core::mem::take(layer_order) {
+            if order.contains(&layer) && !listed.contains(&layer) {
+                listed.push(layer);
+            }
+        }
+        if !listed.is_empty() {
+            let mut moved = Vec::new();
+            for &parent in &listed {
+                push_tree(
+                    parent,
+                    order,
+                    &sublayers,
+                    &listed,
+                    &mut Default::default(),
+                    &mut moved,
+                );
+            }
+            order.retain(|layer| !moved.contains(layer));
+            order.extend(moved);
+            order.sort_by_key(|layer| layer.order);
         }
 
         self.order_map = self
@@ -1473,6 +1656,30 @@ impl Areas {
             .enumerate()
             .map(|(i, id)| (*id, i))
             .collect();
+    }
+}
+
+/// Pushes `layer` and its sublayer tree onto `out`, depth first, siblings in their `sorted` order.
+/// The tree leaves out the sublayers in `stop` and their own trees.
+fn push_tree(
+    layer: LayerId,
+    sorted: &[LayerId],
+    sublayers: &ahash::HashMap<LayerId, HashSet<LayerId>>,
+    stop: &[LayerId],
+    placed: &mut ahash::HashSet<LayerId>,
+    out: &mut Vec<LayerId>,
+) {
+    if !placed.insert(layer) {
+        return;
+    }
+    out.push(layer);
+    if let Some(children) = sublayers.get(&layer) {
+        for &child in sorted
+            .iter()
+            .filter(|l| children.contains(*l) && !stop.contains(*l))
+        {
+            push_tree(child, sorted, sublayers, stop, placed, out);
+        }
     }
 }
 
@@ -1531,6 +1738,38 @@ fn lost_focus_fires_after_mid_frame_focus_transfer() {
             "A's lost_focus must stop firing once the two-frame window passes",
         );
     }
+}
+
+#[test]
+fn request_focus_with_filter_applies_the_filter_from_the_next_pass() {
+    use crate::data::input::RawInput;
+    let id = Id::unique("A");
+    let arrow_right = RawInput {
+        events: vec![crate::Event::Key {
+            key: crate::Key::ArrowRight,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Default::default(),
+        }],
+        ..Default::default()
+    };
+    let arrows = EventFilter {
+        horizontal_arrows: true,
+        ..Default::default()
+    };
+
+    let mut memory = Memory::default();
+    memory.request_focus(id);
+    memory.set_focus_lock_filter(id, arrows); // Too early: `id` had no focus last pass.
+    memory.focus_mut().begin_pass(&arrow_right);
+    assert_eq!(memory.focus_direction(), FocusDirection::Right);
+
+    let mut memory = Memory::default();
+    memory.request_focus_with_filter(id, arrows);
+    memory.focus_mut().begin_pass(&arrow_right);
+    assert_eq!(memory.focus_direction(), FocusDirection::None);
+    assert!(memory.has_focus(id));
 }
 
 #[test]
@@ -1634,4 +1873,200 @@ fn requested_ime_resets_are_isolated_per_viewport_and_do_not_replace_stock_inter
     assert_eq!(memory.take_ime_reset(root), Some(newer));
     assert_eq!(memory.take_ime_reset(root), None);
     assert_eq!(memory.take_ime_reset(other), None);
+}
+
+#[cfg(test)]
+mod layer_order_tests {
+    use super::*;
+
+    fn layer(order: Order, name: &str) -> LayerId {
+        LayerId::new(order, Id::unique(name))
+    }
+
+    fn areas_with(layers: &[LayerId]) -> Areas {
+        let mut areas = Areas::default();
+        for &l in layers {
+            areas.set_state(l, area::AreaState::default());
+        }
+        areas.end_pass();
+        areas
+    }
+
+    #[test]
+    fn listed_layers_end_above_unlisted_in_list_order() {
+        let [a, b, c, u1, u2, bg] = [
+            layer(Order::Foreground, "a"),
+            layer(Order::Foreground, "b"),
+            layer(Order::Foreground, "c"),
+            layer(Order::Foreground, "u1"),
+            layer(Order::Foreground, "u2"),
+            layer(Order::Background, "bg"),
+        ];
+        let unknown = layer(Order::Foreground, "unknown");
+        let mut areas = areas_with(&[a, u1, b, u2, c, bg]);
+        areas.set_layer_order(&[c, unknown, b, a, b]);
+        areas.end_pass();
+        assert_eq!(areas.order(), [bg, u1, u2, c, b, a]);
+        assert_eq!(areas.compare_order(a, u2), core::cmp::Ordering::Greater);
+
+        // The list is consumed: the next pass keeps the order.
+        areas.end_pass();
+        assert_eq!(areas.order(), [bg, u1, u2, c, b, a]);
+    }
+
+    #[test]
+    fn unlisted_sublayer_follows_its_listed_parent() {
+        let [parent, child, other, u1, u2] = [
+            layer(Order::Foreground, "parent"),
+            layer(Order::Foreground, "child"),
+            layer(Order::Foreground, "other"),
+            layer(Order::Foreground, "u1"),
+            layer(Order::Foreground, "u2"),
+        ];
+        let mut areas = areas_with(&[u1, parent, u2, other, child]);
+        areas.set_sublayer(parent, child);
+        areas.set_layer_order(&[parent, other]);
+        areas.end_pass();
+        assert_eq!(areas.order(), [u1, u2, parent, child, other]);
+    }
+
+    #[test]
+    fn nested_sublayers_follow_their_listed_root() {
+        let [root, child, grandchild, unlisted, other] = [
+            layer(Order::Foreground, "root"),
+            layer(Order::Foreground, "child"),
+            layer(Order::Foreground, "grandchild"),
+            layer(Order::Foreground, "unlisted"),
+            layer(Order::Foreground, "other"),
+        ];
+        let mut areas = areas_with(&[root, unlisted, grandchild, other, child]);
+        areas.set_sublayer(child, grandchild);
+        areas.set_sublayer(root, child);
+        areas.set_layer_order(&[root, other]);
+        areas.end_pass();
+        assert_eq!(areas.order(), [unlisted, root, child, grandchild, other]);
+
+        // A listed sublayer carries its own unlisted tree, once, at its list place.
+        let mut areas = areas_with(&[root, unlisted, grandchild, child]);
+        areas.set_sublayer(child, grandchild);
+        areas.set_sublayer(root, child);
+        areas.set_layer_order(&[root, child]);
+        areas.end_pass();
+        assert_eq!(areas.order(), [unlisted, root, child, grandchild]);
+    }
+
+    #[test]
+    fn a_popup_stays_above_the_layer_it_opened_from() {
+        let ctx = crate::Context::default();
+        let [a, b] = [layer(Order::Foreground, "a"), layer(Order::Foreground, "b")];
+        let popup = |from: LayerId| Id::unique(("popup", from));
+        let run = |list: &[LayerId], opened_from: LayerId| {
+            let output = ctx.run_ui(Default::default(), |ui| {
+                for at in [a, b] {
+                    crate::Area::new(at.id)
+                        .order(at.order)
+                        .show(ui.ctx(), |ui| {
+                            ui.label("area");
+                            if at == opened_from {
+                                crate::Popup::new(
+                                    popup(at),
+                                    ui.ctx().clone(),
+                                    Pos2::ZERO,
+                                    ui.layer_id(),
+                                )
+                                .show(|ui| ui.label("popup"));
+                            }
+                        });
+                }
+                ui.ctx().set_layer_order(list);
+            });
+            output.drop_without_applying_deltas();
+        };
+        let order = || {
+            ctx.memory(|mem| {
+                mem.layer_ids()
+                    .filter(|l| l.order == Order::Foreground && mem.areas().is_visible(l))
+                    .collect::<Vec<_>>()
+            })
+        };
+
+        for _ in 0..2 {
+            run(&[a, b], a);
+        }
+        let popup_a = LayerId::new(Order::Foreground, popup(a));
+        assert_eq!(
+            order(),
+            [a, popup_a, b],
+            "a popup from a lower listed layer stays with it"
+        );
+
+        for _ in 0..2 {
+            run(&[a, b], b);
+        }
+        let popup_b = LayerId::new(Order::Foreground, popup(b));
+        assert_eq!(order(), [a, b, popup_b]);
+    }
+
+    #[test]
+    fn listed_layer_stays_below_a_higher_order() {
+        let listed = layer(Order::Middle, "listed");
+        let unlisted_fg = layer(Order::Foreground, "fg");
+        let unlisted_mid = layer(Order::Middle, "mid");
+        let mut areas = areas_with(&[unlisted_fg, listed, unlisted_mid]);
+        areas.set_layer_order(&[listed]);
+        areas.end_pass();
+        assert_eq!(areas.order(), [unlisted_mid, listed, unlisted_fg]);
+    }
+
+    #[test]
+    fn raise_on_press_moves_only_unlisted_layers() {
+        let [a, b, u1, u2] = [
+            layer(Order::Foreground, "a"),
+            layer(Order::Foreground, "b"),
+            layer(Order::Foreground, "u1"),
+            layer(Order::Foreground, "u2"),
+        ];
+        let mut areas = areas_with(&[a, b, u1, u2]);
+        // A press raises the listed layer `a` and the unlisted `u1`.
+        areas.move_to_top(a);
+        areas.move_to_top(u1);
+        areas.set_layer_order(&[a, b]);
+        areas.end_pass();
+        assert_eq!(areas.order(), [u2, u1, a, b]);
+    }
+
+    #[test]
+    fn modal_gate_follows_the_list() {
+        let ctx = crate::Context::default();
+        let modal = layer(Order::Foreground, "modal");
+        let other = layer(Order::Foreground, "other");
+        let run = |list: &[LayerId]| {
+            let output = ctx.run_ui(Default::default(), |ui| {
+                ui.memory_mut(|mem| {
+                    mem.areas_mut().set_state(modal, area::AreaState::default());
+                    mem.areas_mut().set_state(other, area::AreaState::default());
+                    mem.set_modal_layer(modal);
+                });
+                ui.ctx().set_layer_order(list);
+            });
+            output.drop_without_applying_deltas();
+        };
+        let above = |layer| ctx.memory(|mem| mem.is_above_modal_layer(layer));
+
+        // Passes two apart: the modal layer and the order are read from the previous pass.
+        run(&[modal, other]);
+        run(&[modal, other]);
+        assert!(
+            above(modal) && above(other),
+            "a layer above the modal is allowed"
+        );
+
+        run(&[other, modal]);
+        run(&[other, modal]);
+        assert!(above(modal));
+        assert!(
+            !above(other),
+            "a layer the list puts below the modal is gated"
+        );
+    }
 }

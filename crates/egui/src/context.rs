@@ -524,9 +524,8 @@ impl ContextImpl {
                 .collect();
             layers.sort_by(|&a, &b| self.memory.areas().compare_order(a, b));
 
-            viewport.hits = if let Some(pos) = viewport.input.pointer.interact_pos() {
-                let interact_radius = self.memory.options.style().interaction.interact_radius;
-
+            let interact_radius = self.memory.options.style().interaction.interact_radius;
+            let hit_test_at = |pos| {
                 crate::hit_test::hit_test(
                     &viewport.prev_pass.widgets,
                     &layers,
@@ -534,14 +533,37 @@ impl ContextImpl {
                     pos,
                     interact_radius,
                 )
-            } else {
-                WidgetHits::default()
             };
+
+            let interact_pos = viewport.input.pointer.interact_pos();
+            viewport.hits = interact_pos.map(hit_test_at).unwrap_or_default();
+
+            // The pointer may have moved on after a press in the same pass
+            // (a quick drag, or a slow frame), so each press goes to the widgets
+            // under its own position:
+            let press_hits: Vec<(Pos2, WidgetHits)> = viewport
+                .input
+                .pointer
+                .pointer_events
+                .iter()
+                .filter_map(|event| match event {
+                    PointerEvent::Pressed { position, button }
+                        if self.memory.press_is_swallowed(*position, *button) =>
+                    {
+                        Some((*position, WidgetHits::default()))
+                    }
+                    PointerEvent::Pressed { position, .. } if Some(*position) != interact_pos => {
+                        Some((*position, hit_test_at(*position)))
+                    }
+                    _ => None,
+                })
+                .collect();
 
             viewport.interact_widgets = crate::interaction::interact(
                 &viewport.interact_widgets,
                 &viewport.prev_pass.widgets,
                 &viewport.hits,
+                &press_hits,
                 &viewport.input,
                 self.memory.interaction_mut(),
             );
@@ -1592,7 +1614,7 @@ impl Context {
         // Response inspection is also used to choose styling before a widget processes input.
         // Apply click-away focus changes only when the widget is actually registered, so a
         // TextEdit can preserve its selection for an action later in this pass (egui#8763).
-        let res = self.get_response_with_focus_policy(w, true);
+        let res = self.get_response_with_focus_policy(w, true, options);
 
         #[cfg(debug_assertions)]
         if res.contains_pointer() {
@@ -1754,13 +1776,14 @@ impl Context {
 
     /// Do all interaction for an existing widget, without (re-)registering it.
     pub(crate) fn get_response(&self, widget_rect: WidgetRect) -> Response {
-        self.get_response_with_focus_policy(widget_rect, false)
+        self.get_response_with_focus_policy(widget_rect, false, Default::default())
     }
 
     fn get_response_with_focus_policy(
         &self,
         widget_rect: WidgetRect,
         apply_click_away: bool,
+        options: crate::InteractOptions,
     ) -> Response {
         use response::Flags;
 
@@ -1808,7 +1831,8 @@ impl Context {
             if enabled
                 && sense.senses_click()
                 && memory.has_focus(id)
-                && (input.key_pressed(Key::Space) || input.key_pressed(Key::Enter))
+                && ((options.activate_on_space && input.key_pressed(Key::Space))
+                    || input.key_pressed(Key::Enter))
             {
                 // Space/enter works like a primary click for e.g. selected buttons
                 res.flags.set(Flags::FAKE_PRIMARY_CLICKED, true);
@@ -1887,7 +1911,7 @@ impl Context {
             }
 
             if apply_click_away && !res.hovered() {
-                let triggered = match memory.options.input_options.surrender_focus_on {
+                let triggered = match memory.focus_surrender() {
                     SurrenderFocusOn::Presses => input.pointer.any_pressed(),
                     SurrenderFocusOn::Clicks => input.pointer.any_click(),
                     SurrenderFocusOn::Never => false,
@@ -3722,6 +3746,19 @@ impl Context {
         self.memory_mut(|mem| mem.areas_mut().set_sublayer(parent, child));
     }
 
+    /// Put the given layers above every other layer of the same [`Order`], bottom first.
+    ///
+    /// Applied at the end of the pass, after egui's own ordering, so [`Self::move_to_top`],
+    /// [`Self::set_sublayer`] and the raise-on-click of [`crate::Area`]s only reorder the layers
+    /// that are not in the list. An unlisted sublayer of a listed layer moves with its parent and
+    /// sits directly above it. Unlisted layers keep their relative order; ids that are not known
+    /// layers are ignored.
+    ///
+    /// Applies to the current viewport and to this pass only, so call it every pass.
+    pub fn set_layer_order(&self, layers: &[LayerId]) {
+        self.memory_mut(|mem| mem.areas_mut().set_layer_order(layers));
+    }
+
     /// Retrieve the [`LayerId`] of the top level windows.
     pub fn top_layer_id(&self) -> Option<LayerId> {
         self.memory(|mem| mem.areas().top_layer_id(Order::Middle))
@@ -5238,6 +5275,213 @@ mod test {
         super::warn_if_rect_changes_id(&mut shapes, &previous, &current, &[rect]);
 
         assert!(shapes.is_empty());
+    }
+
+    /// `InteractOptions::enabled: false` disables one widget of an enabled `Ui`.
+    #[test]
+    fn test_interact_opt_disabled_widget_in_enabled_ui() {
+        use crate::{Event, Id, InteractOptions, PointerButton, RawInput, Rect, Sense, pos2, vec2};
+
+        let ctx = Context::default();
+        ctx.set_fonts(FontDefinitions::empty());
+        let rect = Rect::from_min_size(pos2(10.0, 10.0), vec2(20.0, 20.0));
+        let pos = rect.center();
+        let button = |pressed| Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+
+        for enabled in [true, false] {
+            let options = InteractOptions {
+                enabled,
+                ..Default::default()
+            };
+            let mut clicked = false;
+            // The first pass registers the widget, the second clicks it.
+            for events in [
+                vec![Event::PointerMoved(pos)],
+                vec![button(true), button(false)],
+            ] {
+                let input = RawInput {
+                    events,
+                    ..Default::default()
+                };
+                let output = ctx.run_ui(input, |ui| {
+                    let response =
+                        ui.interact_opt(rect, Id::unique("widget"), Sense::click(), options);
+                    assert!(ui.is_enabled(), "the Ui stays enabled");
+                    assert_eq!(response.enabled(), enabled);
+                    clicked = response.clicked();
+                });
+                output.drop_without_applying_deltas();
+            }
+            assert_eq!(clicked, enabled, "only an enabled widget is clicked");
+        }
+    }
+
+    /// Enter clicks a focused widget; Space only if `InteractOptions::activate_on_space`.
+    #[test]
+    fn test_interact_opt_activate_on_space() {
+        use crate::{Event, Id, InteractOptions, Key, RawInput, Rect, Sense, pos2, vec2};
+
+        let ctx = Context::default();
+        ctx.set_fonts(FontDefinitions::empty());
+        let rect = Rect::from_min_size(pos2(10.0, 10.0), vec2(20.0, 20.0));
+        let id = Id::unique("widget");
+        ctx.memory_mut(|mem| mem.request_focus(id));
+        let press = |key| Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Default::default(),
+        };
+
+        for activate_on_space in [true, false] {
+            let options = InteractOptions {
+                activate_on_space,
+                ..Default::default()
+            };
+            for (key, expected) in [(Key::Space, activate_on_space), (Key::Enter, true)] {
+                let input = RawInput {
+                    events: vec![press(key)],
+                    ..Default::default()
+                };
+                let mut clicked = false;
+                let output = ctx.run_ui(input, |ui| {
+                    clicked = ui.interact_opt(rect, id, Sense::click(), options).clicked();
+                });
+                output.drop_without_applying_deltas();
+                assert_eq!(
+                    clicked, expected,
+                    "{key:?}, activate_on_space: {activate_on_space}"
+                );
+            }
+        }
+    }
+
+    /// A press goes to the widget under the press,
+    /// even when the pointer moves on to another widget in the same frame.
+    #[test]
+    fn test_press_goes_to_widget_under_press() {
+        use crate::{Event, Id, PointerButton, RawInput, Rect, Sense, pos2, vec2};
+
+        let ctx = Context::default();
+        ctx.set_fonts(FontDefinitions::empty());
+        let small = Rect::from_min_size(pos2(0.0, 0.0), vec2(20.0, 20.0));
+        let large = Rect::from_min_size(pos2(40.0, 40.0), vec2(200.0, 200.0));
+        let (a, b) = (small.center(), large.center());
+        let (small_id, large_id) = (Id::unique("small"), Id::unique("large"));
+
+        // The first pass registers the widgets, the second presses on `a` and moves to `b`,
+        // the third moves on.
+        for (pass, events) in [
+            vec![Event::PointerMoved(a)],
+            vec![
+                Event::PointerMoved(a),
+                Event::PointerButton {
+                    pos: a,
+                    button: PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Default::default(),
+                },
+                Event::PointerMoved(b),
+            ],
+            vec![Event::PointerMoved(b + vec2(10.0, 0.0))],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let input = RawInput {
+                events,
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| {
+                let small = ui.interact(small, small_id, Sense::click_and_drag());
+                let large = ui.interact(large, large_id, Sense::click_and_drag());
+                if pass == 0 {
+                    return;
+                }
+                assert!(small.is_pointer_button_down_on(), "pass {pass}");
+                assert!(!large.is_pointer_button_down_on(), "pass {pass}");
+                assert_eq!(small.drag_started(), pass == 1, "pass {pass}");
+                assert!(small.dragged(), "pass {pass}");
+                assert!(!large.drag_started() && !large.dragged(), "pass {pass}");
+            });
+            output.drop_without_applying_deltas();
+        }
+    }
+
+    /// A primary press outside a popup that swallows outside presses reaches no widget,
+    /// and neither does its release, unless it is in an allowed rect.
+    /// By default, and for other buttons, the widget under the press gets it.
+    #[test]
+    fn test_popup_swallows_outside_press() {
+        use crate::{
+            Event, Id, LayerId, Order, PointerButton, Popup, PopupAnchor, RawInput, Rect, Sense,
+            pos2, vec2,
+        };
+
+        // (swallow, button, allow the background's rect)
+        let cases = [
+            (false, PointerButton::Primary, false),
+            (true, PointerButton::Primary, false),
+            (true, PointerButton::Primary, true),
+            (true, PointerButton::Secondary, false),
+        ];
+        for (swallow, pointer_button, allow) in cases {
+            let reaches = !swallow || allow || pointer_button != PointerButton::Primary;
+            let button = |pressed| Event::PointerButton {
+                pos: pos2(10.0, 10.0),
+                button: pointer_button,
+                pressed,
+                modifiers: Default::default(),
+            };
+
+            let ctx = Context::default();
+            ctx.set_fonts(FontDefinitions::empty());
+            let background = Rect::from_min_size(pos2(0.0, 0.0), vec2(100.0, 100.0));
+            let background_id = Id::unique("background");
+            let popup_id = Id::unique("popup");
+
+            // Hover, press outside the popup, release.
+            let passes = [
+                vec![Event::PointerMoved(pos2(10.0, 10.0))],
+                vec![Event::PointerMoved(pos2(10.0, 10.0))],
+                vec![button(true)],
+                vec![button(false)],
+            ];
+            for (pass, events) in passes.into_iter().enumerate() {
+                let input = RawInput {
+                    events,
+                    ..Default::default()
+                };
+                let output = ctx.run_ui(input, |ui| {
+                    let response = ui.interact(background, background_id, Sense::click_and_drag());
+                    Popup::new(
+                        popup_id,
+                        ui.ctx().clone(),
+                        PopupAnchor::Position(pos2(200.0, 200.0)),
+                        LayerId::new(Order::Foreground, popup_id),
+                    )
+                    .open(true)
+                    .swallow_outside_press(swallow)
+                    .show(|ui| ui.label("popup"));
+                    if allow {
+                        ui.ctx().memory_mut(|mem| mem.allow_presses_in(background));
+                    }
+
+                    match pass {
+                        2 => assert_eq!(response.is_pointer_button_down_on(), reaches),
+                        3 => assert_eq!(response.clicked_by(pointer_button), reaches),
+                        _ => {}
+                    }
+                });
+                output.drop_without_applying_deltas();
+            }
+        }
     }
 
     /// Changing the font providers mid-pass must not drop the [`crate::text::Fonts`]

@@ -1102,6 +1102,7 @@ fn do_resize_interaction(
                 // First to read the result (to avoid frame delay)
                 // and the second time to move it to the top, above the window contents.
                 move_to_top: true,
+                ..Default::default()
             },
         );
 
