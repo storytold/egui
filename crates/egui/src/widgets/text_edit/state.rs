@@ -342,7 +342,7 @@ pub(crate) enum TextEditCursorPurpose {
         /// cursor selection.
         preedit_range: core::ops::Range<usize>,
 
-        /// The exact pre-edit text last written at [`Self::preedit_range`].
+        /// The exact pre-edit text last written at `preedit_range`.
         ///
         /// Used to detect an out-of-band `TextBuffer` mutation between passes. If the buffer no
         /// longer contains this text at the recorded range, the composition is stale and must be

@@ -3937,6 +3937,7 @@ fn latin_key(
 /// The character of a key that types exactly one.
 #[cfg_attr(
     not(any(
+        test,
         target_os = "macos",
         all(
             unix,
