@@ -32,6 +32,9 @@ pub(crate) struct ResetBridge<W> {
     window: Option<W>,
     latest: Option<ImeResetId>,
     pending: Option<Pending>,
+
+    /// Requests dropped without a completion, reported as [`Event::ImeResetRetired`].
+    retired: Vec<ImeResetId>,
 }
 
 impl<W> Default for ResetBridge<W> {
@@ -40,14 +43,33 @@ impl<W> Default for ResetBridge<W> {
             window: None,
             latest: None,
             pending: None,
+            retired: Vec::new(),
         }
     }
 }
 
 impl<W: Copy + Eq> ResetBridge<W> {
     /// Invalidating the target never authorizes an old completion to release a later guard.
+    /// The dropped request is reported as retired, so its editor can ask again.
     pub(crate) fn invalidate(&mut self) {
-        self.pending = None;
+        if let Some(pending) = self.pending.take() {
+            self.retired.push(pending.id);
+        }
+    }
+
+    /// Requests that egui dropped before they reached the integration
+    /// ([`egui::PlatformOutput::retired_ime_resets`]).
+    pub(crate) fn retire(&mut self, ids: Vec<ImeResetId>) {
+        self.retired.extend(ids);
+    }
+
+    /// Appends one [`Event::ImeResetRetired`] per dropped request, in the order they were dropped.
+    pub(crate) fn drain_retired(&mut self, events: &mut Vec<Event>) {
+        events.extend(
+            self.retired
+                .drain(..)
+                .map(|request_id| Event::ImeResetRetired { request_id }),
+        );
     }
 
     /// The command dispatcher changes native purpose without requiring another settled output.
@@ -83,7 +105,7 @@ impl<W: Copy + Eq> ResetBridge<W> {
     ) -> Option<ImeResetId> {
         if self.window != Some(window) {
             self.window = Some(window);
-            self.pending = None;
+            self.invalidate();
             // Retain latest so old output cannot replay a request on a replacement window.
         }
         let Some(ime) = ime else {
@@ -104,6 +126,7 @@ impl<W: Copy + Eq> ResetBridge<W> {
                 .is_none_or(|latest| id.as_u64() > latest.as_u64())
         {
             self.latest = Some(id);
+            self.invalidate();
             self.pending = Some(Pending {
                 id,
                 context,
@@ -166,6 +189,45 @@ mod tests {
         assert!(ime.reset_request.is_some());
         ime.should_interrupt_composition = true;
         ime
+    }
+
+    #[test]
+    fn a_dropped_request_is_reported_retired_once() {
+        let ctx = Context::default();
+        let viewport = ViewportId::ROOT;
+        let ime = output(&ctx, viewport);
+        let id = ime.reset_request.unwrap();
+        let mut bridge = ResetBridge::<u64>::default();
+        assert_eq!(bridge.prepare(11, viewport, Some(&ime), true), Some(id));
+
+        // Focus loss drops the dispatched request; its completion is then ignored.
+        bridge.invalidate();
+        bridge.invalidate();
+        let mut events = Vec::new();
+        assert!(!bridge.on_event(
+            11,
+            viewport,
+            &WindowEvent::ImeResetCompleted {
+                request_id: id.as_u64()
+            },
+            &mut events
+        ));
+        bridge.drain_retired(&mut events);
+        assert_eq!(events, vec![Event::ImeResetRetired { request_id: id }]);
+
+        // A pass without IME output drops a request that was never dispatched.
+        let ime = output(&ctx, viewport);
+        let undispatched = ime.reset_request.unwrap();
+        assert_eq!(bridge.prepare(11, viewport, Some(&ime), false), None);
+        assert_eq!(bridge.prepare(11, viewport, None, true), None);
+        let mut events = Vec::new();
+        bridge.drain_retired(&mut events);
+        assert_eq!(
+            events,
+            vec![Event::ImeResetRetired {
+                request_id: undispatched
+            }]
+        );
     }
 
     #[test]
