@@ -949,6 +949,22 @@ impl Memory {
         self.focus_mut().focused_widget = Some(FocusWidget::new(id));
     }
 
+    /// Give keyboard focus to a specific widget, with the event filter it keeps while focused.
+    ///
+    /// Like [`Self::request_focus`] followed by [`Self::set_focus_lock_filter`], except that
+    /// the filter applies from the next pass on: `set_focus_lock_filter` only takes effect
+    /// once the widget has had focus for a pass, so e.g. an arrow key pressed in the pass after
+    /// the request would still move focus away.
+    pub fn request_focus_with_filter(&mut self, id: Id, event_filter: EventFilter) {
+        if self.focused() != Some(id) {
+            self.interrupt_ime();
+        }
+        self.focus_mut().focused_widget = Some(FocusWidget {
+            id,
+            filter: event_filter,
+        });
+    }
+
     /// Defer focus until the next pass so an already rendered widget sees `gained_focus`.
     pub(crate) fn request_focus_next_frame(&mut self, id: Id) {
         if self.focused() != Some(id) {
@@ -1531,6 +1547,38 @@ fn lost_focus_fires_after_mid_frame_focus_transfer() {
             "A's lost_focus must stop firing once the two-frame window passes",
         );
     }
+}
+
+#[test]
+fn request_focus_with_filter_applies_the_filter_from_the_next_pass() {
+    use crate::data::input::RawInput;
+    let id = Id::unique("A");
+    let arrow_right = RawInput {
+        events: vec![crate::Event::Key {
+            key: crate::Key::ArrowRight,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Default::default(),
+        }],
+        ..Default::default()
+    };
+    let arrows = EventFilter {
+        horizontal_arrows: true,
+        ..Default::default()
+    };
+
+    let mut memory = Memory::default();
+    memory.request_focus(id);
+    memory.set_focus_lock_filter(id, arrows); // Too early: `id` had no focus last pass.
+    memory.focus_mut().begin_pass(&arrow_right);
+    assert_eq!(memory.focus_direction(), FocusDirection::Right);
+
+    let mut memory = Memory::default();
+    memory.request_focus_with_filter(id, arrows);
+    memory.focus_mut().begin_pass(&arrow_right);
+    assert_eq!(memory.focus_direction(), FocusDirection::None);
+    assert!(memory.has_focus(id));
 }
 
 #[test]

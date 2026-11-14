@@ -966,6 +966,8 @@ impl Ui {
     }
 
     /// Check for clicks, drags and/or hover on a specific region of this [`Ui`].
+    ///
+    /// The widget is enabled if both this [`Ui`] and [`crate::InteractOptions::enabled`] are.
     pub fn interact_opt(
         &self,
         rect: Rect,
@@ -983,7 +985,7 @@ impl Ui {
                 rect,
                 interact_rect: self.clip_rect().intersect(rect),
                 sense,
-                enabled: self.enabled,
+                enabled: self.enabled && options.enabled,
                 visible: self.is_visible(),
             },
             true,
