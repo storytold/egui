@@ -206,6 +206,7 @@ impl<'a, State> Harness<'a, State> {
             missing_glyph_policy,
             check_accessibility,
             context_setup,
+            context,
 
             #[cfg(any(feature = "wgpu", feature = "snapshot"))]
             render_every_step,
@@ -221,7 +222,7 @@ impl<'a, State> Harness<'a, State> {
             #[cfg(feature = "wgpu")]
                 render_options: _,
         } = builder;
-        let ctx = ctx.unwrap_or_default();
+        let ctx = ctx.or(context).unwrap_or_default();
         if let Some(setup) = context_setup {
             setup(&ctx);
         }
