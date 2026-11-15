@@ -34,9 +34,9 @@ pub fn run() -> io::Result<()> {
     local.block_on(&rt, async {
         // Own a duplicate so pumping the event loop does not borrow its registered fd.
         let owned_fd = eventloop.as_fd().try_clone_to_owned()?;
+        #[expect(unsafe_code)] // Tokio requires callers to uphold descriptor lifetime safety.
         // SAFETY: OwnedFd keeps the descriptor open and stable until AsyncFd drops it.
         // We never replace its inner descriptor or extract/close its raw fd.
-        #[expect(unsafe_code)] // Tokio requires callers to uphold descriptor lifetime safety.
         let eventloop_fd = unsafe { tokio::io::unix::AsyncFd::register(owned_fd)? };
         let mut control_flow = ControlFlow::Poll;
 
