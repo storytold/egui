@@ -1297,6 +1297,7 @@ dependencies = [
  "send_wrapper",
  "serde",
  "static_assertions",
+ "tempfile",
  "wasm-bindgen",
  "wasm-bindgen-test",
  "web-sys",
