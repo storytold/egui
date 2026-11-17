@@ -326,6 +326,8 @@ pub struct ViewportBuilder {
     // windows:
     pub drag_and_drop: Option<bool>,
     pub taskbar: Option<bool>,
+    /// Requests a Windows tool window. Other platforms ignore this option.
+    pub tool_window: Option<bool>,
 
     pub close_button: Option<bool>,
     pub minimize_button: Option<bool>,
@@ -524,6 +526,15 @@ impl ViewportBuilder {
     #[inline]
     pub fn with_taskbar(mut self, show: bool) -> Self {
         self.taskbar = Some(show);
+        self
+    }
+
+    /// Requests a Windows tool window without taskbar or Alt-Tab entries.
+    ///
+    /// This option defaults to `false` and is ignored on other platforms.
+    #[inline]
+    pub fn with_tool_window(mut self, tool_window: bool) -> Self {
+        self.tool_window = Some(tool_window);
         self
     }
 
@@ -747,6 +758,7 @@ impl ViewportBuilder {
             window_level: new_window_level,
             mouse_passthrough: new_mouse_passthrough,
             taskbar: new_taskbar,
+            tool_window: new_tool_window,
             window_type: new_window_type,
             override_redirect: new_override_redirect,
             monitor: new_monitor,
@@ -921,6 +933,11 @@ impl ViewportBuilder {
         if new_taskbar.is_some() && self.taskbar != new_taskbar {
             self.taskbar = new_taskbar;
             recreate_window = true;
+        }
+
+        if new_tool_window.is_some() && self.tool_window != new_tool_window {
+            self.tool_window = new_tool_window;
+            recreate_window |= cfg!(target_os = "windows");
         }
 
         if new_fullsize_content_view.is_some()
@@ -1333,4 +1350,35 @@ pub struct ImmediateViewport<'a> {
 
     /// The user-code that shows the GUI.
     pub viewport_ui_cb: Box<dyn FnMut(&mut Ui) + 'a>,
+}
+
+#[cfg(test)]
+mod tool_window_tests {
+    use super::ViewportBuilder;
+    use crate::{pos2, vec2};
+
+    #[test]
+    fn tool_window_is_opt_in_and_changes_recreate_the_viewport() {
+        assert_eq!(ViewportBuilder::default().tool_window, None);
+        let mut builder = ViewportBuilder::default()
+            .with_position(pos2(11.0, 12.0))
+            .with_inner_size(vec2(320.0, 240.0))
+            .with_resizable(true);
+        let (commands, recreate) = builder.patch(ViewportBuilder::default().with_tool_window(true));
+        assert!(commands.is_empty());
+        assert_eq!(recreate, cfg!(target_os = "windows"));
+        assert_eq!(builder.tool_window, Some(true));
+        assert_eq!(builder.position, Some(pos2(11.0, 12.0)));
+        assert_eq!(builder.inner_size, Some(vec2(320.0, 240.0)));
+        assert_eq!(builder.resizable, Some(true));
+        let (commands, recreate) = builder.patch(ViewportBuilder::default());
+        assert!(commands.is_empty());
+        assert!(!recreate);
+        assert_eq!(builder.tool_window, Some(true));
+        let (_, recreate) = builder.patch(ViewportBuilder::default().with_tool_window(true));
+        assert!(!recreate);
+        let (_, recreate) = builder.patch(ViewportBuilder::default().with_tool_window(false));
+        assert_eq!(recreate, cfg!(target_os = "windows"));
+        assert_eq!(builder.tool_window, Some(false));
+    }
 }

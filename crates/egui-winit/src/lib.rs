@@ -4728,6 +4728,7 @@ pub fn create_winit_window_attributes(
         // Windows:
         drag_and_drop: _drag_and_drop,
         taskbar: _taskbar,
+        tool_window: _tool_window,
 
         // wayland:
         app_id: _app_id,
@@ -4903,6 +4904,9 @@ pub fn create_winit_window_attributes(
         }
         if let Some(show) = _taskbar {
             window_attributes = window_attributes.with_skip_taskbar(!show);
+        }
+        if let Some(tool_window) = _tool_window {
+            window_attributes = window_attributes.with_tool_window(tool_window);
         }
 
         // don't request the undecorated-window drop shadow in fullscreen (#8399)
