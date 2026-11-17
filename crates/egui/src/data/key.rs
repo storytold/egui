@@ -118,6 +118,65 @@ pub enum Key {
     Num9,
 
     // ----------------------------------------------
+    // Numpad keys — physical positions distinct from the main row.
+    // These variants are emitted only as `physical_key` on
+    // `Event::Key`; the logical `key` still collapses to
+    // `Num0` … `Num9`, `Enter`, `Period`, etc.
+    /// Numpad Enter key.
+    NumpadEnter,
+
+    /// Numpad `0`.
+    Numpad0,
+
+    /// Numpad `1`.
+    Numpad1,
+
+    /// Numpad `2`.
+    Numpad2,
+
+    /// Numpad `3`.
+    Numpad3,
+
+    /// Numpad `4`.
+    Numpad4,
+
+    /// Numpad `5`.
+    Numpad5,
+
+    /// Numpad `6`.
+    Numpad6,
+
+    /// Numpad `7`.
+    Numpad7,
+
+    /// Numpad `8`.
+    Numpad8,
+
+    /// Numpad `9`.
+    Numpad9,
+
+    /// Numpad `+`.
+    NumpadAdd,
+
+    /// Numpad `-`.
+    NumpadSubtract,
+
+    /// Numpad `*`.
+    NumpadMultiply,
+
+    /// Numpad `/`.
+    NumpadDivide,
+
+    /// Numpad `.`.
+    NumpadDecimal,
+
+    /// Numpad `,` (some layouts).
+    NumpadComma,
+
+    /// Numpad `=` (macOS and some layouts).
+    NumpadEqual,
+
+    // ----------------------------------------------
     // Letters:
     A, // Used for cmd+A (select All)
     B,
@@ -381,6 +440,25 @@ impl Key {
         Self::Num7,
         Self::Num8,
         Self::Num9,
+        // Numpad (physical positions):
+        Self::NumpadEnter,
+        Self::Numpad0,
+        Self::Numpad1,
+        Self::Numpad2,
+        Self::Numpad3,
+        Self::Numpad4,
+        Self::Numpad5,
+        Self::Numpad6,
+        Self::Numpad7,
+        Self::Numpad8,
+        Self::Numpad9,
+        Self::NumpadAdd,
+        Self::NumpadSubtract,
+        Self::NumpadMultiply,
+        Self::NumpadDivide,
+        Self::NumpadDecimal,
+        Self::NumpadComma,
+        Self::NumpadEqual,
         // Letters:
         Self::A,
         Self::B,
@@ -510,7 +588,7 @@ impl Key {
             "Escape" | "Esc" => Self::Escape,
             "Tab" => Self::Tab,
             "Backspace" => Self::Backspace,
-            "Enter" | "Return" | "NumpadEnter" => Self::Enter,
+            "Enter" | "Return" => Self::Enter,
 
             "Insert" => Self::Insert,
             "Delete" => Self::Delete,
@@ -525,14 +603,14 @@ impl Key {
 
             " " | "Space" => Self::Space,
             ":" | "Colon" => Self::Colon,
-            "," | "Comma" | "NumpadComma" => Self::Comma,
-            "-" | "−" | "Minus" | "NumpadSubtract" => Self::Minus,
-            "." | "Period" | "NumpadDecimal" => Self::Period,
-            "+" | "Plus" | "NumpadAdd" => Self::Plus,
-            "=" | "Equal" | "Equals" | "NumpadEqual" => Self::Equals,
+            "," | "Comma" => Self::Comma,
+            "-" | "−" | "Minus" => Self::Minus,
+            "." | "Period" => Self::Period,
+            "+" | "Plus" => Self::Plus,
+            "=" | "Equal" | "Equals" => Self::Equals,
             ";" | "Semicolon" => Self::Semicolon,
             "\\" | "Backslash" => Self::Backslash,
-            "/" | "Slash" | "NumpadDivide" => Self::Slash,
+            "/" | "Slash" => Self::Slash,
             "|" | "Pipe" => Self::Pipe,
             "?" | "Questionmark" => Self::Questionmark,
             "!" | "Exclamationmark" => Self::Exclamationmark,
@@ -543,16 +621,36 @@ impl Key {
             "`" | "Backtick" | "Backquote" | "Grave" => Self::Backtick,
             "'" | "Quote" => Self::Quote,
 
-            "0" | "Digit0" | "Numpad0" => Self::Num0,
-            "1" | "Digit1" | "Numpad1" => Self::Num1,
-            "2" | "Digit2" | "Numpad2" => Self::Num2,
-            "3" | "Digit3" | "Numpad3" => Self::Num3,
-            "4" | "Digit4" | "Numpad4" => Self::Num4,
-            "5" | "Digit5" | "Numpad5" => Self::Num5,
-            "6" | "Digit6" | "Numpad6" => Self::Num6,
-            "7" | "Digit7" | "Numpad7" => Self::Num7,
-            "8" | "Digit8" | "Numpad8" => Self::Num8,
-            "9" | "Digit9" | "Numpad9" => Self::Num9,
+            "0" | "Digit0" => Self::Num0,
+            "1" | "Digit1" => Self::Num1,
+            "2" | "Digit2" => Self::Num2,
+            "3" | "Digit3" => Self::Num3,
+            "4" | "Digit4" => Self::Num4,
+            "5" | "Digit5" => Self::Num5,
+            "6" | "Digit6" => Self::Num6,
+            "7" | "Digit7" => Self::Num7,
+            "8" | "Digit8" => Self::Num8,
+            "9" | "Digit9" => Self::Num9,
+
+            // Numpad (physical positions, e.g. the DOM `KeyboardEvent.code`):
+            "NumpadEnter" => Self::NumpadEnter,
+            "Numpad0" => Self::Numpad0,
+            "Numpad1" => Self::Numpad1,
+            "Numpad2" => Self::Numpad2,
+            "Numpad3" => Self::Numpad3,
+            "Numpad4" => Self::Numpad4,
+            "Numpad5" => Self::Numpad5,
+            "Numpad6" => Self::Numpad6,
+            "Numpad7" => Self::Numpad7,
+            "Numpad8" => Self::Numpad8,
+            "Numpad9" => Self::Numpad9,
+            "NumpadAdd" => Self::NumpadAdd,
+            "NumpadSubtract" => Self::NumpadSubtract,
+            "NumpadMultiply" => Self::NumpadMultiply,
+            "NumpadDivide" => Self::NumpadDivide,
+            "NumpadDecimal" => Self::NumpadDecimal,
+            "NumpadComma" => Self::NumpadComma,
+            "NumpadEqual" => Self::NumpadEqual,
 
             "a" | "A" | "KeyA" => Self::A,
             "b" | "B" | "KeyB" => Self::B,
@@ -754,6 +852,25 @@ impl Key {
             Self::Num7 => "7",
             Self::Num8 => "8",
             Self::Num9 => "9",
+
+            Self::NumpadEnter => "NumpadEnter",
+            Self::Numpad0 => "Numpad0",
+            Self::Numpad1 => "Numpad1",
+            Self::Numpad2 => "Numpad2",
+            Self::Numpad3 => "Numpad3",
+            Self::Numpad4 => "Numpad4",
+            Self::Numpad5 => "Numpad5",
+            Self::Numpad6 => "Numpad6",
+            Self::Numpad7 => "Numpad7",
+            Self::Numpad8 => "Numpad8",
+            Self::Numpad9 => "Numpad9",
+            Self::NumpadAdd => "NumpadAdd",
+            Self::NumpadSubtract => "NumpadSubtract",
+            Self::NumpadMultiply => "NumpadMultiply",
+            Self::NumpadDivide => "NumpadDivide",
+            Self::NumpadDecimal => "NumpadDecimal",
+            Self::NumpadComma => "NumpadComma",
+            Self::NumpadEqual => "NumpadEqual",
 
             Self::A => "A",
             Self::B => "B",
