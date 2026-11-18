@@ -28,13 +28,22 @@ pub struct FallbackRequest<'a> {
 /// * *Discovered* fonts are found on demand for a character no installed font has,
 ///   e.g. among the system fonts. They are appended to the family's fallback chain.
 ///
-/// A provider can do either or both. Providers are asked in order, and the first answer wins.
+/// A provider can do either or both. Ordinary providers are asked first, then
+/// [`FontProvider::is_last_resort`] providers; within each tier the first answer wins.
 ///
 /// Install one with `egui::Context::add_font_provider` or [`Fonts::with_font_providers`](crate::text::Fonts::with_font_providers).
 /// `eframe` installs a system font provider on native (behind its `system_fonts` feature).
 ///
 /// Any `Fn(&FallbackRequest<'_>) -> Option<FontInsert>` is a discovering [`FontProvider`].
 pub trait FontProvider: Send + Sync {
+    /// Whether discovered faces are only used after all ordinary providers miss.
+    ///
+    /// Unlike ordinary discovered faces, these faces never bypass an ordinary provider
+    /// for a new character, even after being cached. Configured fonts are unaffected.
+    fn is_last_resort(&self) -> bool {
+        false
+    }
+
     /// The fonts to install for `family` up front, in priority order.
     ///
     /// Called once per family (again after the providers change).
@@ -48,7 +57,7 @@ pub trait FontProvider: Send + Sync {
     ///
     /// Called at most once per (family, character), also when returning `None`.
     ///
-    /// The font is appended to the fallback chain of `request.family`
+    /// The font is appended to its tier of the fallback chain of `request.family`
     /// and of the families in [`FontInsert::families`].
     /// The [`FontPriority`] is ignored: discovered fonts always come after the configured ones.
     fn font_for(&self, request: &FallbackRequest<'_>) -> Option<FontInsert> {
@@ -107,6 +116,7 @@ impl FontProviders {
         faces: &mut FaceStore,
         family: &FontFamily,
         cluster: &str,
+        last_resort: bool,
     ) -> Option<FontFaceKey> {
         let base_char = cluster.chars().next()?;
         if base_char.is_control() || is_combining_mark(base_char) {
@@ -115,7 +125,11 @@ impl FontProviders {
 
         let request = FallbackRequest { cluster, family };
 
-        for provider in &self.providers {
+        for provider in self
+            .providers
+            .iter()
+            .filter(|p| p.is_last_resort() == last_resort)
+        {
             let Some(mut insert) = provider.font_for(&request) else {
                 continue;
             };
@@ -358,5 +372,77 @@ mod tests {
         let glyph = first_glyph(&mut fonts, HANGUL);
         assert!(glyph.is_color, "Should come from the rasterizer");
         assert_eq!(requests.lock().len(), 1);
+    }
+}
+
+#[cfg(all(test, feature = "default_fonts"))]
+mod last_resort_tests {
+    use super::*;
+    use crate::mutex::Mutex;
+    use crate::text::{FontData, TextOptions, family::Family};
+    use epaint_default_fonts::UBUNTU_LIGHT;
+
+    struct Provider {
+        last: bool,
+        requests: Arc<Mutex<Vec<char>>>,
+    }
+
+    impl FontProvider for Provider {
+        fn is_last_resort(&self) -> bool {
+            self.last
+        }
+
+        fn font_for(&self, request: &FallbackRequest<'_>) -> Option<FontInsert> {
+            let c = request.cluster.chars().next()?;
+            self.requests.lock().push(c);
+            if !self.last && c != 'B' {
+                return None;
+            }
+            Some(FontInsert::new(
+                if self.last { "last" } else { "system" },
+                FontData::from_static(UBUNTU_LIGHT),
+                vec![],
+            ))
+        }
+    }
+
+    #[test]
+    fn cached_last_resort_never_bypasses_normal_discovery() {
+        for name in [
+            FontFamily::Proportional,
+            FontFamily::Monospace,
+            FontFamily::Name("custom".into()),
+        ] {
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let mut providers = FontProviders::new(vec![
+                // Deliberately install last resort first: its tier, not list position, wins.
+                Arc::new(Provider {
+                    last: true,
+                    requests: Default::default(),
+                }),
+                Arc::new(Provider {
+                    last: false,
+                    requests: Arc::clone(&requests),
+                }),
+            ]);
+            let mut faces = FaceStore::new(TextOptions::default());
+            let mut family = Family::new(&name, &mut faces, &providers);
+            for (c, expected) in [
+                ('A', "last"),
+                ('C', "last"),
+                ('B', "system"),
+                ('A', "last"),
+                ('B', "system"),
+            ] {
+                let key = family.resolve(&mut faces, &mut providers, c);
+                assert_eq!(faces.get(key).unwrap().name(), expected, "{name:?}, {c}");
+            }
+            assert_eq!(*requests.lock(), vec!['A', 'C', 'B']);
+            assert_eq!(family.face_names(&faces), vec!["system", "last"]);
+            assert_eq!(
+                family.characters(&faces).get(&'A').unwrap(),
+                &vec!["system", "last"]
+            );
+        }
     }
 }
