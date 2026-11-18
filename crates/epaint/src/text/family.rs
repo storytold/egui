@@ -16,7 +16,8 @@ pub(crate) struct FamilyKey(pub(crate) usize);
 ///
 /// This is the only place that decides which face renders a given char:
 /// first the fonts the [`FontProviders`] install up front (the configured fonts),
-/// then fonts they discover on demand, then the `.notdef` glyph ("tofu") of the primary face.
+/// then ordinary discovered fonts and providers, then last-resort discovered fonts and
+/// providers, then the `.notdef` glyph ("tofu") of the primary face.
 #[derive(Debug)]
 pub(crate) struct Family {
     name: FontFamily,
@@ -25,6 +26,9 @@ pub(crate) struct Family {
     ///
     /// Configured fonts first, then any discovered by the [`FontProviders`].
     chain: Vec<FontFaceKey>,
+
+    /// Discovered last-resort faces, searched only after ordinary discovery misses.
+    last_resort: Vec<FontFaceKey>,
 
     /// Cache: `char → which face in the fallback chain owns this char`.
     ///
@@ -68,6 +72,7 @@ impl Family {
         Self {
             name: name.clone(),
             chain,
+            last_resort: Vec::new(),
             face_cache: Default::default(),
             characters: None,
         }
@@ -81,7 +86,10 @@ impl Family {
     /// The primary face, if any.
     #[inline]
     pub fn primary(&self) -> Option<FontFaceKey> {
-        self.chain.first().copied()
+        self.chain
+            .first()
+            .or_else(|| self.last_resort.first())
+            .copied()
     }
 
     /// Find which face in the fallback chain owns `c`.
@@ -133,7 +141,9 @@ impl Family {
             // and then the ones we have already discovered…
             .find_face_for_char(c, faces)
             // …and if none of them has the char, ask the providers for a new font:
-            .or_else(|| self.discover(faces, providers, cluster))
+            .or_else(|| self.discover(faces, providers, cluster, false))
+            .or_else(|| Self::find_face_for_char_in(&self.last_resort, c, faces))
+            .or_else(|| self.discover(faces, providers, cluster, true))
             // No font has the char, so we will render the `.notdef` glyph ("tofu"):
             .unwrap_or_else(|| {
                 log::debug!(
@@ -159,10 +169,16 @@ impl Family {
         faces: &mut FaceStore,
         providers: &mut FontProviders,
         cluster: &str,
+        last_resort: bool,
     ) -> Option<FontFaceKey> {
-        let key = providers.discover(faces, &self.name, cluster)?;
-        if !self.chain.contains(&key) {
-            self.chain.push(key);
+        let key = providers.discover(faces, &self.name, cluster, last_resort)?;
+        let chain = if last_resort {
+            &mut self.last_resort
+        } else {
+            &mut self.chain
+        };
+        if !chain.contains(&key) {
+            chain.push(key);
             self.characters = None;
         }
         Some(key)
@@ -192,6 +208,7 @@ impl Family {
     pub fn face_names(&self, faces: &FaceStore) -> Vec<String> {
         self.chain
             .iter()
+            .chain(&self.last_resort)
             .filter_map(|key| faces.get(*key))
             .map(|face| face.name().to_owned())
             .collect()
@@ -201,7 +218,7 @@ impl Family {
     pub fn characters(&mut self, faces: &FaceStore) -> &BTreeMap<char, Vec<String>> {
         self.characters.get_or_insert_with(|| {
             let mut characters: BTreeMap<char, Vec<String>> = Default::default();
-            for key in &self.chain {
+            for key in self.chain.iter().chain(&self.last_resort) {
                 let Some(face) = faces.get(*key) else {
                     continue;
                 };
