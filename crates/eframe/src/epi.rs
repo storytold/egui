@@ -282,6 +282,52 @@ pub trait App {
     fn raw_input_hook(&mut self, _ctx: &egui::Context, _raw_input: &mut egui::RawInput) {}
 }
 
+/// A boxed app is an app, so an app too large to move around by value can be owned through a box.
+impl<T: App + ?Sized> App for Box<T> {
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut Frame) {
+        (**self).logic(ctx, frame);
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut Frame) {
+        (**self).ui(ui, frame);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn as_any_mut(&mut self) -> Option<&mut dyn Any> {
+        (**self).as_any_mut()
+    }
+
+    fn save(&mut self, storage: &mut dyn Storage) {
+        (**self).save(storage);
+    }
+
+    #[cfg(feature = "glow")]
+    fn on_exit(&mut self, gl: Option<&glow::Context>) {
+        (**self).on_exit(gl);
+    }
+
+    #[cfg(not(feature = "glow"))]
+    fn on_exit(&mut self) {
+        (**self).on_exit();
+    }
+
+    fn auto_save_interval(&self) -> core::time::Duration {
+        (**self).auto_save_interval()
+    }
+
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        (**self).clear_color(visuals)
+    }
+
+    fn persist_egui_memory(&self) -> bool {
+        (**self).persist_egui_memory()
+    }
+
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        (**self).raw_input_hook(ctx, raw_input);
+    }
+}
+
 /// Options controlling the behavior of a native window.
 ///
 /// Additional windows can be opened using (egui viewports)[`egui::viewport`].
