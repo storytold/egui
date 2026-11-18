@@ -193,7 +193,6 @@ impl Painter {
         let SurfaceConfig {
             present_mode,
             desired_maximum_frame_latency,
-            prefer_hdr: _,
         } = *config;
 
         // Transaction presentation can hold a drawable during AppKit live resize. Keep the

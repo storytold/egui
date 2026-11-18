@@ -89,20 +89,6 @@ pub struct SurfaceConfig {
     ///
     /// `None` => Let `wgpu` pick a default (currently `2`).
     pub desired_maximum_frame_latency: Option<u32>,
-
-    /// Prefer an HDR surface.
-    ///
-    /// When `true` and the surface offers [`wgpu::TextureFormat::Rgba16Float`] in the extended
-    /// linear sRGB color space (scRGB: `1.0` is SDR white, larger values are brighter), that becomes
-    /// the [`RenderState::target_format`] (see [`preferred_hdr_framebuffer_format`]). egui itself
-    /// keeps drawing at SDR white, so the UI looks the same as on an 8-bit surface; apps can paint
-    /// values above `1.0` (e.g. in a [`Callback`]) to show HDR content on HDR displays.
-    ///
-    /// When the surface doesn't offer it (SDR displays, platforms without HDR support), the
-    /// usual 8-bit format is used.
-    ///
-    /// Default: `false`.
-    pub prefer_hdr: bool,
 }
 
 impl SurfaceConfig {
@@ -115,7 +101,6 @@ impl SurfaceConfig {
         } else {
             Some(1)
         },
-        prefer_hdr: false,
     };
 
     /// Good default for GUIs with a lot of extra GPU work,
@@ -123,7 +108,6 @@ impl SurfaceConfig {
     pub const HIGH_THROUGHPUT: Self = Self {
         present_mode: wgpu::PresentMode::AutoVsync,
         desired_maximum_frame_latency: Some(2), // High-throughput.
-        prefer_hdr: false,
     };
 }
 
@@ -296,7 +280,7 @@ impl RenderState {
             || vec![wgpu::TextureFormat::Rgba8Unorm],
             |c| c.formats.clone(),
         );
-        let hdr_format = if config.surface.prefer_hdr {
+        let hdr_format = if config.prefer_hdr {
             capabilities
                 .as_ref()
                 .and_then(crate::preferred_hdr_framebuffer_format)
@@ -384,6 +368,24 @@ pub struct WgpuConfiguration {
     /// in that case either.
     pub on_surface_status:
         Arc<dyn Fn(&wgpu::CurrentSurfaceTexture) -> SurfaceErrorAction + Send + Sync>,
+
+    /// Prefer an HDR surface.
+    ///
+    /// When `true` and the surface offers [`wgpu::TextureFormat::Rgba16Float`] in the extended
+    /// linear sRGB color space (scRGB: `1.0` is SDR white, larger values are brighter), that becomes
+    /// the [`RenderState::target_format`] (see [`preferred_hdr_framebuffer_format`]). egui itself
+    /// keeps drawing at SDR white, so the UI looks close to how it looks on an 8-bit surface (the
+    /// float target blends in linear light, so antialiased edges and translucent fills differ
+    /// slightly); apps can paint values above `1.0` (e.g. in a [`Callback`]) to show HDR content on
+    /// HDR displays. Screenshots of an HDR surface come back as sRGB, with values above `1.0` clipped.
+    ///
+    /// When the surface doesn't offer it (SDR displays, platforms without HDR support), the
+    /// usual 8-bit format is used.
+    ///
+    /// Read once, when the [`RenderState`] is created: changing it afterwards has no effect.
+    ///
+    /// Default: `false`.
+    pub prefer_hdr: bool,
 }
 
 // Compile-time check that `WgpuConfiguration` is `Send + Sync`.
@@ -408,10 +410,12 @@ impl core::fmt::Debug for WgpuConfiguration {
             surface,
             wgpu_setup,
             on_surface_status: _,
+            prefer_hdr,
         } = self;
         f.debug_struct("WgpuConfiguration")
             .field("surface", &surface)
             .field("wgpu_setup", &wgpu_setup)
+            .field("prefer_hdr", &prefer_hdr)
             .finish_non_exhaustive()
     }
 }
@@ -455,6 +459,7 @@ impl Default for WgpuConfiguration {
                     SurfaceErrorAction::SkipFrame
                 }
             }),
+            prefer_hdr: false,
         }
     }
 }
@@ -485,7 +490,7 @@ pub fn preferred_framebuffer_format(
 ///
 /// That is [`wgpu::TextureFormat::Rgba16Float`] in the extended linear sRGB color space (scRGB,
 /// where `1.0` is SDR white and larger values are brighter). With [`wgpu::SurfaceColorSpace::Auto`] (the default), wgpu configures an `Rgba16Float` surface
-/// in exactly that color space when it is supported. See [`SurfaceConfig::prefer_hdr`].
+/// in exactly that color space when it is supported. See [`WgpuConfiguration::prefer_hdr`].
 pub fn preferred_hdr_framebuffer_format(
     capabilities: &wgpu::SurfaceCapabilities,
 ) -> Option<wgpu::TextureFormat> {

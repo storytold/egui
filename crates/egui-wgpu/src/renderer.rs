@@ -196,6 +196,9 @@ pub struct RendererOptions {
     /// two 8bit values after applying the sRGB OETF function, i.e. if it's not a whole 8bit value in "gamma space".
     /// This means that only inputs from texture interpolation and vertex colors should be affected in practice.
     ///
+    /// Not applied on [`wgpu::TextureFormat::Rgba16Float`] targets (HDR surfaces): half floats don't
+    /// band at 8-bit steps, and the noise would move SDR white off `1.0`.
+    ///
     /// Defaults to true.
     pub dithering: bool,
 
@@ -276,6 +279,11 @@ impl Renderer {
         options: RendererOptions,
     ) -> Self {
         profiling::function_scope!();
+
+        let mut options = options;
+        if output_color_format == wgpu::TextureFormat::Rgba16Float {
+            options.dithering = false;
+        }
 
         let shader = wgpu::ShaderModuleDescriptor {
             label: Some("egui"),
@@ -432,7 +440,7 @@ impl Renderer {
 
                 fragment: Some(wgpu::FragmentState {
                     module: &module,
-                    // A float target (an scRGB HDR surface, see `SurfaceConfig::prefer_hdr`) is linear too.
+                    // A float target (an scRGB HDR surface, see `WgpuConfiguration::prefer_hdr`) is linear too.
                     entry_point: Some(if output_color_format == wgpu::TextureFormat::Rgba16Float {
                         "fs_main_linear_framebuffer"
                     } else if output_color_format.is_srgb() {

@@ -262,6 +262,9 @@ struct BufferPadding {
 
 /// One `Rgba16Float` pixel (little-endian, linear, premultiplied) as a gamma-encoded
 /// [`epaint::Color32`]; values outside `0..=1` (HDR highlights) are clipped.
+///
+/// Gamma-encoding premultiplied channels is exact only for opaque pixels (encoding and
+/// premultiplying don't commute otherwise). That's fine here: window captures are opaque.
 fn linear_f16_to_color32(px: &[u8]) -> epaint::Color32 {
     let channel = |i: usize| {
         let bits = px
