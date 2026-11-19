@@ -1,7 +1,6 @@
 //! Records of one part of a pass ([`crate::Context::pass_records_since`]), which a later pass adds again in place of
 //! running that part ([`crate::Context::replay_pass_records`]).
 
-use core::any::Any;
 use core::fmt;
 
 use crate::{Id, LayerId, WidgetRect};
@@ -51,12 +50,27 @@ impl PassRecords {
     }
 
     /// The first record in which `self` and `other` differ, in the order shapes (layer by layer), widget rects,
-    /// AccessKit nodes, AccessKit parents; `None` when both hold the same output.
+    /// AccessKit nodes, AccessKit parents; `None` when both hold the same records.
     ///
-    /// Every record compares with `==`, except a [`epaint::PaintCallback`]: it compares by its rect and the type of
-    /// its callback, since each run makes a new callback (which `PartialEq` compares by pointer). Floats compare
-    /// exactly: a part run again with the same inputs gives the same values.
+    /// It covers what the records hold: the shapes painted on each layer, the widget rects, the AccessKit nodes
+    /// created and the parents registered for the part's widgets and nodes. It does not cover the platform output
+    /// (cursor, IME, commands), area or sublayer registrations, layer transforms, or the parents of nodes created
+    /// before the mark.
+    ///
+    /// Every record compares with `==`; floats compare exactly, since a part run again with the same inputs gives the
+    /// same values. A paint callback cannot be compared (its callback is opaque, and a backend wraps every callback in
+    /// one type): a callback on either side is [`PassRecordsDiff::Callback`].
     pub fn first_difference(&self, other: &Self) -> Option<PassRecordsDiff> {
+        for records in [self, other] {
+            for (layer, shapes) in &records.shapes {
+                if let Some(index) = shapes.iter().position(|shape| has_callback(&shape.shape)) {
+                    return Some(PassRecordsDiff::Callback {
+                        layer: *layer,
+                        index,
+                    });
+                }
+            }
+        }
         if let Some((index, left, right)) =
             first_unequal(&self.shapes, &other.shapes, |(a, _), (b, _)| a == b)
         {
@@ -67,7 +81,7 @@ impl PassRecords {
             });
         }
         for ((layer, left), (_, right)) in self.shapes.iter().zip(&other.shapes) {
-            if let Some((index, left, right)) = first_unequal(left, right, same_clipped_shape) {
+            if let Some((index, left, right)) = first_unequal(left, right, |a, b| a == b) {
                 return Some(PassRecordsDiff::Shape {
                     layer: *layer,
                     index,
@@ -110,6 +124,9 @@ impl PassRecords {
 /// record on each side, `None` on a side that has fewer records.
 #[derive(Clone, Debug)]
 pub enum PassRecordsDiff {
+    /// The `index`th shape on `layer`, on either side, is or holds a paint callback, which cannot be compared.
+    Callback { layer: LayerId, index: usize },
+
     /// The `index`th layer painted on.
     ShapeLayer {
         index: usize,
@@ -147,27 +164,48 @@ pub enum PassRecordsDiff {
     },
 }
 
+/// The variant, the index and the rects of each side: the records themselves stay on the value.
 impl fmt::Display for PassRecordsDiff {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ShapeLayer { index, left, right } => {
-                write!(f, "painted layer {index}: {left:?} / {right:?}")
+            Self::Callback { layer, index } => {
+                write!(f, "paint callback: shape {index} on {layer:?}")
             }
+            Self::ShapeLayer { index, .. } => write!(f, "painted layer {index}"),
             Self::Shape {
                 layer,
                 index,
                 left,
                 right,
-            } => write!(f, "shape {index} on {layer:?}: {left:?} / {right:?}"),
-            Self::Widget { index, left, right } => {
-                write!(f, "widget rect {index}: {left:?} / {right:?}")
+            } => {
+                let rects = |shape: &Option<ClippedShape>| {
+                    shape
+                        .as_ref()
+                        .map(|shape| (shape.shape.visual_bounding_rect(), shape.clip_rect))
+                };
+                write!(
+                    f,
+                    "shape {index} on {layer:?}: (bounds, clip) {:?} / {:?}",
+                    rects(left),
+                    rects(right)
+                )
             }
+            Self::Widget { index, left, right } => write!(
+                f,
+                "widget rect {index}: {:?} / {:?}",
+                left.map(|widget| widget.rect),
+                right.map(|widget| widget.rect)
+            ),
             Self::Node { index, left, right } => {
-                write!(f, "AccessKit node {index}: {left:?} / {right:?}")
+                let bounds = |node: &Option<(Id, accesskit::Node)>| node.as_ref()?.1.bounds();
+                write!(
+                    f,
+                    "AccessKit node {index}: bounds {:?} / {:?}",
+                    bounds(left),
+                    bounds(right)
+                )
             }
-            Self::Parent { index, left, right } => {
-                write!(f, "AccessKit parent {index}: {left:?} / {right:?}")
-            }
+            Self::Parent { index, .. } => write!(f, "AccessKit parent {index}"),
         }
     }
 }
@@ -187,19 +225,11 @@ fn first_unequal<'a, T>(
     Some((index, left.get(index), right.get(index)))
 }
 
-fn same_clipped_shape(a: &ClippedShape, b: &ClippedShape) -> bool {
-    a.clip_rect == b.clip_rect && same_shape(&a.shape, &b.shape)
-}
-
-/// `Shape::eq`, except that a callback compares by its rect and its callback's type.
-fn same_shape(a: &Shape, b: &Shape) -> bool {
-    match (a, b) {
-        (Shape::Vec(a), Shape::Vec(b)) => {
-            a.len() == b.len() && a.iter().zip(b).all(|(a, b)| same_shape(a, b))
-        }
-        (Shape::Callback(a), Shape::Callback(b)) => {
-            a.rect == b.rect && Any::type_id(&*a.callback) == Any::type_id(&*b.callback)
-        }
-        _ => a == b,
+/// Whether `shape` is or holds a paint callback.
+fn has_callback(shape: &Shape) -> bool {
+    match shape {
+        Shape::Callback(_) => true,
+        Shape::Vec(shapes) => shapes.iter().any(has_callback),
+        _ => false,
     }
 }

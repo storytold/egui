@@ -4423,13 +4423,16 @@ impl Context {
     }
 
     /// What this pass added since `mark`: the shapes painted, and the widget rects and AccessKit nodes created, each
-    /// as it stands now.
+    /// as it stands now. Shapes and widget rects come layer by layer, the layers sorted by [`Order`] and then id, so
+    /// two passes that add the same records give them in the same order.
     pub fn pass_records_since(&self, mark: &crate::PassMark) -> crate::PassRecords {
         use crate::PassMark;
         self.write(|ctx| {
             let viewport = ctx.viewport();
             let graphics = &viewport.graphics;
-            let shapes: Vec<_> = graphics
+            // Layers sort by order, then id: the maps they come from have no stable order.
+            let by_layer = |layer: &LayerId| (layer.order, layer.id.value());
+            let mut shapes: Vec<_> = graphics
                 .lens()
                 .filter(|(layer, len)| *len > PassMark::at(&mark.shapes, *layer))
                 .filter_map(|(layer, _)| {
@@ -4445,10 +4448,11 @@ impl Context {
                     ))
                 })
                 .collect();
-            let widgets: Vec<WidgetRect> = viewport
-                .this_pass
-                .widgets
-                .layers()
+            shapes.sort_by_key(|(layer, _)| by_layer(layer));
+            let mut widget_layers: Vec<_> = viewport.this_pass.widgets.layers().collect();
+            widget_layers.sort_by_key(|(layer, _)| by_layer(layer));
+            let widgets: Vec<WidgetRect> = widget_layers
+                .into_iter()
                 .flat_map(|(layer, rects)| {
                     rects
                         .get(PassMark::at(&mark.widgets, *layer)..)
