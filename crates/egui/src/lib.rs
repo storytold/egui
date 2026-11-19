@@ -523,7 +523,7 @@ pub use self::{
     load::SizeHint,
     memory::{FocusDirection, Memory, Options, Theme, ThemePreference},
     painter::Painter,
-    pass_records::{PassMark, PassRecords},
+    pass_records::{PassMark, PassRecords, PassRecordsDiff},
     plugin::Plugin,
     response::{InnerResponse, Response},
     sense::Sense,
