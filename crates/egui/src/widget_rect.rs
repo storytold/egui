@@ -128,6 +128,14 @@ pub struct WidgetRects {
     /// All widgets, by id, and their order in their respective layer
     by_id: IdMap<(usize, WidgetRect)>,
 
+    /// When each widget of `by_layer` took its place there, as a count of placements in the pass: rising along each
+    /// layer, since a widget always takes its place at the top. [`crate::Context::pass_records_since`] finds what a part
+    /// of the pass placed by it.
+    placed: HashMap<LayerId, Vec<u64>>,
+
+    /// How many placements the pass has made.
+    placements: u64,
+
     /// Info about some widgets.
     ///
     /// Only filled in if the widget is interacted with,
@@ -190,12 +198,19 @@ impl WidgetRects {
             by_layer,
             by_id,
             infos,
+            placed,
+            placements,
         } = self;
 
         #[expect(clippy::iter_over_hash_type)]
         for rects in by_layer.values_mut() {
             rects.clear();
         }
+        #[expect(clippy::iter_over_hash_type)]
+        for at in placed.values_mut() {
+            at.clear();
+        }
+        *placements = 0;
 
         by_id.clear();
 
@@ -208,6 +223,8 @@ impl WidgetRects {
             by_layer,
             by_id,
             infos: _,
+            placed,
+            placements,
         } = self;
 
         let InteractOptions {
@@ -219,6 +236,7 @@ impl WidgetRects {
         let mut shift_layer_index_after = None;
 
         let layer_widgets = by_layer.entry(layer_id).or_default();
+        let layer_placed = placed.entry(layer_id).or_default();
 
         match by_id.entry(widget_rect.id) {
             std::collections::hash_map::Entry::Vacant(entry) => {
@@ -226,25 +244,39 @@ impl WidgetRects {
                 let idx_in_layer = layer_widgets.len();
                 entry.insert((idx_in_layer, widget_rect));
                 layer_widgets.push(widget_rect);
+                layer_placed.push(*placements);
+                *placements += 1;
             }
             std::collections::hash_map::Entry::Occupied(mut entry) => {
                 // This is a known widget, but we might need to update it!
                 // e.g. calling `response.interact(…)` to add more interaction.
                 let (idx_in_layer, existing) = entry.get_mut();
 
-                // Update it:
-                existing.rect = widget_rect.rect; // last wins
-                existing.interact_rect = widget_rect.interact_rect; // last wins
-                existing.sense |= widget_rect.sense;
-                existing.enabled |= widget_rect.enabled;
-                existing.visible |= widget_rect.visible;
+                // A visible widget that only an invisible `Ui` (a sizing pass) registered so far is registered for
+                // real now: it is the new widget, and takes its place above what registered since, as a new one does.
+                let real = !existing.visible && widget_rect.visible;
+                if real {
+                    *existing = WidgetRect {
+                        layer_id: existing.layer_id,
+                        ..widget_rect
+                    };
+                } else {
+                    existing.rect = widget_rect.rect; // last wins
+                    existing.interact_rect = widget_rect.interact_rect; // last wins
+                    existing.sense |= widget_rect.sense;
+                    existing.enabled |= widget_rect.enabled;
+                    existing.visible |= widget_rect.visible;
+                }
 
                 if existing.layer_id == widget_rect.layer_id {
-                    if move_to_top {
+                    if move_to_top || real {
                         layer_widgets.remove(*idx_in_layer);
+                        layer_placed.remove(*idx_in_layer);
                         shift_layer_index_after = Some(*idx_in_layer);
                         *idx_in_layer = layer_widgets.len();
                         layer_widgets.push(*existing);
+                        layer_placed.push(*placements);
+                        *placements += 1;
                     } else {
                         layer_widgets[*idx_in_layer] = *existing;
                     }
@@ -266,6 +298,20 @@ impl WidgetRects {
                 }
             }
         }
+    }
+
+    /// How many placements the pass has made: what [`Self::placed_since`] takes.
+    pub(crate) fn placements(&self) -> u64 {
+        self.placements
+    }
+
+    /// The widgets of `layer` that took their place after the first `from` placements of the pass, back to front.
+    pub(crate) fn placed_since(&self, layer: LayerId, from: u64) -> &[WidgetRect] {
+        let (Some(rects), Some(placed)) = (self.by_layer.get(&layer), self.placed.get(&layer))
+        else {
+            return &[];
+        };
+        &rects[placed.partition_point(|at| *at < from)..]
     }
 
     pub fn set_info(&mut self, id: Id, info: WidgetInfo) {

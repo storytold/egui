@@ -12,7 +12,8 @@ use epaint::{ClippedShape, Shape};
 #[derive(Clone, Debug, Default)]
 pub struct PassMark {
     pub(crate) shapes: Vec<(LayerId, usize)>,
-    pub(crate) widgets: Vec<(LayerId, usize)>,
+    /// How many widget placements the pass had made ([`crate::WidgetRects::placed_since`]).
+    pub(crate) widgets: u64,
     pub(crate) nodes: usize,
 }
 
@@ -37,6 +38,37 @@ pub struct PassRecords {
 }
 
 impl PassRecords {
+    /// The records as a replay at the place `shift` names adds them ([`crate::Context::replay_pass_records`]).
+    #[must_use]
+    pub fn shifted(&self, shift: &RecordShift) -> Self {
+        if shift.is_none() {
+            return self.clone();
+        }
+        Self {
+            shapes: self
+                .shapes
+                .iter()
+                .map(|(layer, shapes)| {
+                    (
+                        *layer,
+                        shapes.iter().map(|shape| shift.shape(shape)).collect(),
+                    )
+                })
+                .collect(),
+            widgets: self
+                .widgets
+                .iter()
+                .map(|widget| shift.widget(widget))
+                .collect(),
+            nodes: self
+                .nodes
+                .iter()
+                .map(|(id, node)| (*id, shift.node(node)))
+                .collect(),
+            parents: self.parents.clone(),
+        }
+    }
+
     /// The layers the part painted on or placed widgets on.
     pub fn layers(&self) -> impl Iterator<Item = LayerId> + '_ {
         self.shapes

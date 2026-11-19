@@ -4407,12 +4407,7 @@ impl Context {
             let viewport = ctx.viewport();
             crate::PassMark {
                 shapes: viewport.graphics.lens().collect(),
-                widgets: viewport
-                    .this_pass
-                    .widgets
-                    .layers()
-                    .map(|(layer, rects)| (*layer, rects.len()))
-                    .collect(),
+                widgets: viewport.this_pass.widgets.placements(),
                 nodes: viewport
                     .this_pass
                     .accesskit_state
@@ -4424,7 +4419,10 @@ impl Context {
 
     /// What this pass added since `mark`: the shapes painted, and the widget rects and AccessKit nodes created, each
     /// as it stands now. Shapes and widget rects come layer by layer, the layers sorted by [`Order`] and then id, so
-    /// two passes that add the same records give them in the same order.
+    /// two passes that add the same records give them in the same order. A widget an invisible `Ui` (a sizing pass)
+    /// registered before the mark and a visible one registered after it is the part's, as if it were new
+    /// ([`crate::WidgetRects::insert`]). Shapes that paint nothing ([`epaint::Shape::Noop`]) and widgets that are
+    /// neither visible nor enabled are left out: they take no part in the pass.
     pub fn pass_records_since(&self, mark: &crate::PassMark) -> crate::PassRecords {
         use crate::PassMark;
         self.write(|ctx| {
@@ -4443,21 +4441,27 @@ impl Context {
                             .get(layer)?
                             .all_entries()
                             .skip(from)
+                            // An empty shape paints nothing: a slot no one filled, or an invisible painter's add.
+                            .filter(|shape| !matches!(shape.shape, epaint::Shape::Noop))
                             .cloned()
                             .collect(),
                     ))
                 })
+                .filter(|(_, shapes): &(LayerId, Vec<ClippedShape>)| !shapes.is_empty())
                 .collect();
             shapes.sort_by_key(|(layer, _)| by_layer(layer));
-            let mut widget_layers: Vec<_> = viewport.this_pass.widgets.layers().collect();
-            widget_layers.sort_by_key(|(layer, _)| by_layer(layer));
+            let this_pass = &viewport.this_pass.widgets;
+            let mut widget_layers: Vec<LayerId> = this_pass.layer_ids().collect();
+            widget_layers.sort_by_key(by_layer);
             let widgets: Vec<WidgetRect> = widget_layers
                 .into_iter()
-                .flat_map(|(layer, rects)| {
-                    rects
-                        .get(PassMark::at(&mark.widgets, *layer)..)
-                        .unwrap_or_default()
+                .flat_map(|layer| {
+                    this_pass
+                        .placed_since(layer, mark.widgets)
                         .iter()
+                        // A widget that is neither visible nor enabled (a sizing pass's) takes no hit, no focus and
+                        // has no AccessKit node.
+                        .filter(|widget| widget.visible || widget.enabled)
                         .copied()
                 })
                 .collect();

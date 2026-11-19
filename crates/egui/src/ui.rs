@@ -161,6 +161,11 @@ impl Ui {
                 .register_accesskit_parent(ui.unique_id, accessibility_parent);
         }
 
+        // Disabled before it registers, as `new_child` does: the widget is as enabled as the `Ui`.
+        if disabled {
+            ui.disable();
+        }
+
         // Register in the widget stack early, to ensure we are behind all widgets we contain:
         let start_rect = Rect::NOTHING; // This will be overwritten when `remember_min_rect` is called
         ui.ctx().create_widget(
@@ -178,9 +183,6 @@ impl Ui {
             Default::default(),
         );
 
-        if disabled {
-            ui.disable();
-        }
         if invisible {
             ui.set_invisible();
         }

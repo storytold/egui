@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use egui::{
     Color32, Context, Id, LayerId, Order, PassRecords, PassRecordsDiff, RecordShift, Rect, Role,
-    Sense, Ui, WidgetInfo, epaint::PaintCallback, pos2, vec2,
+    Sense, Ui, UiBuilder, WidgetInfo, epaint::PaintCallback, pos2, vec2,
 };
 
 /// The records of `part`, run in one pass of `ctx` after a label it does not include.
@@ -242,6 +242,83 @@ fn records_replayed_at_an_offset_equal_the_part_run_there() {
     );
     let diff = replayed.first_difference(&there);
     assert!(diff.is_none(), "{}", diff.expect("a difference"));
+    let diff = first.shifted(&shift).first_difference(&there);
+    assert!(
+        diff.is_none(),
+        "shifted records are what the replay adds: {}",
+        diff.expect("a difference")
+    );
+}
+
+/// A part whose ids an invisible `Ui` (a sizing pass) registered earlier in the pass, before a widget that is not the
+/// part's, holds what the same part holds in a pass with no sizing `Ui`: its own `Ui` and widgets, above that widget.
+#[test]
+fn a_part_after_a_sizing_pass_of_its_ids_holds_them_as_a_fresh_part_does() {
+    let ctx = context();
+    ctx.options_mut(|options| options.warn_on_id_clash = false);
+    let buttons = |ui: &mut Ui| {
+        let _ = ui.button("a");
+        let _ = ui.button("b");
+    };
+    let builder = || UiBuilder::new().scope_id(Id::unique("part"));
+    let pass = |ctx: &Context, sweep: bool| {
+        let mut out = None;
+        let output = ctx.run_ui(Default::default(), |ui| {
+            if sweep {
+                // A sizing pass takes no room where it measures.
+                buttons(&mut ui.new_child(builder().invisible().sizing_pass()));
+            }
+            let _ = ui.button("between");
+            let mark = ui.ctx().pass_mark();
+            ui.scope_builder(builder(), buttons);
+            out = Some(ui.ctx().pass_records_since(&mark));
+        });
+        output.drop_without_applying_deltas();
+        out.expect("the pass ran")
+    };
+    let fresh = pass(&ctx, false);
+    let after_sweep = pass(&ctx, true);
+    assert!(
+        after_sweep
+            .widgets()
+            .iter()
+            .any(|widget| widget.id == Id::unique("part")),
+        "the part's own `Ui` is in its records: {:?}",
+        after_sweep
+            .widgets()
+            .iter()
+            .map(|w| (w.id, w.visible, w.enabled))
+            .collect::<Vec<_>>()
+    );
+    let diff = after_sweep.first_difference(&fresh);
+    assert!(diff.is_none(), "{}", diff.expect("a difference"));
+}
+
+/// What an invisible painter adds and what an invisible, disabled `Ui` registers (a sizing pass's root included) take
+/// no part in the pass, so the records hold none of it.
+#[test]
+fn records_hold_no_empty_shapes_or_sizing_widgets() {
+    let ctx = context();
+    let records = records(&ctx, |ui: &mut Ui| {
+        ui.scope_builder(UiBuilder::new().invisible(), |ui| {
+            ui.painter().rect_filled(
+                Rect::from_min_size(pos2(0.0, 0.0), vec2(10.0, 10.0)),
+                0.0,
+                Color32::RED,
+            );
+            let _ = ui.button("hidden");
+        });
+        let builder = UiBuilder::new()
+            .layer_id(ui.layer_id())
+            .max_rect(ui.max_rect())
+            .disabled()
+            .invisible()
+            .sizing_pass();
+        let mut root = Ui::new(ui.ctx().clone(), Id::unique("measure"), builder);
+        root.label("measured");
+    });
+    let diff = records.first_difference(&PassRecords::default());
+    assert!(diff.is_none(), "{:?}", diff.expect("a difference"));
 }
 
 /// Records know whether they hold a paint callback, which a replay adds only where it was made.
