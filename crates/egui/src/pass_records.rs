@@ -4,6 +4,7 @@
 use core::fmt;
 
 use crate::{Id, LayerId, WidgetRect};
+use emath::{Pos2, Rect, Vec2};
 use epaint::{ClippedShape, Shape};
 
 /// Where the current pass's shapes, widget rects and AccessKit nodes stand ([`crate::Context::pass_mark`]). It is
@@ -47,6 +48,15 @@ impl PassRecords {
     /// The widget rects, in the order they were added.
     pub fn widgets(&self) -> &[WidgetRect] {
         &self.widgets
+    }
+
+    /// Whether the records hold a paint callback. Its callback is opaque: it cannot be compared
+    /// ([`Self::first_difference`]), and it may paint at the place it was made for, so a replay adds it there only
+    /// ([`RecordShift`]).
+    pub fn paints_callback(&self) -> bool {
+        self.shapes
+            .iter()
+            .any(|(_, shapes)| shapes.iter().any(|shape| has_callback(&shape.shape)))
     }
 
     /// The first record in which `self` and `other` differ, in the order shapes (layer by layer), widget rects,
@@ -117,6 +127,94 @@ impl PassRecords {
             });
         }
         None
+    }
+}
+
+/// Where a replay adds records that a part made elsewhere ([`crate::Context::replay_pass_records`]).
+///
+/// The records move by `offset` in layer space, and show through `clip` where the part showed through `ran_clip`.
+///
+/// A clip rect equal to `ran_clip` is the clip of the code around the part, which becomes `clip`; any other clip rect
+/// was set inside the part and moves with it, cut by `clip`. That gives what the part run at the new place gives when
+/// `clip` is `ran_clip` moved by `offset`, or when the part lay wholly inside `ran_clip` (nothing of it was culled, and
+/// every clip set inside it lies within `ran_clip`); the caller decides when it may move records.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RecordShift {
+    pub offset: Vec2,
+    pub ran_clip: Rect,
+    pub clip: Rect,
+}
+
+impl RecordShift {
+    /// Records added where they were made, under `clip`.
+    pub fn none(clip: Rect) -> Self {
+        Self {
+            offset: Vec2::ZERO,
+            ran_clip: clip,
+            clip,
+        }
+    }
+
+    /// Whether the shift leaves every record as it is.
+    pub fn is_none(&self) -> bool {
+        self.offset == Vec2::ZERO && self.ran_clip == self.clip
+    }
+
+    /// `pos` moved with the records.
+    pub fn pos(&self, pos: Pos2) -> Pos2 {
+        pos + self.offset
+    }
+
+    /// `rect` moved with the records.
+    pub fn rect(&self, rect: Rect) -> Rect {
+        rect.translate(self.offset)
+    }
+
+    /// The clip rect `clip` of a record, at the new place.
+    pub fn clip(&self, clip: Rect) -> Rect {
+        if clip == self.ran_clip {
+            self.clip
+        } else {
+            clip.translate(self.offset).intersect(self.clip)
+        }
+    }
+
+    /// The shape `shape` recorded under `clip_rect`, at the new place.
+    pub fn shape(&self, shape: &ClippedShape) -> ClippedShape {
+        let mut moved = shape.clone();
+        moved.clip_rect = self.clip(shape.clip_rect);
+        if self.offset != Vec2::ZERO {
+            moved.shape.translate(self.offset);
+        }
+        moved
+    }
+
+    /// The widget rect `widget` at the new place: its rect moved, the part of it that takes interaction cut by the new
+    /// clip.
+    pub fn widget(&self, widget: &WidgetRect) -> WidgetRect {
+        WidgetRect {
+            rect: self.rect(widget.rect),
+            interact_rect: self.rect(widget.interact_rect).intersect(self.clip),
+            ..*widget
+        }
+    }
+
+    /// The AccessKit node `node` at the new place: its bounds moved. Bounds are in layer space for an untransformed
+    /// layer only, so records on a transformed layer move by no offset.
+    pub fn node(&self, node: &accesskit::Node) -> accesskit::Node {
+        let mut moved = node.clone();
+        if self.offset != Vec2::ZERO
+            && let Some(bounds) = node.bounds()
+        {
+            let (x, y) = (f64::from(self.offset.x), f64::from(self.offset.y));
+            moved.set_bounds(accesskit::Rect {
+                x0: bounds.x0 + x,
+                y0: bounds.y0 + y,
+                x1: bounds.x1 + x,
+                y1: bounds.y1 + y,
+            });
+        }
+        moved
     }
 }
 

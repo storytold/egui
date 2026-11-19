@@ -4488,21 +4488,32 @@ impl Context {
         })
     }
 
-    /// Adds `records` to this pass as the part of a pass that made them would: its shapes after what each layer
-    /// holds, its widget rects, and its AccessKit nodes under the nodes their parents have now.
-    pub fn replay_pass_records(&self, records: &crate::PassRecords) {
+    /// Adds `records` to this pass as the part of a pass that made them would, at the place `shift` names: its shapes
+    /// after what each layer holds, its widget rects, and its AccessKit nodes under the nodes their parents have now.
+    /// Records that hold a paint callback ([`crate::PassRecords::paints_callback`]) take a shift with no offset.
+    pub fn replay_pass_records(&self, records: &crate::PassRecords, shift: &crate::RecordShift) {
+        debug_assert!(
+            shift.offset == Vec2::ZERO || !records.paints_callback(),
+            "a paint callback is replayed where it was made"
+        );
+        let same = shift.is_none();
         self.write(|ctx| {
             let viewport = ctx.viewport();
             for (layer, shapes) in &records.shapes {
                 let list = viewport.graphics.entry(*layer);
                 for shape in shapes {
-                    list.add(shape.clip_rect, shape.shape.clone());
+                    if same {
+                        list.add(shape.clip_rect, shape.shape.clone());
+                    } else {
+                        let moved = shift.shape(shape);
+                        list.add(moved.clip_rect, moved.shape);
+                    }
                 }
             }
             for widget in &records.widgets {
                 viewport.this_pass.widgets.insert(
                     widget.layer_id,
-                    *widget,
+                    if same { *widget } else { shift.widget(widget) },
                     crate::InteractOptions::default(),
                 );
             }
@@ -4524,7 +4535,9 @@ impl Context {
                     };
                     parent.push_child(id.accesskit_id());
                 }
-                state.nodes.insert(*id, node.clone());
+                state
+                    .nodes
+                    .insert(*id, if same { node.clone() } else { shift.node(node) });
                 state.created.push(*id);
             }
         });

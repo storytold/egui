@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use egui::{
-    Color32, Context, Id, LayerId, Order, PassRecords, PassRecordsDiff, Rect, Role, Sense, Ui,
-    WidgetInfo, epaint::PaintCallback, pos2, vec2,
+    Color32, Context, Id, LayerId, Order, PassRecords, PassRecordsDiff, RecordShift, Rect, Role,
+    Sense, Ui, WidgetInfo, epaint::PaintCallback, pos2, vec2,
 };
 
 /// The records of `part`, run in one pass of `ctx` after a label it does not include.
@@ -193,4 +193,66 @@ fn a_changed_parent_is_the_first_difference() {
         ),
         "{diff:?}"
     );
+}
+
+/// A part with text, a widget, its node and a clip of its own, run `down` below where it ran first, equals its first
+/// records replayed moved by `down`.
+#[test]
+fn records_replayed_at_an_offset_equal_the_part_run_there() {
+    let ctx = context();
+    let part = |ui: &mut Ui| {
+        ui.label("text");
+        let _ = ui.button("button");
+        ui.scope(|ui| {
+            let inner = Rect::from_min_size(ui.cursor().min, vec2(30.0, 10.0));
+            ui.set_clip_rect(inner.intersect(ui.clip_rect()));
+            ui.painter()
+                .rect_filled(inner.expand(4.0), 0.0, Color32::RED);
+            ui.label("clipped");
+        });
+    };
+    // The records of the pass, the clip the part ran under, and what `inside` added below the space.
+    let pass = |ctx: &Context, space: f32, inside: &mut dyn FnMut(&mut Ui)| {
+        let mut out = None;
+        let output = ctx.run_ui(Default::default(), |ui| {
+            ui.label("before");
+            ui.add_space(space);
+            let mark = ui.ctx().pass_mark();
+            inside(ui);
+            out = Some((ui.ctx().pass_records_since(&mark), ui.clip_rect()));
+        });
+        output.drop_without_applying_deltas();
+        out.expect("the pass ran")
+    };
+    let down = vec2(0.0, 40.0);
+    let (first, clip) = pass(&ctx, 0.0, &mut |ui: &mut Ui| part(ui));
+    let (there, clip_there) = pass(&ctx, down.y, &mut |ui: &mut Ui| part(ui));
+    assert!(!first.paints_callback());
+    let shift = RecordShift {
+        offset: down,
+        ran_clip: clip,
+        clip: clip_there,
+    };
+    let (replayed, _) = pass(&ctx, down.y, &mut |ui: &mut Ui| {
+        ui.ctx().replay_pass_records(&first, &shift);
+    });
+    assert!(
+        first.first_difference(&there).is_some(),
+        "the part run lower differs from its first run"
+    );
+    let diff = replayed.first_difference(&there);
+    assert!(diff.is_none(), "{}", diff.expect("a difference"));
+}
+
+/// Records know whether they hold a paint callback, which a replay adds only where it was made.
+#[test]
+fn records_know_they_paint_a_callback() {
+    let ctx = context();
+    let records = records(&ctx, |ui: &mut Ui| {
+        ui.painter().add(PaintCallback {
+            rect: Rect::from_min_size(pos2(10.0, 10.0), vec2(20.0, 20.0)),
+            callback: Arc::new(()),
+        });
+    });
+    assert!(records.paints_callback());
 }
