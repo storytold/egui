@@ -99,10 +99,13 @@ impl PassRecords {
     /// (cursor, IME, commands), area or sublayer registrations, layer transforms, or the parents of nodes created
     /// before the mark.
     ///
-    /// Every record compares with `==`; floats compare exactly, since a part run again with the same inputs gives the
-    /// same values. A paint callback cannot be compared (its callback is opaque, and a backend wraps every callback in
-    /// one type): a callback on either side is [`PassRecordsDiff::Callback`].
-    pub fn first_difference(&self, other: &Self) -> Option<PassRecordsDiff> {
+    /// Geometry (positions, sizes, widths, angles, texture coordinates and AccessKit bounds) compares within
+    /// `tolerance` points; everything else (ids, counts, colours, text and its layout, flags) compares exactly. Records
+    /// moved by [`Self::shifted`] from positions off the float grid differ from the part run at the new place by
+    /// rounding only, which a small `tolerance` covers; `0.0` compares exactly. A paint callback cannot be compared
+    /// (its callback is opaque, and a backend wraps every callback in one type): a callback on either side is
+    /// [`PassRecordsDiff::Callback`].
+    pub fn first_difference(&self, other: &Self, tolerance: f32) -> Option<PassRecordsDiff> {
         for records in [self, other] {
             for (layer, shapes) in &records.shapes {
                 if let Some(index) = shapes.iter().position(|shape| has_callback(&shape.shape)) {
@@ -123,7 +126,9 @@ impl PassRecords {
             });
         }
         for ((layer, left), (_, right)) in self.shapes.iter().zip(&other.shapes) {
-            if let Some((index, left, right)) = first_unequal(left, right, |a, b| a == b) {
+            if let Some((index, left, right)) = first_unequal(left, right, |a, b| {
+                near::clipped_shape(a, b, tolerance) == *b
+            }) {
                 return Some(PassRecordsDiff::Shape {
                     layer: *layer,
                     index,
@@ -132,16 +137,19 @@ impl PassRecords {
                 });
             }
         }
-        if let Some((index, left, right)) =
-            first_unequal(&self.widgets, &other.widgets, |a, b| a == b)
-        {
+        if let Some((index, left, right)) = first_unequal(&self.widgets, &other.widgets, |a, b| {
+            near::widget(a, b, tolerance) == *b
+        }) {
             return Some(PassRecordsDiff::Widget {
                 index,
                 left: left.copied(),
                 right: right.copied(),
             });
         }
-        if let Some((index, left, right)) = first_unequal(&self.nodes, &other.nodes, |a, b| a == b)
+        if let Some((index, left, right)) =
+            first_unequal(&self.nodes, &other.nodes, |(a_id, a), (b_id, b)| {
+                a_id == b_id && near::node(a, b, tolerance) == *b
+            })
         {
             return Some(PassRecordsDiff::Node {
                 index,
@@ -361,5 +369,199 @@ fn has_callback(shape: &Shape) -> bool {
         Shape::Callback(_) => true,
         Shape::Vec(shapes) => shapes.iter().any(has_callback),
         _ => false,
+    }
+}
+
+/// Records with their geometry taken from another record where the two lie within a tolerance: a record that `==`
+/// then finds equal to the other differs from it by no more than the tolerance in geometry and not at all elsewhere.
+/// Each function takes the geometry the matching [`RecordShift`] function moves, and the shape's sizes and widths.
+mod near {
+    use std::sync::Arc;
+
+    use emath::{Pos2, Rangef, Rect, Vec2};
+    use epaint::{ClippedShape, Mesh, PathStroke, Shape, Stroke};
+
+    use crate::WidgetRect;
+
+    fn float(a: f32, b: f32, tolerance: f32) -> f32 {
+        if (a - b).abs() <= tolerance { b } else { a }
+    }
+
+    fn pos(a: Pos2, b: Pos2, tolerance: f32) -> Pos2 {
+        Pos2::new(float(a.x, b.x, tolerance), float(a.y, b.y, tolerance))
+    }
+
+    fn vec(a: Vec2, b: Vec2, tolerance: f32) -> Vec2 {
+        Vec2::new(float(a.x, b.x, tolerance), float(a.y, b.y, tolerance))
+    }
+
+    fn rect(a: Rect, b: Rect, tolerance: f32) -> Rect {
+        Rect::from_min_max(pos(a.min, b.min, tolerance), pos(a.max, b.max, tolerance))
+    }
+
+    fn points<const N: usize>(a: [Pos2; N], b: [Pos2; N], tolerance: f32) -> [Pos2; N] {
+        std::array::from_fn(|index| pos(a[index], b[index], tolerance))
+    }
+
+    /// `a`, each item taken from `b`'s item by `near`, when both hold as many.
+    fn list<T: Clone>(a: &[T], b: &[T], near: impl Fn(&T, &T) -> T) -> Vec<T> {
+        if a.len() == b.len() {
+            a.iter().zip(b).map(|(a, b)| near(a, b)).collect()
+        } else {
+            a.to_vec()
+        }
+    }
+
+    fn stroke(a: Stroke, b: Stroke, tolerance: f32) -> Stroke {
+        Stroke {
+            width: float(a.width, b.width, tolerance),
+            ..a
+        }
+    }
+
+    fn path_stroke(a: &PathStroke, b: &PathStroke, tolerance: f32) -> PathStroke {
+        PathStroke {
+            width: float(a.width, b.width, tolerance),
+            ..a.clone()
+        }
+    }
+
+    pub(super) fn clipped_shape(
+        a: &ClippedShape,
+        b: &ClippedShape,
+        tolerance: f32,
+    ) -> ClippedShape {
+        ClippedShape {
+            clip_rect: rect(a.clip_rect, b.clip_rect, tolerance),
+            shape: shape(&a.shape, &b.shape, tolerance),
+            ..a.clone()
+        }
+    }
+
+    fn shape(a: &Shape, b: &Shape, tolerance: f32) -> Shape {
+        let t = tolerance;
+        match (a, b) {
+            (Shape::Vec(a), Shape::Vec(b)) => Shape::Vec(list(a, b, |a, b| shape(a, b, t))),
+            (Shape::Circle(a), Shape::Circle(b)) => {
+                let mut near = *a;
+                near.center = pos(a.center, b.center, t);
+                near.radius = float(a.radius, b.radius, t);
+                near.stroke = stroke(a.stroke, b.stroke, t);
+                Shape::Circle(near)
+            }
+            (Shape::Ellipse(a), Shape::Ellipse(b)) => {
+                let mut near = *a;
+                near.center = pos(a.center, b.center, t);
+                near.radius = vec(a.radius, b.radius, t);
+                near.stroke = stroke(a.stroke, b.stroke, t);
+                near.angle = float(a.angle, b.angle, t);
+                Shape::Ellipse(near)
+            }
+            (
+                Shape::LineSegment {
+                    points: a_points,
+                    stroke: a_stroke,
+                },
+                Shape::LineSegment {
+                    points: b_points,
+                    stroke: b_stroke,
+                },
+            ) => Shape::LineSegment {
+                points: points(*a_points, *b_points, t),
+                stroke: stroke(*a_stroke, *b_stroke, t),
+            },
+            (Shape::Path(a), Shape::Path(b)) => {
+                let mut near = a.clone();
+                near.points = list(&a.points, &b.points, |a, b| pos(*a, *b, t));
+                near.stroke = path_stroke(&a.stroke, &b.stroke, t);
+                Shape::Path(near)
+            }
+            (Shape::Band(a), Shape::Band(b)) => {
+                let mut near = a.clone();
+                near.points = list(&a.points, &b.points, |a, b| {
+                    let mut point = *a;
+                    point.x = float(a.x, b.x, t);
+                    point.y = Rangef::new(float(a.y.min, b.y.min, t), float(a.y.max, b.y.max, t));
+                    point
+                });
+                near.stroke = stroke(a.stroke, b.stroke, t);
+                near.angle = float(a.angle, b.angle, t);
+                Shape::Band(near)
+            }
+            (Shape::Rect(a), Shape::Rect(b)) => {
+                let mut near = a.clone();
+                near.rect = rect(a.rect, b.rect, t);
+                near.stroke = stroke(a.stroke, b.stroke, t);
+                near.blur_width = float(a.blur_width, b.blur_width, t);
+                near.angle = float(a.angle, b.angle, t);
+                if let (Some(a_brush), Some(b_brush)) = (&a.brush, &b.brush) {
+                    let mut brush = (**a_brush).clone();
+                    brush.uv = rect(a_brush.uv, b_brush.uv, t);
+                    near.brush = Some(Arc::new(brush));
+                }
+                Shape::Rect(near)
+            }
+            (Shape::Text(a), Shape::Text(b)) => {
+                let mut near = a.clone();
+                near.pos = pos(a.pos, b.pos, t);
+                near.underline = stroke(a.underline, b.underline, t);
+                near.opacity_factor = float(a.opacity_factor, b.opacity_factor, t);
+                near.angle = float(a.angle, b.angle, t);
+                Shape::Text(near)
+            }
+            (Shape::Mesh(a), Shape::Mesh(b)) => Shape::Mesh(Arc::new(mesh(a, b, t))),
+            (Shape::QuadraticBezier(a), Shape::QuadraticBezier(b)) => {
+                let mut near = a.clone();
+                near.points = points(a.points, b.points, t);
+                near.stroke = path_stroke(&a.stroke, &b.stroke, t);
+                Shape::QuadraticBezier(near)
+            }
+            (Shape::CubicBezier(a), Shape::CubicBezier(b)) => {
+                let mut near = a.clone();
+                near.points = points(a.points, b.points, t);
+                near.stroke = path_stroke(&a.stroke, &b.stroke, t);
+                Shape::CubicBezier(near)
+            }
+            _ => a.clone(),
+        }
+    }
+
+    fn mesh(a: &Mesh, b: &Mesh, tolerance: f32) -> Mesh {
+        Mesh {
+            vertices: list(&a.vertices, &b.vertices, |a, b| {
+                let mut vertex = *a;
+                vertex.pos = pos(a.pos, b.pos, tolerance);
+                vertex.uv = pos(a.uv, b.uv, tolerance);
+                vertex
+            }),
+            ..a.clone()
+        }
+    }
+
+    pub(super) fn widget(a: &WidgetRect, b: &WidgetRect, tolerance: f32) -> WidgetRect {
+        WidgetRect {
+            rect: rect(a.rect, b.rect, tolerance),
+            interact_rect: rect(a.interact_rect, b.interact_rect, tolerance),
+            ..*a
+        }
+    }
+
+    pub(super) fn node(
+        a: &accesskit::Node,
+        b: &accesskit::Node,
+        tolerance: f32,
+    ) -> accesskit::Node {
+        let mut near = a.clone();
+        if let (Some(a), Some(b)) = (a.bounds(), b.bounds()) {
+            let tolerance = f64::from(tolerance);
+            let float = |a: f64, b: f64| if (a - b).abs() <= tolerance { b } else { a };
+            near.set_bounds(accesskit::Rect {
+                x0: float(a.x0, b.x0),
+                y0: float(a.y0, b.y0),
+                x1: float(a.x1, b.x1),
+                y1: float(a.y1, b.y1),
+            });
+        }
+        near
     }
 }

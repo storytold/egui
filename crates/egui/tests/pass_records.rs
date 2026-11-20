@@ -38,7 +38,7 @@ fn identical_parts_compare_equal() {
         !first.widgets().is_empty(),
         "the part placed widgets, so the comparison covers them"
     );
-    let diff = first.first_difference(&second);
+    let diff = first.first_difference(&second, 0.0);
     assert!(diff.is_none(), "{}", diff.expect("a difference"));
 }
 
@@ -61,7 +61,7 @@ fn a_paint_callback_cannot_be_compared() {
     };
     let first = records(&ctx, callback(1));
     let second = records(&ctx, callback(2));
-    let diff = first.first_difference(&second);
+    let diff = first.first_difference(&second, 0.0);
     assert!(
         matches!(diff, Some(PassRecordsDiff::Callback { index: 1, .. })),
         "{diff:?}"
@@ -100,7 +100,7 @@ fn records_on_several_layers_keep_their_order() {
     let first = pass(false);
     let second = pass(true);
     assert_eq!(first.layers().count(), 2, "the part painted on two layers");
-    let diff = first.first_difference(&second);
+    let diff = first.first_difference(&second, 0.0);
     assert!(diff.is_none(), "{}", diff.expect("a difference"));
 }
 
@@ -113,7 +113,7 @@ fn a_changed_shape_is_the_first_difference() {
     let second = records(&ctx, |ui| {
         ui.label("right");
     });
-    let diff = first.first_difference(&second);
+    let diff = first.first_difference(&second, 0.0);
     assert!(
         matches!(
             diff,
@@ -144,9 +144,9 @@ fn a_changed_node_is_the_first_difference() {
         left: Some((left_id, left)),
         right: Some((right_id, right)),
         ..
-    }) = first.first_difference(&second)
+    }) = first.first_difference(&second, 0.0)
     else {
-        panic!("{:?}", first.first_difference(&second));
+        panic!("{:?}", first.first_difference(&second, 0.0));
     };
     assert_eq!(left_id, right_id, "the same widget's node");
     assert_ne!(left.label(), right.label());
@@ -181,7 +181,7 @@ fn a_changed_parent_is_the_first_difference() {
     };
     let first = parents(&ctx, one);
     let second = parents(&ctx, other);
-    let diff = first.first_difference(&second);
+    let diff = first.first_difference(&second, 0.0);
     assert!(
         matches!(
             diff,
@@ -237,12 +237,12 @@ fn records_replayed_at_an_offset_equal_the_part_run_there() {
         ui.ctx().replay_pass_records(&first, &shift);
     });
     assert!(
-        first.first_difference(&there).is_some(),
+        first.first_difference(&there, 0.0).is_some(),
         "the part run lower differs from its first run"
     );
-    let diff = replayed.first_difference(&there);
+    let diff = replayed.first_difference(&there, 0.0);
     assert!(diff.is_none(), "{}", diff.expect("a difference"));
-    let diff = first.shifted(&shift).first_difference(&there);
+    let diff = first.shifted(&shift).first_difference(&there, 0.0);
     assert!(
         diff.is_none(),
         "shifted records are what the replay adds: {}",
@@ -290,7 +290,7 @@ fn a_part_after_a_sizing_pass_of_its_ids_holds_them_as_a_fresh_part_does() {
             .map(|w| (w.id, w.visible, w.enabled))
             .collect::<Vec<_>>()
     );
-    let diff = after_sweep.first_difference(&fresh);
+    let diff = after_sweep.first_difference(&fresh, 0.0);
     assert!(diff.is_none(), "{}", diff.expect("a difference"));
 }
 
@@ -317,7 +317,7 @@ fn records_hold_no_empty_shapes_or_sizing_widgets() {
         let mut root = Ui::new(ui.ctx().clone(), Id::unique("measure"), builder);
         root.label("measured");
     });
-    let diff = records.first_difference(&PassRecords::default());
+    let diff = records.first_difference(&PassRecords::default(), 0.0);
     assert!(diff.is_none(), "{:?}", diff.expect("a difference"));
 }
 
@@ -332,4 +332,56 @@ fn records_know_they_paint_a_callback() {
         });
     });
     assert!(records.paints_callback());
+}
+
+/// Records moved up by a whole pixel from positions off the float grid differ from the part run there by rounding
+/// only: they compare equal within a tolerance of 1/256 pt. A part run there 1/64 pt lower does not.
+#[test]
+fn geometry_compares_within_the_tolerance() {
+    let ctx = context();
+    // A strip of rects at tenths of a point below the cursor: positions no binary fraction holds.
+    let part = |lower: f32| {
+        move |ui: &mut Ui| {
+            let top = ui.cursor().min.y + lower;
+            for tenth in 1..10 {
+                let y = top + tenth as f32 * 0.1;
+                let rect = Rect::from_min_size(pos2(10.0, y), vec2(4.0, 1.0));
+                ui.painter().rect_filled(rect, 0.0, Color32::RED);
+            }
+        }
+    };
+    let pass = |ctx: &Context, space: f32, lower: f32| {
+        let mut out = None;
+        let output = ctx.run_ui(Default::default(), |ui| {
+            ui.label("before");
+            ui.add_space(space);
+            let mark = ui.ctx().pass_mark();
+            part(lower)(ui);
+            out = Some((ui.ctx().pass_records_since(&mark), ui.clip_rect()));
+        });
+        output.drop_without_applying_deltas();
+        out.expect("the pass ran")
+    };
+    let (first, clip) = pass(&ctx, 40.0, 0.0);
+    let (there, clip_there) = pass(&ctx, 0.0, 0.0);
+    let shift = RecordShift {
+        offset: vec2(0.0, -40.0),
+        ran_clip: clip,
+        clip: clip_there,
+    };
+    let moved = first.shifted(&shift);
+    assert!(
+        moved.first_difference(&there, 0.0).is_some(),
+        "the moved positions differ from the run's by rounding"
+    );
+    let diff = moved.first_difference(&there, 1.0 / 256.0);
+    assert!(diff.is_none(), "{}", diff.expect("a difference"));
+    let (lower, _) = pass(&ctx, 0.0, 1.0 / 64.0);
+    assert!(
+        matches!(
+            moved.first_difference(&lower, 1.0 / 256.0),
+            Some(PassRecordsDiff::Shape { index: 0, .. })
+        ),
+        "a part 1/64 pt lower is a difference"
+    );
 }
