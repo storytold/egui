@@ -240,7 +240,13 @@ pub(crate) struct GlyphAtlas {
     ///
     /// `None` means no rasterizer of that priority could handle the cluster.
     raster_glyphs: IntMap<RasterGlyphKey, Option<RasterGlyphAllocation>>,
+
+    /// Names this atlas's contents: new for every atlas made or cleared, unique in the process.
+    generation: u64,
 }
+
+/// The next [`GlyphAtlas::generation`].
+static NEXT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 impl GlyphAtlas {
     pub fn new(options: TextOptions) -> Self {
@@ -250,7 +256,15 @@ impl GlyphAtlas {
             atlas: TextureAtlas::new([texture_width, initial_height], options),
             outline_glyphs: Default::default(),
             raster_glyphs: Default::default(),
+            generation: NEXT_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         }
+    }
+
+    /// Which atlas this is: a new value whenever the atlas is made, cleared or rebuilt with other options. A
+    /// [`UvRect`] taken under one generation points at the same glyph only while the generation is unchanged.
+    #[inline]
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     #[inline]

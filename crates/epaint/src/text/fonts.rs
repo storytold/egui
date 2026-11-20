@@ -256,6 +256,13 @@ impl Fonts {
         self.fonts.glyphs.atlas().size()
     }
 
+    /// Which font atlas the glyphs are in: a new value whenever the atlas is made, cleared (it got full) or rebuilt
+    /// (new [`TextOptions`]). A galley laid out under one generation draws the right glyphs only while it is unchanged,
+    /// so kept paint that holds text is valid only under the generation it was made in.
+    pub fn atlas_generation(&self) -> u64 {
+        self.fonts.glyphs.generation()
+    }
+
     /// Do the installed fonts have this glyph?
     ///
     /// This does not consult the [`GlyphRasterizer`]s, so it can return `false`
@@ -370,6 +377,13 @@ impl FontsView<'_> {
     /// Pass this to [`crate::Tessellator`].
     pub fn font_image_size(&self) -> [usize; 2] {
         self.fonts.glyphs.atlas().size()
+    }
+
+    /// Which font atlas the glyphs are in: a new value whenever the atlas is made, cleared (it got full) or rebuilt
+    /// (new [`TextOptions`]). A galley laid out under one generation draws the right glyphs only while it is unchanged,
+    /// so kept paint that holds text is valid only under the generation it was made in.
+    pub fn atlas_generation(&self) -> u64 {
+        self.fonts.glyphs.generation()
     }
 
     /// Width of this character in points.
@@ -932,6 +946,37 @@ fn synthetic_tofu(font_size_px: f32) -> RasterizedGlyph {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_atlas_generation_moves_when_the_atlas_is_rebuilt_only() {
+        let options = TextOptions::default();
+        let mut fonts = Fonts::new(options, FontDefinitions::default());
+        let key = ViewportKey::new(1);
+        fonts.begin_pass(options, key);
+        let first = fonts.atlas_generation();
+        fonts.begin_pass(options, key);
+        assert_eq!(
+            fonts.atlas_generation(),
+            first,
+            "a pass with the same options keeps the atlas"
+        );
+        let other = TextOptions {
+            font_hinting: !options.font_hinting,
+            ..options
+        };
+        fonts.begin_pass(other, key);
+        assert_ne!(
+            fonts.atlas_generation(),
+            first,
+            "new options rebuild the atlas"
+        );
+        let other_fonts = Fonts::new(options, FontDefinitions::default());
+        assert_ne!(
+            other_fonts.atlas_generation(),
+            first,
+            "a new atlas has its own generation"
+        );
+    }
 
     #[test]
     fn viewport_passes_do_not_evict_each_others_galleys() {
