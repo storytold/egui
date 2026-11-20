@@ -3213,7 +3213,16 @@ impl State {
         // emit events as if the corresponding keys from the Latin layout were pressed. In this case, clipboard shortcuts
         // are mapped to the physical keys that normally contain C, X, V, etc.
         // See also: https://github.com/emilk/egui/issues/3653
-        let translated = logical_key.or(physical_key);
+        // The physical side of the fallback keeps its pre-`Key::Numpad*` identity: an
+        // unidentified numpad key fell back to its collapsed main-row logical, and
+        // consumers matching that must not start receiving `Numpad*` instead.
+        let fallback_key = match event.physical_key {
+            winit::keyboard::PhysicalKey::Code(keycode) => {
+                logical_fallback_key_from_key_code(keycode)
+            }
+            winit::keyboard::PhysicalKey::Unidentified(_) => None,
+        };
+        let translated = logical_key.or(fallback_key);
         if pressed {
             if self.try_clipboard_shortcut(event.physical_key, translated) {
                 return;
@@ -4095,7 +4104,7 @@ fn key_from_key_code(key: winit::keyboard::KeyCode) -> Option<egui::Key> {
         KeyCode::Escape => Key::Escape,
         KeyCode::Tab => Key::Tab,
         KeyCode::Backspace => Key::Backspace,
-        KeyCode::Enter | KeyCode::NumpadEnter => Key::Enter,
+        KeyCode::Enter => Key::Enter,
 
         KeyCode::Insert => Key::Insert,
         KeyCode::Delete => Key::Delete,
@@ -4111,7 +4120,7 @@ fn key_from_key_code(key: winit::keyboard::KeyCode) -> Option<egui::Key> {
         // KeyCode::Colon => Key::Colon, // NOTE: there is no physical colon key on an american keyboard
         KeyCode::Semicolon => Key::Semicolon,
         KeyCode::Backslash => Key::Backslash,
-        KeyCode::Slash | KeyCode::NumpadDivide => Key::Slash,
+        KeyCode::Slash => Key::Slash,
         KeyCode::BracketLeft => Key::OpenBracket,
         KeyCode::BracketRight => Key::CloseBracket,
         KeyCode::Backquote => Key::Backtick,
@@ -4120,20 +4129,40 @@ fn key_from_key_code(key: winit::keyboard::KeyCode) -> Option<egui::Key> {
         KeyCode::Cut => Key::Cut,
         KeyCode::Copy => Key::Copy,
         KeyCode::Paste => Key::Paste,
-        KeyCode::Minus | KeyCode::NumpadSubtract => Key::Minus,
-        KeyCode::NumpadAdd => Key::Plus,
+        KeyCode::Minus => Key::Minus,
         KeyCode::Equal => Key::Equals,
 
-        KeyCode::Digit0 | KeyCode::Numpad0 => Key::Num0,
-        KeyCode::Digit1 | KeyCode::Numpad1 => Key::Num1,
-        KeyCode::Digit2 | KeyCode::Numpad2 => Key::Num2,
-        KeyCode::Digit3 | KeyCode::Numpad3 => Key::Num3,
-        KeyCode::Digit4 | KeyCode::Numpad4 => Key::Num4,
-        KeyCode::Digit5 | KeyCode::Numpad5 => Key::Num5,
-        KeyCode::Digit6 | KeyCode::Numpad6 => Key::Num6,
-        KeyCode::Digit7 | KeyCode::Numpad7 => Key::Num7,
-        KeyCode::Digit8 | KeyCode::Numpad8 => Key::Num8,
-        KeyCode::Digit9 | KeyCode::Numpad9 => Key::Num9,
+        KeyCode::Digit0 => Key::Num0,
+        KeyCode::Digit1 => Key::Num1,
+        KeyCode::Digit2 => Key::Num2,
+        KeyCode::Digit3 => Key::Num3,
+        KeyCode::Digit4 => Key::Num4,
+        KeyCode::Digit5 => Key::Num5,
+        KeyCode::Digit6 => Key::Num6,
+        KeyCode::Digit7 => Key::Num7,
+        KeyCode::Digit8 => Key::Num8,
+        KeyCode::Digit9 => Key::Num9,
+
+        // Numpad keys keep their physical identity so apps can bind
+        // numpad-specific shortcuts (e.g. Pro Tools' Transport mode).
+        KeyCode::NumpadEnter => Key::NumpadEnter,
+        KeyCode::Numpad0 => Key::Numpad0,
+        KeyCode::Numpad1 => Key::Numpad1,
+        KeyCode::Numpad2 => Key::Numpad2,
+        KeyCode::Numpad3 => Key::Numpad3,
+        KeyCode::Numpad4 => Key::Numpad4,
+        KeyCode::Numpad5 => Key::Numpad5,
+        KeyCode::Numpad6 => Key::Numpad6,
+        KeyCode::Numpad7 => Key::Numpad7,
+        KeyCode::Numpad8 => Key::Numpad8,
+        KeyCode::Numpad9 => Key::Numpad9,
+        KeyCode::NumpadAdd => Key::NumpadAdd,
+        KeyCode::NumpadSubtract => Key::NumpadSubtract,
+        KeyCode::NumpadMultiply => Key::NumpadMultiply,
+        KeyCode::NumpadDivide => Key::NumpadDivide,
+        KeyCode::NumpadDecimal => Key::NumpadDecimal,
+        KeyCode::NumpadComma => Key::NumpadComma,
+        KeyCode::NumpadEqual => Key::NumpadEqual,
 
         KeyCode::KeyA => Key::A,
         KeyCode::KeyB => Key::B,
@@ -4256,6 +4285,40 @@ fn key_from_key_code(key: winit::keyboard::KeyCode) -> Option<egui::Key> {
             return None;
         }
     })
+}
+
+/// The key a physical code contributed to `Event::Key`'s "logical or physical"
+/// fallback before `Key::Numpad*` existed: a numpad key with an unrecognized
+/// logical identity fell back to its collapsed main-row logical (`Numpad1` →
+/// `Num1`, `NumpadEnter` → `Enter`), and the codes nothing mapped to
+/// (`NumpadMultiply`, `NumpadDecimal`, `NumpadComma`, `NumpadEqual`) stayed
+/// unmapped — they get no new logical alias. `physical_key` still reports the
+/// real `Numpad*` identity for consumers that opt into it.
+fn logical_fallback_key_from_key_code(key: winit::keyboard::KeyCode) -> Option<egui::Key> {
+    use egui::Key;
+    use winit::keyboard::KeyCode;
+
+    match key {
+        KeyCode::NumpadEnter => Some(Key::Enter),
+        KeyCode::NumpadDivide => Some(Key::Slash),
+        KeyCode::NumpadSubtract => Some(Key::Minus),
+        KeyCode::NumpadAdd => Some(Key::Plus),
+        KeyCode::Numpad0 => Some(Key::Num0),
+        KeyCode::Numpad1 => Some(Key::Num1),
+        KeyCode::Numpad2 => Some(Key::Num2),
+        KeyCode::Numpad3 => Some(Key::Num3),
+        KeyCode::Numpad4 => Some(Key::Num4),
+        KeyCode::Numpad5 => Some(Key::Num5),
+        KeyCode::Numpad6 => Some(Key::Num6),
+        KeyCode::Numpad7 => Some(Key::Num7),
+        KeyCode::Numpad8 => Some(Key::Num8),
+        KeyCode::Numpad9 => Some(Key::Num9),
+        KeyCode::NumpadMultiply
+        | KeyCode::NumpadDecimal
+        | KeyCode::NumpadComma
+        | KeyCode::NumpadEqual => None,
+        _ => key_from_key_code(key),
+    }
 }
 
 fn translate_cursor(cursor_icon: egui::CursorIcon) -> Option<winit::window::CursorIcon> {
@@ -5377,5 +5440,86 @@ mod tests {
         let enter_vk = windows_virtual_letter(Some(VK_RETURN));
         assert_eq!(letter_key(enter, enter_vk, false), Some(Key::Enter));
         assert_eq!(letter_key(enter, None, true), Some(Key::Enter));
+    }
+
+    #[test]
+    fn numpad_keys_keep_distinct_physical_keys() {
+        use egui::Key;
+        use winit::keyboard::KeyCode;
+
+        let numpad = [
+            (KeyCode::NumpadEnter, Key::NumpadEnter),
+            (KeyCode::Numpad0, Key::Numpad0),
+            (KeyCode::Numpad1, Key::Numpad1),
+            (KeyCode::Numpad2, Key::Numpad2),
+            (KeyCode::Numpad3, Key::Numpad3),
+            (KeyCode::Numpad4, Key::Numpad4),
+            (KeyCode::Numpad5, Key::Numpad5),
+            (KeyCode::Numpad6, Key::Numpad6),
+            (KeyCode::Numpad7, Key::Numpad7),
+            (KeyCode::Numpad8, Key::Numpad8),
+            (KeyCode::Numpad9, Key::Numpad9),
+            (KeyCode::NumpadAdd, Key::NumpadAdd),
+            (KeyCode::NumpadSubtract, Key::NumpadSubtract),
+            (KeyCode::NumpadMultiply, Key::NumpadMultiply),
+            (KeyCode::NumpadDivide, Key::NumpadDivide),
+            (KeyCode::NumpadDecimal, Key::NumpadDecimal),
+            (KeyCode::NumpadComma, Key::NumpadComma),
+            (KeyCode::NumpadEqual, Key::NumpadEqual),
+        ];
+        for (code, expected) in numpad {
+            assert_eq!(key_from_key_code(code), Some(expected), "physical {code:?}");
+        }
+
+        // Main-row keys still map to the shared logical variants.
+        assert_eq!(key_from_key_code(KeyCode::Enter), Some(Key::Enter));
+        assert_eq!(key_from_key_code(KeyCode::Digit0), Some(Key::Num0));
+        assert_eq!(key_from_key_code(KeyCode::Digit9), Some(Key::Num9));
+        assert_eq!(key_from_key_code(KeyCode::Minus), Some(Key::Minus));
+        assert_eq!(key_from_key_code(KeyCode::Slash), Some(Key::Slash));
+        assert_eq!(key_from_key_code(KeyCode::Equal), Some(Key::Equals));
+    }
+
+    #[test]
+    fn numpad_logical_fallback_keeps_pre_numpad_variants() {
+        use egui::Key;
+        use winit::keyboard::KeyCode;
+
+        // An unrecognized logical key with an identified numpad code emits the
+        // collapsed main-row logical it had before `Key::Numpad*` existed, while
+        // `physical_key` still reports the real numpad identity.
+        let collapsed = [
+            (KeyCode::NumpadEnter, Key::Enter, Key::NumpadEnter),
+            (KeyCode::Numpad0, Key::Num0, Key::Numpad0),
+            (KeyCode::Numpad1, Key::Num1, Key::Numpad1),
+            (KeyCode::Numpad9, Key::Num9, Key::Numpad9),
+            (KeyCode::NumpadDivide, Key::Slash, Key::NumpadDivide),
+            (KeyCode::NumpadSubtract, Key::Minus, Key::NumpadSubtract),
+            (KeyCode::NumpadAdd, Key::Plus, Key::NumpadAdd),
+        ];
+        for (code, logical, physical) in collapsed {
+            assert_eq!(
+                logical_fallback_key_from_key_code(code),
+                Some(logical),
+                "logical fallback {code:?}"
+            );
+            assert_eq!(key_from_key_code(code), Some(physical), "physical {code:?}");
+        }
+
+        // Codes that mapped to nothing stay unmapped — no invented logical alias.
+        for code in [
+            KeyCode::NumpadMultiply,
+            KeyCode::NumpadDecimal,
+            KeyCode::NumpadComma,
+            KeyCode::NumpadEqual,
+        ] {
+            assert_eq!(logical_fallback_key_from_key_code(code), None, "{code:?}");
+        }
+
+        // Non-numpad codes still fall back to their (unchanged) physical identity.
+        assert_eq!(
+            logical_fallback_key_from_key_code(KeyCode::KeyC),
+            Some(Key::C)
+        );
     }
 }
