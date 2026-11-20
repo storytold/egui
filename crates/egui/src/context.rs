@@ -4493,7 +4493,8 @@ impl Context {
     }
 
     /// Adds `records` to this pass as the part of a pass that made them would, at the place `shift` names: its shapes
-    /// after what each layer holds, its widget rects, and its AccessKit nodes under the nodes their parents have now.
+    /// after what each layer holds, its widget rects (used ids of this pass, as the widgets' own creation makes them),
+    /// and its AccessKit nodes under the nodes their parents have now.
     /// Records that hold a paint callback ([`crate::PassRecords::paints_callback`]) take a shift with no offset.
     pub fn replay_pass_records(&self, records: &crate::PassRecords, shift: &crate::RecordShift) {
         debug_assert!(
@@ -4515,9 +4516,12 @@ impl Context {
                 }
             }
             for widget in &records.widgets {
+                let widget = if same { *widget } else { shift.widget(widget) };
+                // A replayed widget is used this pass: one that holds focus keeps it (`Focus::end_pass`).
+                viewport.this_pass.used_ids.insert(widget.id, widget.rect);
                 viewport.this_pass.widgets.insert(
                     widget.layer_id,
-                    if same { *widget } else { shift.widget(widget) },
+                    widget,
                     crate::InteractOptions::default(),
                 );
             }
