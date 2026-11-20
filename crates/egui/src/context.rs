@@ -5480,6 +5480,37 @@ mod test {
         assert!(shapes.is_empty());
     }
 
+    #[test]
+    fn cached_galley_use_defers_a_font_change_until_the_next_pass() {
+        let ctx = Context::default();
+        let mut first = None;
+        let output = ctx.run_pass(Default::default(), |ctx| {
+            let revision = ctx.fonts_mut(|fonts| fonts.cache_revision_and_mark_used());
+            let mut definitions = ctx.fonts(|fonts| fonts.definitions().clone());
+            definitions.families.insert(
+                crate::FontFamily::Name("cached-galley trial".into()),
+                Vec::new(),
+            );
+            ctx.set_fonts(definitions);
+            let during_pass = ctx.fonts_mut(|fonts| fonts.cache_revision_and_mark_used());
+            assert_eq!(
+                revision, during_pass,
+                "the font change must wait while cached text is in use"
+            );
+            first = Some(revision);
+        });
+        output.drop_without_applying_deltas();
+        let output = ctx.run_pass(Default::default(), |ctx| {
+            let next = ctx.fonts_mut(|fonts| fonts.cache_revision_and_mark_used());
+            assert_ne!(
+                first.as_ref(),
+                Some(&next),
+                "the next pass sees the replacement font system"
+            );
+        });
+        output.drop_without_applying_deltas();
+    }
+
     /// `InteractOptions::enabled: false` disables one widget of an enabled `Ui`.
     #[test]
     fn test_interact_opt_disabled_widget_in_enabled_ui() {
