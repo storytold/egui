@@ -3213,7 +3213,16 @@ impl State {
         // emit events as if the corresponding keys from the Latin layout were pressed. In this case, clipboard shortcuts
         // are mapped to the physical keys that normally contain C, X, V, etc.
         // See also: https://github.com/emilk/egui/issues/3653
-        let translated = logical_key.or(physical_key);
+        // The physical side of the fallback keeps its pre-`Key::Numpad*` identity: an
+        // unidentified numpad key fell back to its collapsed main-row logical, and
+        // consumers matching that must not start receiving `Numpad*` instead.
+        let fallback_key = match event.physical_key {
+            winit::keyboard::PhysicalKey::Code(keycode) => {
+                logical_fallback_key_from_key_code(keycode)
+            }
+            winit::keyboard::PhysicalKey::Unidentified(_) => None,
+        };
+        let translated = logical_key.or(fallback_key);
         if pressed {
             if self.try_clipboard_shortcut(event.physical_key, translated) {
                 return;
@@ -4276,6 +4285,40 @@ fn key_from_key_code(key: winit::keyboard::KeyCode) -> Option<egui::Key> {
             return None;
         }
     })
+}
+
+/// The key a physical code contributed to `Event::Key`'s "logical or physical"
+/// fallback before `Key::Numpad*` existed: a numpad key with an unrecognized
+/// logical identity fell back to its collapsed main-row logical (`Numpad1` →
+/// `Num1`, `NumpadEnter` → `Enter`), and the codes nothing mapped to
+/// (`NumpadMultiply`, `NumpadDecimal`, `NumpadComma`, `NumpadEqual`) stayed
+/// unmapped — they get no new logical alias. `physical_key` still reports the
+/// real `Numpad*` identity for consumers that opt into it.
+fn logical_fallback_key_from_key_code(key: winit::keyboard::KeyCode) -> Option<egui::Key> {
+    use egui::Key;
+    use winit::keyboard::KeyCode;
+
+    match key {
+        KeyCode::NumpadEnter => Some(Key::Enter),
+        KeyCode::NumpadDivide => Some(Key::Slash),
+        KeyCode::NumpadSubtract => Some(Key::Minus),
+        KeyCode::NumpadAdd => Some(Key::Plus),
+        KeyCode::Numpad0 => Some(Key::Num0),
+        KeyCode::Numpad1 => Some(Key::Num1),
+        KeyCode::Numpad2 => Some(Key::Num2),
+        KeyCode::Numpad3 => Some(Key::Num3),
+        KeyCode::Numpad4 => Some(Key::Num4),
+        KeyCode::Numpad5 => Some(Key::Num5),
+        KeyCode::Numpad6 => Some(Key::Num6),
+        KeyCode::Numpad7 => Some(Key::Num7),
+        KeyCode::Numpad8 => Some(Key::Num8),
+        KeyCode::Numpad9 => Some(Key::Num9),
+        KeyCode::NumpadMultiply
+        | KeyCode::NumpadDecimal
+        | KeyCode::NumpadComma
+        | KeyCode::NumpadEqual => None,
+        _ => key_from_key_code(key),
+    }
 }
 
 fn translate_cursor(cursor_icon: egui::CursorIcon) -> Option<winit::window::CursorIcon> {
@@ -5435,5 +5478,48 @@ mod tests {
         assert_eq!(key_from_key_code(KeyCode::Minus), Some(Key::Minus));
         assert_eq!(key_from_key_code(KeyCode::Slash), Some(Key::Slash));
         assert_eq!(key_from_key_code(KeyCode::Equal), Some(Key::Equals));
+    }
+
+    #[test]
+    fn numpad_logical_fallback_keeps_pre_numpad_variants() {
+        use egui::Key;
+        use winit::keyboard::KeyCode;
+
+        // An unrecognized logical key with an identified numpad code emits the
+        // collapsed main-row logical it had before `Key::Numpad*` existed, while
+        // `physical_key` still reports the real numpad identity.
+        let collapsed = [
+            (KeyCode::NumpadEnter, Key::Enter, Key::NumpadEnter),
+            (KeyCode::Numpad0, Key::Num0, Key::Numpad0),
+            (KeyCode::Numpad1, Key::Num1, Key::Numpad1),
+            (KeyCode::Numpad9, Key::Num9, Key::Numpad9),
+            (KeyCode::NumpadDivide, Key::Slash, Key::NumpadDivide),
+            (KeyCode::NumpadSubtract, Key::Minus, Key::NumpadSubtract),
+            (KeyCode::NumpadAdd, Key::Plus, Key::NumpadAdd),
+        ];
+        for (code, logical, physical) in collapsed {
+            assert_eq!(
+                logical_fallback_key_from_key_code(code),
+                Some(logical),
+                "logical fallback {code:?}"
+            );
+            assert_eq!(key_from_key_code(code), Some(physical), "physical {code:?}");
+        }
+
+        // Codes that mapped to nothing stay unmapped — no invented logical alias.
+        for code in [
+            KeyCode::NumpadMultiply,
+            KeyCode::NumpadDecimal,
+            KeyCode::NumpadComma,
+            KeyCode::NumpadEqual,
+        ] {
+            assert_eq!(logical_fallback_key_from_key_code(code), None, "{code:?}");
+        }
+
+        // Non-numpad codes still fall back to their (unchanged) physical identity.
+        assert_eq!(
+            logical_fallback_key_from_key_code(KeyCode::KeyC),
+            Some(Key::C)
+        );
     }
 }
