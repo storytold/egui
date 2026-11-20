@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
 use egui::{
-    Color32, Context, Id, LayerId, Order, PassRecords, PassRecordsDiff, RecordShift, Rect, Role,
-    Sense, Ui, UiBuilder, WidgetInfo, epaint::PaintCallback, pos2, vec2,
+    Color32, Context, FontId, Id, LayerId, Order, PassRecords, PassRecordsDiff, RecordShift, Rect,
+    Role, Sense, Stroke, StrokeKind, TextureId, Ui, UiBuilder, WidgetInfo,
+    epaint::{PaintCallback, TextShape},
+    pos2, vec2,
 };
 
 /// The records of `part`, run in one pass of `ctx` after a label it does not include.
@@ -383,5 +385,77 @@ fn geometry_compares_within_the_tolerance() {
             Some(PassRecordsDiff::Shape { index: 0, .. })
         ),
         "a part 1/64 pt lower is a difference"
+    );
+}
+
+/// The tolerance covers positions only: a shift moves no stroke width, texture coordinate, angle or opacity, so a
+/// difference in one far below the tolerance is a difference.
+#[test]
+fn only_positions_compare_within_the_tolerance() {
+    let ctx = context();
+    let tiny = 1.0 / 1024.0;
+    let at = Rect::from_min_size(pos2(10.0, 30.0), vec2(20.0, 20.0));
+    let stroked = |width: f32| {
+        move |ui: &mut Ui| {
+            ui.painter().rect_stroke(
+                at,
+                0.0,
+                Stroke::new(width, Color32::RED),
+                StrokeKind::Inside,
+            );
+        }
+    };
+    let image = |u: f32| {
+        move |ui: &mut Ui| {
+            let uv = Rect::from_min_max(pos2(u, 0.0), pos2(u + 0.5, 0.5));
+            ui.painter()
+                .image(TextureId::Managed(0), at, uv, Color32::WHITE);
+        }
+    };
+    let text = |opacity: f32| {
+        move |ui: &mut Ui| {
+            let galley =
+                ui.painter()
+                    .layout_no_wrap("text".to_owned(), FontId::default(), Color32::RED);
+            ui.painter()
+                .add(TextShape::new(at.min, galley, Color32::RED).with_opacity_factor(opacity));
+        }
+    };
+    let within = 1.0 / 256.0;
+    let differs = |a: &PassRecords, b: &PassRecords| {
+        matches!(
+            a.first_difference(b, within),
+            Some(PassRecordsDiff::Shape { .. })
+        )
+    };
+    let moved = |offset: f32| {
+        move |ui: &mut Ui| {
+            ui.painter()
+                .rect_filled(at.translate(vec2(offset, offset)), 0.0, Color32::RED);
+        }
+    };
+    assert!(
+        records(&ctx, moved(0.0))
+            .first_difference(&records(&ctx, moved(tiny)), within)
+            .is_none(),
+        "a position within the tolerance compares equal"
+    );
+    assert!(
+        differs(
+            &records(&ctx, stroked(1.0)),
+            &records(&ctx, stroked(1.0 + tiny))
+        ),
+        "a stroke width differs"
+    );
+    assert!(
+        differs(
+            &records(&ctx, image(0.25)),
+            &records(&ctx, image(0.25 + tiny))
+        ),
+        "a texture coordinate differs"
+    );
+    assert!(
+        differs(&records(&ctx, text(0.5)), &records(&ctx, text(0.5 + tiny))),
+        "an opacity differs"
     );
 }

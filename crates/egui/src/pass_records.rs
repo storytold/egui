@@ -99,8 +99,9 @@ impl PassRecords {
     /// (cursor, IME, commands), area or sublayer registrations, layer transforms, or the parents of nodes created
     /// before the mark.
     ///
-    /// Geometry (positions, sizes, widths, angles, texture coordinates and AccessKit bounds) compares within
-    /// `tolerance` points; everything else (ids, counts, colours, text and its layout, flags) compares exactly. Records
+    /// Positions (points, rects, clip rects and AccessKit bounds) compare within `tolerance` points; everything else
+    /// (ids, counts, colours, sizes, widths, angles, opacity, texture coordinates, text and its layout, flags) compares
+    /// exactly. Records
     /// moved by [`Self::shifted`] from positions off the float grid differ from the part run at the new place by
     /// rounding only, which a small `tolerance` covers; `0.0` compares exactly. A paint callback cannot be compared
     /// (its callback is opaque, and a backend wraps every callback in one type): a callback on either side is
@@ -373,13 +374,14 @@ fn has_callback(shape: &Shape) -> bool {
 }
 
 /// Records with their geometry taken from another record where the two lie within a tolerance: a record that `==`
-/// then finds equal to the other differs from it by no more than the tolerance in geometry and not at all elsewhere.
-/// Each function takes the geometry the matching [`RecordShift`] function moves, and the shape's sizes and widths.
+/// then finds equal to the other differs from it by no more than the tolerance in its positions and not at all
+/// elsewhere. Each function takes the positions the matching [`RecordShift`] function moves: points, rects, clip rects
+/// and AccessKit bounds. A shift moves no size, width, angle, opacity or texture coordinate, so those compare exactly.
 mod near {
-    use std::sync::Arc;
+    use alloc::sync::Arc;
 
-    use emath::{Pos2, Rangef, Rect, Vec2};
-    use epaint::{ClippedShape, Mesh, PathStroke, Shape, Stroke};
+    use emath::{Pos2, Rangef, Rect};
+    use epaint::{ClippedShape, Mesh, Shape};
 
     use crate::WidgetRect;
 
@@ -391,16 +393,12 @@ mod near {
         Pos2::new(float(a.x, b.x, tolerance), float(a.y, b.y, tolerance))
     }
 
-    fn vec(a: Vec2, b: Vec2, tolerance: f32) -> Vec2 {
-        Vec2::new(float(a.x, b.x, tolerance), float(a.y, b.y, tolerance))
-    }
-
     fn rect(a: Rect, b: Rect, tolerance: f32) -> Rect {
         Rect::from_min_max(pos(a.min, b.min, tolerance), pos(a.max, b.max, tolerance))
     }
 
     fn points<const N: usize>(a: [Pos2; N], b: [Pos2; N], tolerance: f32) -> [Pos2; N] {
-        std::array::from_fn(|index| pos(a[index], b[index], tolerance))
+        core::array::from_fn(|index| pos(a[index], b[index], tolerance))
     }
 
     /// `a`, each item taken from `b`'s item by `near`, when both hold as many.
@@ -409,20 +407,6 @@ mod near {
             a.iter().zip(b).map(|(a, b)| near(a, b)).collect()
         } else {
             a.to_vec()
-        }
-    }
-
-    fn stroke(a: Stroke, b: Stroke, tolerance: f32) -> Stroke {
-        Stroke {
-            width: float(a.width, b.width, tolerance),
-            ..a
-        }
-    }
-
-    fn path_stroke(a: &PathStroke, b: &PathStroke, tolerance: f32) -> PathStroke {
-        PathStroke {
-            width: float(a.width, b.width, tolerance),
-            ..a.clone()
         }
     }
 
@@ -445,35 +429,28 @@ mod near {
             (Shape::Circle(a), Shape::Circle(b)) => {
                 let mut near = *a;
                 near.center = pos(a.center, b.center, t);
-                near.radius = float(a.radius, b.radius, t);
-                near.stroke = stroke(a.stroke, b.stroke, t);
                 Shape::Circle(near)
             }
             (Shape::Ellipse(a), Shape::Ellipse(b)) => {
                 let mut near = *a;
                 near.center = pos(a.center, b.center, t);
-                near.radius = vec(a.radius, b.radius, t);
-                near.stroke = stroke(a.stroke, b.stroke, t);
-                near.angle = float(a.angle, b.angle, t);
                 Shape::Ellipse(near)
             }
             (
                 Shape::LineSegment {
                     points: a_points,
-                    stroke: a_stroke,
+                    stroke,
                 },
                 Shape::LineSegment {
-                    points: b_points,
-                    stroke: b_stroke,
+                    points: b_points, ..
                 },
             ) => Shape::LineSegment {
                 points: points(*a_points, *b_points, t),
-                stroke: stroke(*a_stroke, *b_stroke, t),
+                stroke: *stroke,
             },
             (Shape::Path(a), Shape::Path(b)) => {
                 let mut near = a.clone();
                 near.points = list(&a.points, &b.points, |a, b| pos(*a, *b, t));
-                near.stroke = path_stroke(&a.stroke, &b.stroke, t);
                 Shape::Path(near)
             }
             (Shape::Band(a), Shape::Band(b)) => {
@@ -484,42 +461,27 @@ mod near {
                     point.y = Rangef::new(float(a.y.min, b.y.min, t), float(a.y.max, b.y.max, t));
                     point
                 });
-                near.stroke = stroke(a.stroke, b.stroke, t);
-                near.angle = float(a.angle, b.angle, t);
                 Shape::Band(near)
             }
             (Shape::Rect(a), Shape::Rect(b)) => {
                 let mut near = a.clone();
                 near.rect = rect(a.rect, b.rect, t);
-                near.stroke = stroke(a.stroke, b.stroke, t);
-                near.blur_width = float(a.blur_width, b.blur_width, t);
-                near.angle = float(a.angle, b.angle, t);
-                if let (Some(a_brush), Some(b_brush)) = (&a.brush, &b.brush) {
-                    let mut brush = (**a_brush).clone();
-                    brush.uv = rect(a_brush.uv, b_brush.uv, t);
-                    near.brush = Some(Arc::new(brush));
-                }
                 Shape::Rect(near)
             }
             (Shape::Text(a), Shape::Text(b)) => {
                 let mut near = a.clone();
                 near.pos = pos(a.pos, b.pos, t);
-                near.underline = stroke(a.underline, b.underline, t);
-                near.opacity_factor = float(a.opacity_factor, b.opacity_factor, t);
-                near.angle = float(a.angle, b.angle, t);
                 Shape::Text(near)
             }
             (Shape::Mesh(a), Shape::Mesh(b)) => Shape::Mesh(Arc::new(mesh(a, b, t))),
             (Shape::QuadraticBezier(a), Shape::QuadraticBezier(b)) => {
                 let mut near = a.clone();
                 near.points = points(a.points, b.points, t);
-                near.stroke = path_stroke(&a.stroke, &b.stroke, t);
                 Shape::QuadraticBezier(near)
             }
             (Shape::CubicBezier(a), Shape::CubicBezier(b)) => {
                 let mut near = a.clone();
                 near.points = points(a.points, b.points, t);
-                near.stroke = path_stroke(&a.stroke, &b.stroke, t);
                 Shape::CubicBezier(near)
             }
             _ => a.clone(),
@@ -531,7 +493,6 @@ mod near {
             vertices: list(&a.vertices, &b.vertices, |a, b| {
                 let mut vertex = *a;
                 vertex.pos = pos(a.pos, b.pos, tolerance);
-                vertex.uv = pos(a.uv, b.uv, tolerance);
                 vertex
             }),
             ..a.clone()

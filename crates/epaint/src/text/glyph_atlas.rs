@@ -246,7 +246,7 @@ pub(crate) struct GlyphAtlas {
 }
 
 /// The next [`GlyphAtlas::generation`].
-static NEXT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+static NEXT_GENERATION: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
 
 impl GlyphAtlas {
     pub fn new(options: TextOptions) -> Self {
@@ -256,7 +256,7 @@ impl GlyphAtlas {
             atlas: TextureAtlas::new([texture_width, initial_height], options),
             outline_glyphs: Default::default(),
             raster_glyphs: Default::default(),
-            generation: NEXT_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            generation: NEXT_GENERATION.fetch_add(1, core::sync::atomic::Ordering::Relaxed),
         }
     }
 
