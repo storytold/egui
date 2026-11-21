@@ -29,7 +29,9 @@ pub(super) struct TextAgentContext {
 )]
 extern "C" {
     fn egui_text_agent_session() -> JsValue;
+
     fn egui_text_agent_activate(session: &JsValue, active: bool);
+
     fn egui_text_agent_listener(session: &JsValue, callback: &js_sys::Function)
     -> js_sys::Function;
 }
@@ -37,6 +39,7 @@ extern "C" {
 struct Session {
     active: Cell<bool>,
     gate: JsValue,
+
     /// Only keys actually forwarded by this agent; do not reset unrelated keyboard state.
     forwarded_keys: RefCell<Vec<ForwardedKey>>,
 }
@@ -381,6 +384,7 @@ pub struct TextAgent {
     session: Rc<Session>,
     context: TextAgentContext,
     focus: Rc<FocusState>,
+
     /// The `lang` attribute of `input`.
     lang: RefCell<Option<String>>,
 }
@@ -1124,7 +1128,9 @@ mod browser_tests {
     )]
     extern "C" {
         fn egui_probe_input(kind: &str, composing: bool) -> web_sys::InputEvent;
+
         fn egui_probe_remove_failure(input: &web_sys::EventTarget, name: Option<&str>);
+
         fn egui_probe_add_failure(n: u32);
     }
 

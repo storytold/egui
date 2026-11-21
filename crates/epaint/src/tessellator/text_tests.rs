@@ -120,7 +120,9 @@ fn text_colors_preserve_background_decoration_and_color_glyph_alpha() {
                     let expected = [BACKGROUND, text, colored, DECORATION];
                     assert_eq!(output.vertices.len(), 16);
                     assert_eq!(output.indices.len(), 24);
-                    for (quad, expected_color) in output.vertices.chunks_exact(4).zip(expected) {
+                    for (quad, expected_color) in
+                        core::iter::zip(output.vertices.chunks_exact(4), expected)
+                    {
                         for vertex in quad {
                             assert_eq!(
                                 vertex.color,
@@ -172,7 +174,8 @@ fn text_vertices_keep_position_uv_and_index_offsets_on_both_paths() {
             assert_eq!(output.vertices.len(), 4 + input.vertices.len());
             let expected_indices: Vec<_> = input.indices.iter().map(|index| index + 4).collect();
             assert_eq!(&output.indices[6..], expected_indices.as_slice());
-            for (actual, original) in output.vertices[4..].iter().zip(&input.vertices) {
+            for (actual, original) in core::iter::zip(output.vertices[4..].iter(), &input.vertices)
+            {
                 let offset = original.pos + vec2(2.0, 3.0);
                 let expected_position = if angle == 0.0 {
                     pos2(10.5 + offset.x, 20.5 + offset.y)

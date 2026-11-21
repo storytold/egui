@@ -286,6 +286,7 @@ impl<'a> CommittedText<'a> {
     }
 
     /// Set the byte range of a pre-edit that must be removed from the snapshot.
+    #[inline]
     pub fn with_preedit(mut self, preedit: Range<usize>) -> Self {
         self.preedit = Some(preedit);
         self
@@ -362,18 +363,21 @@ impl<'a> ImeObservation<'a> {
     }
 
     /// Set whether the editor currently owns focus.
+    #[inline]
     pub fn focused(mut self, focused: bool) -> Self {
         self.focused = focused;
         self
     }
 
     /// Set the IME purpose.
+    #[inline]
     pub fn purpose(mut self, purpose: IMEPurpose) -> Self {
         self.purpose = purpose;
         self
     }
 
     /// Set the committed-text observation.
+    #[inline]
     pub fn committed(mut self, committed: Option<CommittedText<'a>>) -> Self {
         self.committed = committed;
         self
@@ -383,6 +387,7 @@ impl<'a> ImeObservation<'a> {
     ///
     /// The revision is retained only when the computed snapshot is
     /// [`IMESurroundingText::Unavailable`] and the purpose is not [`IMEPurpose::Password`].
+    #[inline]
     pub fn unavailable_revision(mut self, revision: u64) -> Self {
         self.unavailable_revision = Some(revision);
         self

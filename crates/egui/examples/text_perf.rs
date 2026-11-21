@@ -19,14 +19,13 @@
 //! fallback fixture (for example the pinned craft-fonts Arabic/Thai/CJK fonts)
 //! and is not silently covered by tofu glyphs.
 
+use core::{fmt::Write as _, hint::black_box, time::Duration};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fmt::Write as _,
     fs,
-    hint::black_box,
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use egui::{
@@ -87,6 +86,7 @@ impl Default for Args {
     }
 }
 
+#[expect(clippy::print_stdout, reason = "CLI help is written to stdout")]
 fn print_help() {
     println!(
         "text_perf: CPU-only egui text layout/tessellation/UI frame harness\n\
@@ -109,10 +109,10 @@ fn print_help() {
 
 fn parse_args() -> Result<Option<Args>, String> {
     let mut args = Args::default();
-    if let Ok(path) = std::env::var("EGUI_PERF_OUT") {
-        if !path.is_empty() {
-            args.out = PathBuf::from(path);
-        }
+    if let Ok(path) = std::env::var("EGUI_PERF_OUT")
+        && !path.is_empty()
+    {
+        args.out = PathBuf::from(path);
     }
 
     let mut it = std::env::args().skip(1);
@@ -125,13 +125,15 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--warmups" => args.warmups = parse_usize("--warmups", &value("--warmups")?)?,
             "--steady" => args.steady = parse_usize("--steady", &value("--steady")?)?,
             "--cold-starts" => {
-                args.cold_starts = parse_usize("--cold-starts", &value("--cold-starts")?)?
+                args.cold_starts = parse_usize("--cold-starts", &value("--cold-starts")?)?;
             }
             "--frames" => args.frames = parse_usize("--frames", &value("--frames")?)?,
             "--chars" => args.ascii_chars = parse_usize("--chars", &value("--chars")?)?,
             "--dpi" => {
                 let p = value("--dpi")?;
-                let dpi: f32 = p.parse().map_err(|_| format!("invalid --dpi value: {p}"))?;
+                let dpi: f32 = p
+                    .parse()
+                    .map_err(|_err| format!("invalid --dpi value: {p}"))?;
                 if !dpi.is_finite() || dpi <= 0.0 {
                     return Err(format!("--dpi must be positive and finite, got {p}"));
                 }
@@ -157,7 +159,8 @@ fn parse_args() -> Result<Option<Args>, String> {
 }
 
 fn parse_usize(name: &str, s: &str) -> Result<usize, String> {
-    s.parse().map_err(|_| format!("invalid {name} value: {s}"))
+    s.parse()
+        .map_err(|_err| format!("invalid {name} value: {s}"))
 }
 
 #[derive(Clone, Copy, Default)]
@@ -447,7 +450,7 @@ fn unique_miss_texts(base: &str, count: usize) -> Result<Vec<String>, String> {
         bytes[start..].fill(b'0');
         bytes[start + width - suffix.len()..].copy_from_slice(suffix.as_bytes());
         let text = String::from_utf8(bytes)
-            .map_err(|_| format!("--chars {} produced a non-UTF-8 miss fixture", base.len()))?;
+            .map_err(|_err| format!("--chars {} produced a non-UTF-8 miss fixture", base.len()))?;
         if text.len() != base.len() || !text.is_ascii() {
             return Err(format!(
                 "--chars {} cannot provide same-length ASCII miss fixtures",
@@ -828,6 +831,11 @@ impl TextureUploads {
 
 fn take_textures(out: &mut egui::FullOutput) -> TextureUploads {
     let mut uploads = TextureUploads::default();
+    // These integer totals are commutative; sorting would add benchmark overhead.
+    #[expect(
+        clippy::iter_over_hash_type,
+        reason = "order-independent upload totals"
+    )]
     for deltas in out.textures_delta.set.values() {
         for delta in deltas {
             uploads.deltas += 1;
@@ -877,6 +885,7 @@ fn push_optional_f64(out: &mut String, value: Option<f64>) {
     }
 }
 
+#[expect(clippy::print_stderr, reason = "CLI failures are reported to stderr")]
 fn main() -> std::process::ExitCode {
     match run() {
         Ok(true) => std::process::ExitCode::SUCCESS,
@@ -891,6 +900,11 @@ fn main() -> std::process::ExitCode {
     }
 }
 
+#[expect(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "CLI diagnostics and explicitly requested JSON output"
+)]
 fn run() -> Result<bool, String> {
     let Some(args) = parse_args()? else {
         return Ok(true);
@@ -898,7 +912,7 @@ fn run() -> Result<bool, String> {
 
     fs::create_dir_all(&args.out)
         .map_err(|e| format!("failed to create output dir {}: {e}", args.out.display()))?;
-    let out_dir = fs::canonicalize(&args.out).unwrap_or(args.out.clone());
+    let out_dir = fs::canonicalize(&args.out).unwrap_or_else(|_err| args.out.clone());
 
     let font = load_font_definitions(args.font.as_deref())?;
     let text = ascii_text(args.ascii_chars);
@@ -1096,15 +1110,21 @@ fn run() -> Result<bool, String> {
     let atlas = fonts_cached.texture_atlas();
     let atlas_size = atlas.size();
     let prepared_discs = atlas.prepared_discs();
-    let mut tess_options = egui::epaint::tessellator::TessellationOptions::default();
-    tess_options.coarse_tessellation_culling = false;
-    tess_options.parallel_tessellation = false;
-    tess_options.validate_meshes = false;
-    tess_options.debug_paint_clip_rects = false;
-    tess_options.debug_paint_text_rects = false;
-    tess_options.debug_ignore_clip_rects = false;
+    let tess_options = egui::epaint::tessellator::TessellationOptions {
+        coarse_tessellation_culling: false,
+        parallel_tessellation: false,
+        validate_meshes: false,
+        debug_paint_clip_rects: false,
+        debug_paint_text_rects: false,
+        debug_ignore_clip_rects: false,
+        ..Default::default()
+    };
     let mut tessellator = Tessellator::new(args.dpi, tess_options, atlas_size, prepared_discs);
-    let text_shape = Shape::galley(Pos2::new(10.0, 10.0), cached_galley.clone(), Color32::WHITE);
+    let text_shape = Shape::galley(
+        Pos2::new(10.0, 10.0),
+        Arc::clone(&cached_galley),
+        Color32::WHITE,
+    );
     tessellator.set_clip_rect(text_shape.visual_bounding_rect());
 
     for _ in 0..args.warmups {
@@ -1225,7 +1245,7 @@ fn run() -> Result<bool, String> {
         frame_shapes = out.shapes.len();
         frame_shape_counts.push(frame_shapes);
         frame_ppp = out.pixels_per_point;
-        let shapes = std::mem::take(&mut out.shapes);
+        let shapes = core::mem::take(&mut out.shapes);
         frame_uploads.add(take_textures(&mut out));
         let t_tess = Instant::now();
         let prims = ctx.tessellate(shapes, frame_ppp);
@@ -1653,11 +1673,7 @@ fn run() -> Result<bool, String> {
     );
     let _ = write!(
         summary,
-        "\"cache_counts\":{{\"after_cache_hit_warmup\":{},\"after_cache_hit_steady\":{},\"after_miss_warmup\":{},\"after_miss_steady\":{}}},",
-        cache_after_cached_warmup,
-        cache_after_cached_steady,
-        cache_after_miss_warmup,
-        cache_after_miss_steady,
+        "\"cache_counts\":{{\"after_cache_hit_warmup\":{cache_after_cached_warmup},\"after_cache_hit_steady\":{cache_after_cached_steady},\"after_miss_warmup\":{cache_after_miss_warmup},\"after_miss_steady\":{cache_after_miss_steady}}},",
     );
 
     let frame_passes_total: usize = frame_pass_counts.iter().sum();
@@ -1679,17 +1695,7 @@ fn run() -> Result<bool, String> {
         .len();
     let _ = write!(
         summary,
-        "\"pass_counts\":{{\"warmup_frame_passes_total\":{},\"warmup_frames_multi_pass\":{},\"warmup_frame_passes_max\":{},\"measured_frame_passes_total\":{},\"measured_frames_multi_pass\":{},\"measured_frame_passes_max\":{},\"cold_start_passes_total\":{},\"cold_start_passes_min\":{},\"cold_start_passes_max\":{},\"cold_start_pass_values_distinct\":{}}},",
-        warmup_passes_total,
-        warmup_multi_pass_frames,
-        warmup_pass_max,
-        frame_passes_total,
-        frame_multi_pass_frames,
-        max_frame_passes,
-        cold_passes_total,
-        cold_pass_min,
-        cold_pass_max,
-        cold_pass_distinct,
+        "\"pass_counts\":{{\"warmup_frame_passes_total\":{warmup_passes_total},\"warmup_frames_multi_pass\":{warmup_multi_pass_frames},\"warmup_frame_passes_max\":{warmup_pass_max},\"measured_frame_passes_total\":{frame_passes_total},\"measured_frames_multi_pass\":{frame_multi_pass_frames},\"measured_frame_passes_max\":{max_frame_passes},\"cold_start_passes_total\":{cold_passes_total},\"cold_start_passes_min\":{cold_pass_min},\"cold_start_passes_max\":{cold_pass_max},\"cold_start_pass_values_distinct\":{cold_pass_distinct}}},",
     );
     let _ = write!(
         summary,
@@ -1744,8 +1750,7 @@ fn run() -> Result<bool, String> {
     push_stats(&mut summary, "tessellate", &summarize(&cold_tess));
     let _ = write!(
         summary,
-        ",\"identity_distinct\":{},\"completed_passes\":{{\"min\":{},\"max\":{},\"distinct\":{}}}",
-        cold_distinct, cold_pass_min, cold_pass_max, cold_pass_distinct,
+        ",\"identity_distinct\":{cold_distinct},\"completed_passes\":{{\"min\":{cold_pass_min},\"max\":{cold_pass_max},\"distinct\":{cold_pass_distinct}}}",
     );
     summary.push_str("},");
 

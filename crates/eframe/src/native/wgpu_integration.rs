@@ -865,15 +865,15 @@ impl WgpuWinitRunning<'_> {
                         // `PaintWhileHidden` asked for.
                     }
                     ActionRequested::Cut => {
-                        egui_winit.request_cut(&window);
+                        egui_winit.request_cut(window);
                     }
                     ActionRequested::Copy => {
-                        egui_winit.request_copy(&window);
+                        egui_winit.request_copy(window);
                     }
                     ActionRequested::Paste => {
                         // On Wayland this starts the bounded asynchronous paste bridge
                         // instead of a blocking `clipboard_text()`/image read.
-                        egui_winit.request_paste(&window);
+                        egui_winit.request_paste(window);
                     }
                 }
             }
