@@ -2661,7 +2661,9 @@ impl Ui {
         self.placer.save_grid();
     }
 
-    pub(crate) fn is_grid(&self) -> bool {
+    /// Whether this is the `Ui` of a [`crate::Grid`]: it places each allocation in the grid's next cell, and
+    /// [`Self::end_row`] starts the next row.
+    pub fn is_grid(&self) -> bool {
         self.placer.is_grid()
     }
 
