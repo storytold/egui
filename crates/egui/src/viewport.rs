@@ -317,6 +317,7 @@ pub struct ViewportBuilder {
 
     // macOS:
     pub fullsize_content_view: Option<bool>,
+    pub panel: Option<bool>,
     pub movable_by_window_background: Option<bool>,
     pub title_shown: Option<bool>,
     pub titlebar_buttons_shown: Option<bool>,
@@ -475,6 +476,14 @@ impl ViewportBuilder {
     #[inline]
     pub fn with_fullsize_content_view(mut self, value: bool) -> Self {
         self.fullsize_content_view = Some(value);
+        self
+    }
+
+    /// macOS: Makes the window a utility panel (`NSPanel`): a small title bar, never the main
+    /// window, not in the Window menu, and hidden while the app is inactive.
+    #[inline]
+    pub fn with_panel(mut self, value: bool) -> Self {
+        self.panel = Some(value);
         self
     }
 
@@ -736,6 +745,7 @@ impl ViewportBuilder {
             visible: new_visible,
             drag_and_drop: new_drag_and_drop,
             fullsize_content_view: new_fullsize_content_view,
+            panel: new_panel,
             movable_by_window_background: new_movable_by_window_background,
             title_shown: new_title_shown,
             titlebar_buttons_shown: new_titlebar_buttons_shown,
@@ -927,6 +937,11 @@ impl ViewportBuilder {
             && self.fullsize_content_view != new_fullsize_content_view
         {
             self.fullsize_content_view = new_fullsize_content_view;
+            recreate_window = true;
+        }
+
+        if new_panel.is_some() && self.panel != new_panel {
+            self.panel = new_panel;
             recreate_window = true;
         }
 
