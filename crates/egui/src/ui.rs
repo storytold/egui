@@ -1483,6 +1483,20 @@ impl Ui {
         layout: Layout,
         add_contents: Box<dyn FnOnce(&mut Self) -> R + 'c>,
     ) -> InnerResponse<R> {
+        self.allocate_ui_with_builder_dyn(
+            desired_size,
+            UiBuilder::new().layout(layout),
+            add_contents,
+        )
+    }
+
+    /// [`Self::allocate_ui_with_layout`] with the child built by `ui_builder`; its `max_rect` is the allocated rect.
+    pub(crate) fn allocate_ui_with_builder_dyn<'c, R>(
+        &mut self,
+        desired_size: Vec2,
+        ui_builder: UiBuilder,
+        add_contents: Box<dyn FnOnce(&mut Self) -> R + 'c>,
+    ) -> InnerResponse<R> {
         debug_assert!(
             desired_size.x >= 0.0 && desired_size.y >= 0.0,
             "Negative desired size: {desired_size:?}"
@@ -1490,10 +1504,7 @@ impl Ui {
         let item_spacing = self.spacing().item_spacing;
         let frame_rect = self.placer.next_space(desired_size, item_spacing);
         let child_rect = self.placer.justify_and_align(frame_rect, desired_size);
-        self.scope_dyn(
-            UiBuilder::new().max_rect(child_rect).layout(layout),
-            add_contents,
-        )
+        self.scope_dyn(ui_builder.max_rect(child_rect), add_contents)
     }
 
     /// Convenience function to get a region to paint on.
@@ -2661,9 +2672,7 @@ impl Ui {
         self.placer.save_grid();
     }
 
-    /// Whether this is the `Ui` of a [`crate::Grid`]: it places each allocation in the grid's next cell, and
-    /// [`Self::end_row`] starts the next row.
-    pub fn is_grid(&self) -> bool {
+    pub(crate) fn is_grid(&self) -> bool {
         self.placer.is_grid()
     }
 

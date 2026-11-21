@@ -3,8 +3,8 @@ use alloc::sync::Arc;
 use emath::GuiRounding as _;
 
 use crate::{
-    Align2, AsIdSalt, Color32, Context, Id, IdSalt, InnerResponse, NumExt as _, Painter, Rect,
-    Region, Style, Ui, UiBuilder, Vec2, vec2,
+    Align, Align2, AsIdSalt, Color32, Context, Id, IdSalt, InnerResponse, Layout, NumExt as _,
+    Painter, Rect, Region, Style, Ui, UiBuilder, UiKind, UiStackInfo, Vec2, vec2,
 };
 
 #[cfg(debug_assertions)]
@@ -473,30 +473,47 @@ impl Grid {
         }
 
         ui.scope_builder(ui_builder, |ui| {
-            ui.horizontal(|ui| {
-                let is_color = color_picker.is_some();
-                let grid = GridLayout {
-                    num_columns,
-                    color_picker,
-                    min_cell_size: vec2(min_col_width, min_row_height),
-                    max_cell_size,
-                    spacing,
-                    row: start_row,
-                    ..GridLayout::new(ui, id, prev_state)
-                };
+            // The grid's own `Ui` is marked in the `UiStack`, so code in a cell knows it is in one.
+            let initial_size = vec2(
+                ui.available_size_before_wrap().x,
+                ui.spacing().interact_size.y,
+            );
+            let layout = if ui.layout().prefer_right_to_left() {
+                Layout::right_to_left(Align::Center)
+            } else {
+                Layout::left_to_right(Align::Center)
+            };
+            let grid_ui = UiBuilder::new()
+                .layout(layout)
+                .ui_stack_info(UiStackInfo::new(UiKind::Grid));
+            ui.allocate_ui_with_builder_dyn(
+                initial_size,
+                grid_ui,
+                Box::new(|ui| {
+                    let is_color = color_picker.is_some();
+                    let grid = GridLayout {
+                        num_columns,
+                        color_picker,
+                        min_cell_size: vec2(min_col_width, min_row_height),
+                        max_cell_size,
+                        spacing,
+                        row: start_row,
+                        ..GridLayout::new(ui, id, prev_state)
+                    };
 
-                // paint first incoming row
-                if is_color {
-                    let cursor = ui.cursor();
-                    let painter = ui.painter();
-                    grid.paint_row(&cursor, painter);
-                }
+                    // paint first incoming row
+                    if is_color {
+                        let cursor = ui.cursor();
+                        let painter = ui.painter();
+                        grid.paint_row(&cursor, painter);
+                    }
 
-                ui.set_grid(grid);
-                let r = add_contents(ui);
-                ui.save_grid();
-                r
-            })
+                    ui.set_grid(grid);
+                    let r = add_contents(ui);
+                    ui.save_grid();
+                    r
+                }),
+            )
             .inner
         })
     }
