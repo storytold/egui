@@ -4355,6 +4355,22 @@ impl Context {
         })
     }
 
+    /// Reads this pass's AccessKit parents so far: each id that [`Self::register_accesskit_parent`]
+    /// (or a widget's creation) gave a parent, mapped to that parent.
+    ///
+    /// The `Context` lock is held while the given closure is called!
+    ///
+    /// Returns `None` if accesskit is off.
+    pub fn with_accesskit_parents<R>(&self, reader: impl FnOnce(&IdMap<Id>) -> R) -> Option<R> {
+        self.write(|ctx| {
+            ctx.viewport()
+                .this_pass
+                .accesskit_state
+                .as_ref()
+                .map(|state| reader(&state.parent_map))
+        })
+    }
+
     /// Report the widget with this id as the focused node of this pass's accessibility tree.
     ///
     /// This is for widgets that show an active item without taking keyboard focus, such as a
