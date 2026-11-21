@@ -478,13 +478,10 @@ impl Grid {
                 ui.available_size_before_wrap().x,
                 ui.spacing().interact_size.y,
             );
-            let layout = if ui.layout().prefer_right_to_left() {
-                Layout::right_to_left(Align::Center)
-            } else {
-                Layout::left_to_right(Align::Center)
-            };
+            // A grid lays out its cells left to right only: under a right-to-left parent a right-to-left row
+            // would start at the grid's unbounded left edge.
             let grid_ui = UiBuilder::new()
-                .layout(layout)
+                .layout(Layout::left_to_right(Align::Center))
                 .ui_stack_info(UiStackInfo::new(UiKind::Grid));
             ui.allocate_ui_with_builder_dyn(
                 initial_size,
