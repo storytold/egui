@@ -209,23 +209,41 @@ impl crate::TestRenderer for WgpuTestRenderer {
         let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         {
-            let mut pass = encoder
-                .begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("Egui Render Pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &texture_view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                            store: wgpu::StoreOp::Store,
-                        },
-                        depth_slice: None,
-                    })],
-                    ..Default::default()
-                })
-                .forget_lifetime();
-
-            renderer.render(&mut pass, &tessellated, &screen);
+            let mut begin_pass = |encoder: &mut wgpu::CommandEncoder, first: bool| {
+                encoder
+                    .begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("Egui Render Pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &texture_view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: if first {
+                                    wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+                                } else {
+                                    wgpu::LoadOp::Load
+                                },
+                                store: wgpu::StoreOp::Store,
+                            },
+                            depth_slice: None,
+                        })],
+                        ..Default::default()
+                    })
+                    .forget_lifetime()
+            };
+            // Callbacks that read the frame so far split the frame into several passes, copying the texture
+            // between them.
+            if renderer.has_backdrop_callbacks() {
+                renderer.render_with_backdrops(
+                    &mut encoder,
+                    &texture,
+                    &tessellated,
+                    &screen,
+                    &mut begin_pass,
+                );
+            } else {
+                let mut pass = begin_pass(&mut encoder, true);
+                renderer.render(&mut pass, &tessellated, &screen);
+            }
         }
 
         self.render_state
