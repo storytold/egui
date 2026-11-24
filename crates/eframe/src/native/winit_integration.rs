@@ -183,15 +183,51 @@ pub enum EventResult {
     Exit,
 }
 
+/// The viewports whose window has an active AccessKit adapter.
+///
+/// Each window's adapter activates and deactivates on its own, but egui builds AccessKit trees for
+/// every viewport behind one flag. The flag stays on while any window is active.
+#[derive(Default)]
+pub(crate) struct AccessKitActivation(egui::ViewportIdSet);
+
+impl AccessKitActivation {
+    #[cfg(feature = "accesskit")]
+    pub(crate) fn activate(&mut self, egui_ctx: &egui::Context, viewport_id: ViewportId) {
+        self.0.insert(viewport_id);
+        egui_ctx.enable_accesskit();
+    }
+
+    #[cfg(feature = "accesskit")]
+    pub(crate) fn deactivate(&mut self, egui_ctx: &egui::Context, viewport_id: ViewportId) {
+        self.0.remove(&viewport_id);
+        if self.0.is_empty() {
+            egui_ctx.disable_accesskit();
+        }
+    }
+
+    /// Forget viewports that no longer exist: a destroyed window's adapter sends no deactivation.
+    pub(crate) fn retain(&mut self, egui_ctx: &egui::Context, viewports: &egui::ViewportIdSet) {
+        if self.0.is_empty() {
+            return;
+        }
+        self.0.retain(|id| viewports.contains(id));
+        if self.0.is_empty() {
+            egui_ctx.disable_accesskit();
+        }
+    }
+}
+
 #[cfg(feature = "accesskit")]
 pub(crate) fn on_accesskit_window_event(
     egui_winit: &mut egui_winit::State,
+    activation: &mut AccessKitActivation,
+    viewport_id: ViewportId,
     window_id: WindowId,
     event: &accesskit_winit::WindowEvent,
 ) -> EventResult {
     match event {
         accesskit_winit::WindowEvent::InitialTreeRequested => {
-            egui_winit.egui_ctx().enable_accesskit();
+            activation.activate(egui_winit.egui_ctx(), viewport_id);
             // Because we can't provide the initial tree synchronously
             // (because that would require the activation handler to access
             // the same mutable state as the winit event handler), some
@@ -208,10 +244,42 @@ pub(crate) fn on_accesskit_window_event(
             EventResult::RepaintNext(window_id)
         }
         accesskit_winit::WindowEvent::AccessibilityDeactivated => {
-            egui_winit.egui_ctx().disable_accesskit();
+            activation.deactivate(egui_winit.egui_ctx(), viewport_id);
             // Disabling AccessKit support should have no visible effect,
             // so there's no need to repaint.
             EventResult::Wait
         }
+    }
+}
+
+#[cfg(all(test, feature = "accesskit"))]
+mod tests {
+    use super::*;
+
+    fn builds_tree(ctx: &egui::Context) -> bool {
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.label("x");
+        });
+        output.textures_delta.clear();
+        output.platform_output.accesskit_update.is_some()
+    }
+
+    #[test]
+    fn accesskit_stays_on_while_any_window_is_active() {
+        let ctx = egui::Context::default();
+        let child = ViewportId::from_hash_of("child");
+        let mut activation = AccessKitActivation::default();
+
+        activation.activate(&ctx, ViewportId::ROOT);
+        activation.activate(&ctx, child);
+        activation.deactivate(&ctx, child);
+        assert!(builds_tree(&ctx), "the root window is still active");
+
+        activation.deactivate(&ctx, ViewportId::ROOT);
+        assert!(!builds_tree(&ctx), "no window is active");
+
+        activation.activate(&ctx, child);
+        activation.retain(&ctx, &core::iter::once(ViewportId::ROOT).collect());
+        assert!(!builds_tree(&ctx), "the only active window is gone");
     }
 }

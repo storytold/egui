@@ -35,7 +35,10 @@ use crate::{
     },
 };
 
-use super::{epi_integration, event_loop_context, winit_integration, winit_integration::WinitApp};
+use super::{
+    epi_integration, event_loop_context, winit_integration,
+    winit_integration::{AccessKitActivation, WinitApp},
+};
 
 // ----------------------------------------------------------------------------
 // Types:
@@ -93,6 +96,11 @@ pub struct SharedState {
 
     /// Passed on to each [`egui_winit::State`]. See [`NativeOptions::clipboard_shortcuts`].
     clipboard_shortcuts: bool,
+
+    /// Each window's AccessKit adapter sends its events through this.
+    event_loop_proxy: EventLoopProxy<UserEvent>,
+
+    accesskit_activation: AccessKitActivation,
 }
 
 pub type Viewports = egui::OrderedViewportIdMap<Viewport>;
@@ -117,6 +125,9 @@ pub struct Viewport {
 
     /// `window` and `egui_winit` are initialized together.
     egui_winit: Option<egui_winit::State>,
+
+    /// The window was created hidden and is shown once the viewport has painted.
+    show_after_first_paint: bool,
 }
 
 impl Drop for Viewport {
@@ -165,6 +176,7 @@ impl<'app> WgpuWinitApp<'app> {
             painter,
             viewport_from_window,
             clipboard_shortcuts,
+            event_loop_proxy,
             ..
         } = &mut *shared;
 
@@ -175,6 +187,7 @@ impl<'app> WgpuWinitApp<'app> {
                 viewport_from_window,
                 painter,
                 *clipboard_shortcuts,
+                event_loop_proxy,
             );
         }
     }
@@ -187,6 +200,7 @@ impl<'app> WgpuWinitApp<'app> {
             viewport_from_window,
             painter,
             clipboard_shortcuts,
+            event_loop_proxy,
             ..
         } = &mut *running.shared.borrow_mut();
 
@@ -204,15 +218,23 @@ impl<'app> WgpuWinitApp<'app> {
             viewport_from_window,
             painter,
             *clipboard_shortcuts,
+            event_loop_proxy,
         );
     }
 
     #[cfg(target_os = "android")]
     fn drop_window(&mut self) -> Result<(), egui_wgpu::WgpuError> {
         if let Some(running) = &mut self.running {
-            let mut shared = running.shared.borrow_mut();
-            shared.viewports.remove(&ViewportId::ROOT);
-            pollster::block_on(shared.painter.set_window(ViewportId::ROOT, None))?;
+            let SharedState {
+                egui_ctx,
+                viewports,
+                painter,
+                accesskit_activation,
+                ..
+            } = &mut *running.shared.borrow_mut();
+            viewports.remove(&ViewportId::ROOT);
+            accesskit_activation.retain(egui_ctx, &viewports.keys().copied().collect());
+            pollster::block_on(painter.set_window(ViewportId::ROOT, None))?;
         }
         Ok(())
     }
@@ -363,6 +385,7 @@ impl<'app> WgpuWinitApp<'app> {
                 window: Some(window),
                 egui_winit: Some(egui_winit),
                 pending_delta: Default::default(),
+                show_after_first_paint: false,
             },
         );
 
@@ -374,6 +397,8 @@ impl<'app> WgpuWinitApp<'app> {
             focused_viewport: Some(ViewportId::ROOT),
             resized_viewport: None,
             clipboard_shortcuts: self.native_options.clipboard_shortcuts,
+            event_loop_proxy: self.repaint_proxy.lock().clone(),
+            accesskit_activation: AccessKitActivation::default(),
         }));
 
         {
@@ -558,15 +583,17 @@ impl WinitApp for WgpuWinitApp<'_> {
             let SharedState {
                 viewport_from_window,
                 viewports,
+                accesskit_activation,
                 ..
             } = &mut *shared_lock;
-            if let Some(viewport) = viewport_from_window
-                .get(&event.window_id)
-                .and_then(|id| viewports.get_mut(id))
+            if let Some(&viewport_id) = viewport_from_window.get(&event.window_id)
+                && let Some(viewport) = viewports.get_mut(&viewport_id)
                 && let Some(egui_winit) = &mut viewport.egui_winit
             {
                 return Ok(winit_integration::on_accesskit_window_event(
                     egui_winit,
+                    accesskit_activation,
+                    viewport_id,
                     event.window_id,
                     &event.window_event,
                 ));
@@ -782,6 +809,7 @@ impl WgpuWinitRunning<'_> {
             viewports,
             painter,
             viewport_from_window,
+            accesskit_activation,
             ..
         } = &mut *shared_mut;
 
@@ -795,7 +823,14 @@ impl WgpuWinitRunning<'_> {
 
         pending_deltas.append(textures_delta);
 
-        remove_viewports_not_in(viewports, painter, viewport_from_window, &viewport_output);
+        remove_viewports_not_in(
+            egui_ctx,
+            viewports,
+            painter,
+            viewport_from_window,
+            accesskit_activation,
+            &viewport_output,
+        );
 
         // Synchronization between the integration layer and the painter layer
         if let Some(surface_config) = integration.frame.wgpu_surface_config {
@@ -879,6 +914,9 @@ impl WgpuWinitRunning<'_> {
             }
 
             integration.post_rendering(window);
+            if core::mem::take(&mut viewport.show_after_first_paint) {
+                window.set_visible(true);
+            }
 
             vsync_secs
         } else {
@@ -893,6 +931,7 @@ impl WgpuWinitRunning<'_> {
             viewports,
             painter,
             viewport_from_window,
+            accesskit_activation,
         );
 
         // Prune dead viewports:
@@ -1135,6 +1174,7 @@ impl Viewport {
         windows_id: &mut HashMap<WindowId, ViewportId>,
         painter: &mut egui_wgpu::winit::Painter,
         clipboard_shortcuts: bool,
+        event_loop_proxy: &EventLoopProxy<UserEvent>,
     ) {
         if self.window.is_some() {
             return; // we already have one
@@ -1144,7 +1184,10 @@ impl Viewport {
 
         let viewport_id = self.ids.this;
 
-        match egui_winit::create_window(egui_ctx, event_loop, &self.builder) {
+        // Hidden until the first paint, so no unpainted window shows; an AccessKit adapter must
+        // also be attached before the window is first shown.
+        let hidden_builder = self.builder.clone().with_visible(false);
+        match egui_winit::create_window(egui_ctx, event_loop, &hidden_builder) {
             Ok(window) => {
                 windows_id.insert(window.id(), viewport_id);
                 super::viewport_hooks::with(|hooks| hooks.window_created(viewport_id, &window));
@@ -1166,9 +1209,14 @@ impl Viewport {
                     painter.max_texture_side(),
                 );
                 egui_winit.set_clipboard_shortcuts(clipboard_shortcuts);
+                #[cfg(feature = "accesskit")]
+                egui_winit.init_accesskit(event_loop, &window, event_loop_proxy.clone());
+                #[cfg(not(feature = "accesskit"))]
+                let _ = event_loop_proxy;
                 self.egui_winit = Some(egui_winit);
 
                 egui_winit::update_viewport_info(&mut self.info, egui_ctx, &window, true);
+                self.show_after_first_paint = self.builder.visible != Some(false);
                 self.window = Some(window);
             }
             Err(err) => {
@@ -1239,6 +1287,7 @@ fn render_immediate_viewport(
             painter,
             viewport_from_window,
             clipboard_shortcuts,
+            event_loop_proxy,
             ..
         } = &mut *shared.borrow_mut();
 
@@ -1258,6 +1307,7 @@ fn render_immediate_viewport(
                     viewport_from_window,
                     painter,
                     *clipboard_shortcuts,
+                    event_loop_proxy,
                 );
             });
         }
@@ -1301,6 +1351,7 @@ fn render_immediate_viewport(
         viewports,
         painter,
         viewport_from_window,
+        accesskit_activation,
         ..
     } = &mut *shared_mut;
 
@@ -1336,6 +1387,9 @@ fn render_immediate_viewport(
         vec![],
         window,
     );
+    if core::mem::take(&mut viewport.show_after_first_paint) {
+        window.set_visible(true);
+    }
 
     // As in the regular frame path, an `IMEAllowed` command must take effect before this
     // pass publishes surrounding text.
@@ -1359,13 +1413,16 @@ fn render_immediate_viewport(
         viewports,
         painter,
         viewport_from_window,
+        accesskit_activation,
     );
 }
 
 pub(crate) fn remove_viewports_not_in(
+    egui_ctx: &egui::Context,
     viewports: &mut Viewports,
     painter: &mut egui_wgpu::winit::Painter,
     viewport_from_window: &mut HashMap<WindowId, ViewportId>,
+    accesskit_activation: &mut AccessKitActivation,
     viewport_output: &OrderedViewportIdMap<ViewportOutput>,
 ) {
     let active_viewports_ids: ViewportIdSet = viewport_output.keys().copied().collect();
@@ -1379,6 +1436,7 @@ pub(crate) fn remove_viewports_not_in(
         keep
     });
     viewport_from_window.retain(|_, id| active_viewports_ids.contains(id));
+    accesskit_activation.retain(egui_ctx, &active_viewports_ids);
     painter.gc_viewports(&active_viewports_ids);
 }
 
@@ -1389,6 +1447,7 @@ fn handle_viewport_output(
     viewports: &mut Viewports,
     painter: &mut egui_wgpu::winit::Painter,
     viewport_from_window: &mut HashMap<WindowId, ViewportId>,
+    accesskit_activation: &mut AccessKitActivation,
 ) {
     for (
         viewport_id,
@@ -1428,7 +1487,14 @@ fn handle_viewport_output(
         }
     }
 
-    remove_viewports_not_in(viewports, painter, viewport_from_window, viewport_output);
+    remove_viewports_not_in(
+        egui_ctx,
+        viewports,
+        painter,
+        viewport_from_window,
+        accesskit_activation,
+        viewport_output,
+    );
 }
 
 /// Remove and return this viewport's `IMEAllowed` commands so they can be applied before
@@ -1486,6 +1552,7 @@ fn initialize_or_update_viewport<'a>(
                 window: None,
                 egui_winit: None,
                 pending_delta: Default::default(),
+                show_after_first_paint: false,
             })
         }
 
