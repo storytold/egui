@@ -573,8 +573,8 @@ pub(crate) struct Focus {
     /// The top-most modal layer from the current frame.
     top_modal_layer_current_frame: Option<LayerId>,
 
-    /// A cache of widget IDs that are interested in focus with their corresponding rectangles.
-    focus_widgets_cache: IdMap<Rect>,
+    /// A cache of widget IDs that are interested in focus with their layers and rectangles.
+    focus_widgets_cache: IdMap<(LayerId, Rect)>,
 }
 
 /// The widget with focus.
@@ -677,9 +677,15 @@ impl Focus {
         }
     }
 
-    pub(crate) fn end_pass(&mut self, used_ids: &IdMap<Rect>) {
+    /// `covered` tells whether a widget of a layer is covered by a higher layer at a point of
+    /// that layer.
+    pub(crate) fn end_pass(
+        &mut self,
+        used_ids: &IdMap<Rect>,
+        covered: impl Fn(LayerId, Pos2) -> bool,
+    ) {
         if self.focus_direction.is_cardinal()
-            && let Some(found_widget) = self.find_widget_in_direction(used_ids)
+            && let Some(found_widget) = self.find_widget_in_direction(used_ids, covered)
         {
             self.focused_widget = Some(FocusWidget::new(found_widget));
         }
@@ -701,11 +707,12 @@ impl Focus {
         self.id_previous_frame == Some(id)
     }
 
-    fn interested_in_focus(&mut self, id: Id) {
+    fn interested_in_focus(&mut self, id: Id, layer_id: LayerId) {
         // The rect is updated at the end of the frame.
         self.focus_widgets_cache
             .entry(id)
-            .or_insert(Rect::EVERYTHING);
+            .and_modify(|(layer, _)| *layer = layer_id)
+            .or_insert((layer_id, Rect::EVERYTHING));
 
         if self.give_to_next && !self.had_focus_last_frame(id) {
             self.focused_widget = Some(FocusWidget::new(id));
@@ -750,7 +757,13 @@ impl Focus {
         self.focus_direction = FocusDirection::None;
     }
 
-    fn find_widget_in_direction(&mut self, new_rects: &IdMap<Rect>) -> Option<Id> {
+    /// A candidate covered by a higher layer at its centre (`covered`) is never the target: it
+    /// cannot be seen or clicked there, as a button under an open popup.
+    fn find_widget_in_direction(
+        &mut self,
+        new_rects: &IdMap<Rect>,
+        covered: impl Fn(LayerId, Pos2) -> bool,
+    ) -> Option<Id> {
         // NOTE: `new_rects` here include some widgets _not_ interested in focus.
 
         /// * negative if `a` is left of `b`
@@ -779,7 +792,7 @@ impl Focus {
         };
 
         // Update cache with new rects
-        self.focus_widgets_cache.retain(|id, old_rect| {
+        self.focus_widgets_cache.retain(|id, (_, old_rect)| {
             if let Some(new_rect) = new_rects.get(id) {
                 *old_rect = *new_rect;
                 true // Keep the item
@@ -788,15 +801,17 @@ impl Focus {
             }
         });
 
-        let current_rect = self.focus_widgets_cache.get(&current_focused.id)?;
+        let (_, current_rect) = self.focus_widgets_cache.get(&current_focused.id)?;
 
         let mut best_score = f32::INFINITY;
         let mut best_id = None;
 
         // iteration order should only matter in case of a tie, and that should be very rare
         #[expect(clippy::iter_over_hash_type)]
-        for (candidate_id, candidate_rect) in &self.focus_widgets_cache {
-            if *candidate_id == current_focused.id {
+        for (candidate_id, (candidate_layer, candidate_rect)) in &self.focus_widgets_cache {
+            if *candidate_id == current_focused.id
+                || covered(*candidate_layer, candidate_rect.center())
+            {
                 continue;
             }
 
@@ -870,7 +885,12 @@ impl Memory {
     pub(crate) fn end_pass(&mut self, used_ids: &IdMap<Rect>) {
         self.caches.update();
         self.areas_mut().end_pass();
-        self.focus_mut().end_pass(used_ids);
+        let areas = &self.areas[&self.viewport_id];
+        let to_global = &self.to_global;
+        self.focus
+            .entry(self.viewport_id)
+            .or_default()
+            .end_pass(used_ids, |layer, pos| areas.covers(layer, pos, to_global));
 
         // Clean up abandoned popups.
         if let Some(popup) = self.popups.get_mut(&self.viewport_id) {
@@ -1098,7 +1118,7 @@ impl Memory {
         if !self.allows_interaction(layer_id) {
             return;
         }
-        self.focus_mut().interested_in_focus(id);
+        self.focus_mut().interested_in_focus(id, layer_id);
     }
 
     /// The navigation request after applying the focused widget's event filter.
@@ -1480,6 +1500,23 @@ impl Areas {
             }
         }
         None
+    }
+
+    /// Whether a higher layer covers `layer` at `pos`, in `layer`'s coordinates: the top-most
+    /// layer there, as [`Self::layer_id_at`] finds it, is another layer above `layer`. A layer
+    /// never covers itself, and a non-interactable layer (a tooltip) covers nothing.
+    pub(crate) fn covers(
+        &self,
+        layer: LayerId,
+        pos: Pos2,
+        layer_to_global: &HashMap<LayerId, TSTransform>,
+    ) -> bool {
+        let pos = layer_to_global
+            .get(&layer)
+            .map_or(pos, |to_global| *to_global * pos);
+        self.layer_id_at(pos, layer_to_global).is_some_and(|top| {
+            top != layer && self.compare_order(top, layer) == core::cmp::Ordering::Greater
+        })
     }
 
     pub fn visible_last_frame(&self, layer_id: &LayerId) -> bool {
@@ -1919,6 +1956,82 @@ fn pending_ime_reset_is_the_request_the_next_ime_output_carries() {
         ctx.pending_ime_reset(other),
         separate,
         "another viewport's request stays pending"
+    );
+}
+
+#[test]
+fn arrow_focus_skips_widgets_covered_by_a_higher_layer() {
+    use crate::{Area, Event, Key, Modifiers, Sense};
+    let ctx = crate::Context::default();
+    let button = Id::unique("covered button");
+    let button_rect = Rect::from_min_max(crate::pos2(228.0, 31.0), crate::pos2(254.0, 57.0));
+    // A popup list over the button, then off it under a non-interactable tooltip.
+    let run = |popup_y: f32, key: Option<Key>| {
+        let mut input = RawInput::default();
+        if let Some(key) = key {
+            input.events.push(Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Modifiers::NONE,
+            });
+        }
+        let mut entries = Vec::new();
+        let output = ctx.run_ui(input, |ui| {
+            ui.interact(button_rect, button, Sense::click());
+            Area::new(Id::unique("popup"))
+                .order(Order::Foreground)
+                .fixed_pos(crate::pos2(201.0, popup_y))
+                .constrain(false)
+                .show(ui.ctx(), |ui| {
+                    ui.spacing_mut().item_spacing = Vec2::ZERO;
+                    for _ in 0..2 {
+                        entries.push(
+                            ui.allocate_exact_size(vec2(104.0, 22.0), Sense::click())
+                                .1
+                                .id,
+                        );
+                    }
+                });
+            Area::new(Id::unique("tooltip"))
+                .order(Order::Tooltip)
+                .interactable(false)
+                .fixed_pos(button_rect.min - vec2(10.0, 10.0))
+                .show(ui.ctx(), |ui| {
+                    ui.allocate_exact_size(vec2(60.0, 60.0), Sense::hover());
+                });
+        });
+        output.drop_without_applying_deltas();
+        entries
+    };
+    let focused = || ctx.memory(|memory| memory.focused());
+
+    for _ in 0..3 {
+        run(18.0, None);
+    }
+    let entries = run(18.0, None);
+    ctx.memory_mut(|memory| memory.request_focus(entries[0]));
+    run(18.0, None);
+    run(18.0, Some(Key::ArrowDown));
+    assert_eq!(
+        focused(),
+        Some(entries[1]),
+        "Down goes to the popup's next entry, in its own layer, not to the covered button"
+    );
+    run(18.0, Some(Key::ArrowUp));
+    assert_eq!(focused(), Some(entries[0]), "and Up comes back");
+
+    for _ in 0..3 {
+        run(-20.0, None);
+    }
+    ctx.memory_mut(|memory| memory.request_focus(entries[1]));
+    run(-20.0, None);
+    run(-20.0, Some(Key::ArrowDown));
+    assert_eq!(
+        focused(),
+        Some(button),
+        "an uncovered widget of another layer stays a target, under a tooltip too"
     );
 }
 
