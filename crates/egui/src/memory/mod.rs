@@ -1248,6 +1248,10 @@ impl Memory {
         self.requested_ime_resets.remove(&viewport)
     }
 
+    pub(crate) fn pending_ime_reset(&self, viewport: ViewportId) -> Option<crate::ImeResetId> {
+        self.requested_ime_resets.get(&viewport).copied()
+    }
+
     pub(crate) fn should_interrupt_ime(&self) -> bool {
         self.requested_interrupt_ime
     }
@@ -1873,6 +1877,49 @@ fn requested_ime_resets_are_isolated_per_viewport_and_do_not_replace_stock_inter
     assert_eq!(memory.take_ime_reset(root), Some(newer));
     assert_eq!(memory.take_ime_reset(root), None);
     assert_eq!(memory.take_ime_reset(other), None);
+}
+
+#[test]
+fn pending_ime_reset_is_the_request_the_next_ime_output_carries() {
+    let ctx = crate::Context::default();
+    let root = crate::ViewportId::ROOT;
+    let other = crate::ViewportId::from_hash_of("pending reset other");
+    let mut seen = (None, None, None);
+    let output = ctx.run_ui(Default::default(), |ui| {
+        let request = ui.ctx().request_ime_reset(root);
+        let separate = ui.ctx().request_ime_reset(other);
+        seen = (request, ui.ctx().pending_ime_reset(root), separate);
+        let rect = Rect::from_min_size(crate::pos2(10.0, 10.0), vec2(50.0, 20.0));
+        ui.ctx().output_mut(|output| {
+            output.ime = Some(crate::output::IMEOutput::new(
+                Id::unique("editor"),
+                1,
+                crate::IMEPurpose::Normal,
+                rect,
+                rect,
+            ));
+        });
+    });
+    let (request, pending, separate) = seen;
+    assert!(request.is_some());
+    assert_eq!(pending, request, "the pass sees its unpublished request");
+    let published = output
+        .platform_output
+        .ime
+        .as_ref()
+        .and_then(|ime| ime.reset_request);
+    output.drop_without_applying_deltas();
+    assert_eq!(published, request, "the pass's IME output carries it");
+    assert_eq!(
+        ctx.pending_ime_reset(root),
+        None,
+        "nothing is pending once published"
+    );
+    assert_eq!(
+        ctx.pending_ime_reset(other),
+        separate,
+        "another viewport's request stays pending"
+    );
 }
 
 #[cfg(test)]

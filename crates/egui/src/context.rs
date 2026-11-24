@@ -1191,6 +1191,16 @@ impl Context {
         self.memory_mut(|memory| memory.request_ime_reset(viewport_id))
     }
 
+    /// The reset request the next IME output of this viewport will carry: the latest
+    /// [`Self::request_ime_reset`] not yet published, if any.
+    ///
+    /// At the end of the pass it replaces the output's own [`crate::output::IMEOutput::reset_request`].
+    /// Code that writes or inspects the IME output after the app's ui ran (an end-of-pass hook)
+    /// reads the app's request here.
+    pub fn pending_ime_reset(&self, viewport_id: ViewportId) -> Option<crate::ImeResetId> {
+        self.memory(|memory| memory.pending_ime_reset(viewport_id))
+    }
+
     /// Run app logic without showing any ui.
     ///
     /// Use this instead of [`Self::run_ui`] when nothing will be shown,
