@@ -576,7 +576,7 @@ impl Area {
 
         // interact right away to prevent frame-delay
         let mut move_response = {
-            let interact_id = layer_id.id.with("move");
+            let interact_id = background_widget_id(layer_id);
             let sense = sense.unwrap_or_else(|| {
                 if movable {
                     Sense::DRAG
@@ -674,6 +674,12 @@ impl Area {
             accessibility_role,
         }
     }
+}
+
+/// The id of the widget an [`Area`] senses its own background with: to move, or to come to the
+/// front at a click.
+pub(crate) fn background_widget_id(layer_id: LayerId) -> Id {
+    layer_id.id.with("move")
 }
 
 pub(crate) fn round_area_position(ctx: &Context, pos: Pos2) -> Pos2 {

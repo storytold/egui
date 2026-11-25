@@ -8,7 +8,7 @@ use epaint::emath::TSTransform;
 
 use crate::{
     EventFilter, Id, IdMap, LayerId, Order, PointerButton, Pos2, Rangef, RawInput, Rect, Style,
-    SurrenderFocusOn, Vec2, ViewportId, ViewportIdMap, ViewportIdSet, area, vec2,
+    SurrenderFocusOn, Vec2, ViewportId, ViewportIdMap, ViewportIdSet, WidgetRects, area, vec2,
 };
 
 mod theme;
@@ -913,7 +913,7 @@ impl Memory {
             .begin_pass(new_raw_input);
     }
 
-    pub(crate) fn end_pass(&mut self, used_ids: &IdMap<Rect>) {
+    pub(crate) fn end_pass(&mut self, used_ids: &IdMap<Rect>, widgets: &WidgetRects) {
         self.caches.update();
         self.areas_mut().end_pass();
         let areas = &self.areas[&self.viewport_id];
@@ -921,7 +921,9 @@ impl Memory {
         self.focus
             .entry(self.viewport_id)
             .or_default()
-            .end_pass(used_ids, |layer, pos| areas.covers(layer, pos, to_global));
+            .end_pass(used_ids, |layer, pos| {
+                areas.covers(layer, pos, widgets, to_global)
+            });
 
         // Clean up abandoned popups.
         if let Some(popup) = self.popups.get_mut(&self.viewport_id) {
@@ -1557,20 +1559,34 @@ impl Areas {
         None
     }
 
-    /// Whether a higher layer covers `layer` at `pos`, in `layer`'s coordinates: the top-most
-    /// layer there, as [`Self::layer_id_at`] finds it, is another layer above `layer`. A layer
-    /// never covers itself, and a non-interactable layer (a tooltip) covers nothing.
+    /// Whether a higher layer covers `layer` at `pos`, in `layer`'s coordinates: a layer above
+    /// `layer` whose area holds `pos`, as [`Self::layer_id_at`] finds areas, and that holds an
+    /// interactive widget (one that senses a click or a drag), as a popup, a menu or a window
+    /// does. The area's own background widget is not one, so an area with nothing to work with
+    /// in it, such as a transparent overlay, covers nothing. A layer never covers itself, and a
+    /// non-interactable layer (a tooltip) covers nothing.
     pub(crate) fn covers(
         &self,
         layer: LayerId,
         pos: Pos2,
+        widgets: &WidgetRects,
         layer_to_global: &HashMap<LayerId, TSTransform>,
     ) -> bool {
-        let pos = layer_to_global
-            .get(&layer)
-            .map_or(pos, |to_global| *to_global * pos);
-        self.layer_id_at(pos, layer_to_global).is_some_and(|top| {
-            top != layer && self.compare_order(top, layer) == core::cmp::Ordering::Greater
+        let to_global = |layer: LayerId| layer_to_global.get(&layer).copied();
+        let pos = to_global(layer).map_or(pos, |to_global| to_global * pos);
+        self.order.iter().any(|&above| {
+            above != layer
+                && self.compare_order(above, layer) == core::cmp::Ordering::Greater
+                && self.is_visible(&above)
+                && self.areas.get(&above.id).is_some_and(|state| {
+                    state.interactable
+                        && to_global(above)
+                            .map_or(state.rect(), |to_global| to_global * state.rect())
+                            .contains(pos)
+                })
+                && widgets.get_layer(above).any(|widget| {
+                    widget.sense.interactive() && widget.id != area::background_widget_id(above)
+                })
         })
     }
 
@@ -2087,6 +2103,51 @@ fn arrow_focus_skips_widgets_covered_by_a_higher_layer() {
         focused(),
         Some(button),
         "an uncovered widget of another layer stays a target, under a tooltip too"
+    );
+}
+
+#[test]
+fn arrow_focus_passes_under_an_area_with_no_widgets() {
+    use crate::{Area, Event, Key, Modifiers, Sense};
+    let ctx = crate::Context::default();
+    let left = Id::unique("left button");
+    let right = Id::unique("right button");
+    let at = |x: f32| Rect::from_min_size(crate::pos2(x, 100.0), vec2(60.0, 24.0));
+    // A full-window interactable overlay above the buttons that holds no widget of its own.
+    let run = |key: Option<Key>| {
+        let mut input = RawInput::default();
+        if let Some(key) = key {
+            input.events.push(Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Modifiers::NONE,
+            });
+        }
+        let output = ctx.run_ui(input, |ui| {
+            ui.interact(at(100.0), left, Sense::click());
+            ui.interact(at(200.0), right, Sense::click());
+            Area::new(Id::unique("overlay"))
+                .order(Order::Foreground)
+                .fixed_pos(crate::pos2(0.0, 0.0))
+                .constrain(false)
+                .show(ui.ctx(), |ui| {
+                    ui.allocate_space(vec2(1000.0, 1000.0));
+                });
+        });
+        output.drop_without_applying_deltas();
+    };
+    for _ in 0..3 {
+        run(None);
+    }
+    ctx.memory_mut(|memory| memory.request_focus(left));
+    run(None);
+    run(Some(Key::ArrowRight));
+    assert_eq!(
+        ctx.memory(|memory| memory.focused()),
+        Some(right),
+        "an area with no widget over the buttons covers neither of them"
     );
 }
 
