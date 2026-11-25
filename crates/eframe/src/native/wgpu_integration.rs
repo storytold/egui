@@ -70,15 +70,6 @@ struct WgpuWinitRunning<'app> {
 
     /// Wrapped in an `Rc<RefCell<…>>` so it can be re-entrantly shared via a weak-pointer.
     shared: Rc<RefCell<SharedState>>,
-
-    pending_deltas: TexturesDelta,
-}
-
-impl Drop for WgpuWinitRunning<'_> {
-    fn drop(&mut self) {
-        // Avoid debug panic when dropping unapplied deltas on teardown
-        self.pending_deltas.clear();
-    }
 }
 
 /// Everything needed by the immediate viewport renderer.\
@@ -101,6 +92,18 @@ pub struct SharedState {
     event_loop_proxy: EventLoopProxy<UserEvent>,
 
     accesskit_activation: AccessKitActivation,
+
+    /// Texture changes not yet applied. Every viewport paints with the one renderer, so they wait here, in the order
+    /// egui made them, for whichever viewport paints next: a viewport that is not painted (a minimized root, a window
+    /// that closes) holds back no allocation another viewport's later updates need.
+    pending_delta: TexturesDelta,
+}
+
+impl Drop for SharedState {
+    fn drop(&mut self) {
+        // Avoid debug panic when dropping unapplied deltas on teardown
+        self.pending_delta.clear();
+    }
 }
 
 pub type Viewports = egui::OrderedViewportIdMap<Viewport>;
@@ -112,9 +115,6 @@ pub struct Viewport {
     deferred_commands: Vec<egui::viewport::ViewportCommand>,
     info: ViewportInfo,
     actions_requested: Vec<ActionRequested>,
-
-    /// Any not yet applied deltas for this viewport.
-    pending_delta: TexturesDelta,
 
     /// `None` for sync viewports.
     viewport_ui_cb: Option<Arc<DeferredViewportUiCallback>>,
@@ -128,13 +128,6 @@ pub struct Viewport {
 
     /// The window was created hidden and is shown once the viewport has painted.
     show_after_first_paint: bool,
-}
-
-impl Drop for Viewport {
-    fn drop(&mut self) {
-        // Avoid debug panic when dropping unapplied deltas on teardown
-        self.pending_delta.clear();
-    }
 }
 
 // ----------------------------------------------------------------------------
@@ -384,7 +377,6 @@ impl<'app> WgpuWinitApp<'app> {
                 viewport_ui_cb: None,
                 window: Some(window),
                 egui_winit: Some(egui_winit),
-                pending_delta: Default::default(),
                 show_after_first_paint: false,
             },
         );
@@ -399,6 +391,7 @@ impl<'app> WgpuWinitApp<'app> {
             clipboard_shortcuts: self.native_options.clipboard_shortcuts,
             event_loop_proxy: self.repaint_proxy.lock().clone(),
             accesskit_activation: AccessKitActivation::default(),
+            pending_delta: Default::default(),
         }));
 
         {
@@ -419,7 +412,6 @@ impl<'app> WgpuWinitApp<'app> {
             integration,
             app,
             shared,
-            pending_deltas: Default::default(),
         }))
     }
 }
@@ -659,7 +651,6 @@ impl WgpuWinitRunning<'_> {
             app,
             integration,
             shared,
-            pending_deltas,
         } = self;
 
         let mut frame_timer = crate::stopwatch::Stopwatch::new();
@@ -810,6 +801,7 @@ impl WgpuWinitRunning<'_> {
             painter,
             viewport_from_window,
             accesskit_activation,
+            pending_delta,
             ..
         } = &mut *shared_mut;
 
@@ -821,7 +813,7 @@ impl WgpuWinitRunning<'_> {
             mut viewport_output,
         } = full_output;
 
-        pending_deltas.append(textures_delta);
+        pending_delta.append(textures_delta);
 
         remove_viewports_not_in(
             egui_ctx,
@@ -888,7 +880,7 @@ impl WgpuWinitRunning<'_> {
                 pixels_per_point,
                 app.clear_color(&egui_ctx.global_style().visuals),
                 &clipped_primitives,
-                pending_deltas,
+                pending_delta,
                 screenshot_commands,
                 window,
             );
@@ -1349,6 +1341,7 @@ fn render_immediate_viewport(
     let mut shared_mut = shared.borrow_mut();
     let SharedState {
         viewports,
+        pending_delta,
         painter,
         viewport_from_window,
         accesskit_activation,
@@ -1359,7 +1352,7 @@ fn render_immediate_viewport(
         warn!("Viewport disappeared unexpectedly!");
         return;
     };
-    viewport.pending_delta.append(textures_delta);
+    pending_delta.append(textures_delta);
 
     viewport.info.events.clear(); // they should have been processed
     let (Some(egui_winit), Some(window)) = (&mut viewport.egui_winit, &viewport.window) else {
@@ -1383,7 +1376,7 @@ fn render_immediate_viewport(
         pixels_per_point,
         [0.0, 0.0, 0.0, 0.0],
         &clipped_primitives,
-        &mut viewport.pending_delta,
+        pending_delta,
         vec![],
         window,
     );
@@ -1551,7 +1544,6 @@ fn initialize_or_update_viewport<'a>(
                 viewport_ui_cb,
                 window: None,
                 egui_winit: None,
-                pending_delta: Default::default(),
                 show_after_first_paint: false,
             })
         }
