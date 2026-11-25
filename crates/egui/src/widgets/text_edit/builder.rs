@@ -873,6 +873,9 @@ impl<'t> TextEdit<'t> {
 
         // Our atom closure was now called, so the galley should always be available here
         let mut galley = get_galley.expect("Galley should be available here");
+        if interactive {
+            ui.memory_mut(|mem| mem.mark_text_candidate(id));
+        }
 
         // Don't send `OutputEvent::Clicked` when a user presses the space bar
         response.flags -= response::Flags::FAKE_PRIMARY_CLICKED;

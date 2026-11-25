@@ -180,6 +180,7 @@ pub struct Popup<'a> {
     /// Default width passed to the Area
     width: Option<f32>,
     sizing_pass: bool,
+    max_height_from_constrain: bool,
     sense: Sense,
     interactable: bool,
     swallow_outside_press: bool,
@@ -213,6 +214,7 @@ impl<'a> Popup<'a> {
             gap: 0.0,
             width: None,
             sizing_pass: false,
+            max_height_from_constrain: false,
             sense: Sense::CLICK,
             interactable: true,
             swallow_outside_press: false,
@@ -470,6 +472,21 @@ impl<'a> Popup<'a> {
         self
     }
 
+    /// Offer the contents the height the screen leaves on the popup's side on every pass, so
+    /// contents that shrank grow back while the popup stays open
+    /// (see [`Area::max_height_from_constrain`]).
+    ///
+    /// The popup then keeps the side it opened on while it stays open: the side where it fits,
+    /// else the one with more room. Otherwise a popup that shrinks and grows again would move
+    /// from one side of its anchor to the other.
+    ///
+    /// Default: `false`.
+    #[inline]
+    pub fn max_height_from_constrain(mut self, max_height_from_constrain: bool) -> Self {
+        self.max_height_from_constrain = max_height_from_constrain;
+        self
+    }
+
     /// Set the id of the Area.
     #[inline]
     pub fn id(mut self, id: Id) -> Self {
@@ -570,6 +587,32 @@ impl<'a> Popup<'a> {
         .unwrap_or_default()
     }
 
+    /// The side a [`Self::max_height_from_constrain`] popup keeps while it stays open, chosen on
+    /// the first pass after the popup was measured.
+    fn kept_align(&self, sizing_pass: bool) -> RectAlign {
+        let key = self.id.with("kept_align");
+        if sizing_pass {
+            self.ctx.data_mut(|d| d.remove::<RectAlign>(key));
+            return self.get_best_align();
+        }
+        if let Some(align) = self.ctx.data(|d| d.get_temp::<RectAlign>(key)) {
+            return align;
+        }
+        let mut align = self.get_best_align();
+        if let (Some(size), Some(anchor)) = (self.get_expected_size(), self.get_anchor_rect()) {
+            let screen = self.ctx.content_rect();
+            let shown = |align: RectAlign| {
+                let rect = align.align_rect(&anchor, size, self.gap);
+                rect.intersect(screen).height()
+            };
+            if shown(align.flipped_y()) > shown(align) {
+                align = align.flipped_y();
+            }
+        }
+        self.ctx.data_mut(|d| d.insert_temp(key, align));
+        align
+    }
+
     /// Show the popup.
     ///
     /// Returns `None` if the popup is not open or anchor is `PopupAnchor::Pointer` and there is
@@ -610,7 +653,11 @@ impl<'a> Popup<'a> {
             return None;
         }
 
-        let best_align = self.get_best_align();
+        let best_align = if self.max_height_from_constrain {
+            self.kept_align(self.sizing_pass || !was_open_last_frame)
+        } else {
+            self.get_best_align()
+        };
 
         let Popup {
             id,
@@ -626,6 +673,7 @@ impl<'a> Popup<'a> {
             gap,
             width,
             sizing_pass,
+            max_height_from_constrain,
             sense,
             interactable,
             swallow_outside_press,
@@ -658,6 +706,7 @@ impl<'a> Popup<'a> {
             .interactable(interactable)
             .layout(layout)
             .sizing_pass(sizing_pass || !was_open_last_frame)
+            .max_height_from_constrain(max_height_from_constrain)
             .info(info.unwrap_or_else(|| {
                 UiStackInfo::new(kind.into()).with_tag_value(
                     MenuConfig::MENU_CONFIG_TAG,

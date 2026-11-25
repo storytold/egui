@@ -1141,25 +1141,35 @@ impl Context {
 
             self.begin_pass(new_input.take());
             run_ui(self);
-            output.append(self.end_pass());
+            let mut pass = self.end_pass();
+            let textures_delta = core::mem::take(&mut pass.textures_delta);
+            output.append(pass);
             debug_assert!(
                 0 < output.platform_output.num_completed_passes,
                 "Completed passes was lower than 0, was {}",
                 output.platform_output.num_completed_passes
             );
 
-            if !output.platform_output.requested_discard() {
-                break; // no need for another pass
-            }
-
-            if max_passes <= output.platform_output.num_completed_passes {
+            let last = if !output.platform_output.requested_discard() {
+                true // no need for another pass
+            } else if max_passes <= output.platform_output.num_completed_passes {
                 log::debug!(
                     "Ignoring call request_discard, because max_passes={max_passes}. Requested from {:?}",
                     output.platform_output.request_discard_reasons
                 );
+                true
+            } else {
+                false
+            };
 
+            if last {
+                output.textures_delta.append(textures_delta);
                 break;
             }
+            // The run's output reaches the renderer only after its last pass, but a viewport shown in the next pass
+            // is painted during it, by the renderer the textures share. The delta goes back to the texture manager,
+            // so the next take, that viewport's or the last pass's, carries it ahead of the changes made since.
+            self.tex_manager().write().restore(textures_delta);
         }
 
         self.write(|ctx| {
@@ -1189,6 +1199,16 @@ impl Context {
     /// idle time, ordinary empty preedit, or generic Enabled/Disabled as a substitute.
     pub fn request_ime_reset(&self, viewport_id: ViewportId) -> Option<crate::ImeResetId> {
         self.memory_mut(|memory| memory.request_ime_reset(viewport_id))
+    }
+
+    /// The reset request the next IME output of this viewport will carry: the latest
+    /// [`Self::request_ime_reset`] not yet published, if any.
+    ///
+    /// At the end of the pass it replaces the output's own [`crate::output::IMEOutput::reset_request`].
+    /// Code that writes or inspects the IME output after the app's ui ran (an end-of-pass hook)
+    /// reads the app's request here.
+    pub fn pending_ime_reset(&self, viewport_id: ViewportId) -> Option<crate::ImeResetId> {
+        self.memory(|memory| memory.pending_ime_reset(viewport_id))
     }
 
     /// Run app logic without showing any ui.
@@ -3254,7 +3274,8 @@ impl ContextImpl {
 
         viewport.repaint.cumulative_pass_nr += 1;
 
-        self.memory.end_pass(&viewport.this_pass.used_ids);
+        self.memory
+            .end_pass(&viewport.this_pass.used_ids, &viewport.this_pass.widgets);
 
         if let Some(fonts) = self.fonts.as_mut() {
             let tex_mngr = &mut self.tex_manager.0.write();
