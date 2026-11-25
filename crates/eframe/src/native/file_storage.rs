@@ -508,6 +508,8 @@ mod tests {
         let result = write_atomically(&path, |writer| writer.write_all(b"new"));
 
         assert!(result.is_ok(), "{result:?}");
+        // Checked before the join, which would wait forever if nothing was written into the pipe.
+        assert_eq!(std::fs::read_link(&path).unwrap(), pipe);
         assert!(std::fs::metadata(&pipe).unwrap().file_type().is_fifo());
         assert_eq!(reader.unwrap().join().unwrap(), "new");
     }
