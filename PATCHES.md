@@ -27,6 +27,7 @@ Drop a patch when an egui release in use contains it.
 | E19 | `d64047bf`, `642b74f7`, `baeb4515` | egui-winit, egui | one letter-key rule for Windows, macOS and Linux (first Latin group); `RawInput::keyboard_layout_is_latin`; `RawInput::latin_layout_chars` (each key's Latin layout character, so a key without a Latin letter is no letter shortcut) | fork-only until winit has the APIs | shortcuts on non-Latin layouts; needs winit `craft/0.30.13-lang` |
 | E20 | `23955535` | egui | widget text laid out in the language of its `Ui` | fork-only (goes with E15 and E17) | language support |
 | E21 | `a70470b0` | egui-winit, egui | `ImeEvent::DeleteSurroundingBytes`: `TextEdit` deletes the exact bytes an input method replaces, in the commit's undo step | not proposed | macOS press-and-hold and dictation, Wayland input methods; needs winit `craft/0.30.13-lang` |
+| E22 | `fix/numpad-key-location` | egui-winit, egui | `Key::Numpad*` physical variants (Enter, 0–9, operators) carried through `Event::Key::physical_key`; logical `key` still collapses to `Enter`/`Num0`…/`Plus`… so existing widgets are unaffected; `Key::from_name` parses `Numpad*` names | not proposed; follows the ShiftLeft/ShiftRight/IntlBackslash physical-key precedent | apps binding numpad-specific shortcuts (SoundCraft Pro Tools parity, storytold/soundcraft#1285) |
 
 E1 changes from `e7e37ad`: the hooks are installed in `init_native`, so `create_native` uses them too, and a
 unit test covers installing and replacing them. E2+E3 is the same change as `b02321d` with a `surface_fit`

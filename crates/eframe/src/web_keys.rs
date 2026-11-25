@@ -88,6 +88,38 @@ pub struct KeyDown {
 /// `KeyQ` (which types `/`) still gives [`egui::Key::Q`]. It comes from the layout map where the
 /// browser has one (`navigator.keyboard.getLayoutMap()`, Chromium), and otherwise from the letters
 /// the user types. Until either says otherwise, the layout counts as Latin.
+/// The key a DOM `Numpad*` code contributed to `Event::Key`'s logical-or-physical
+/// fallback before `Key::Numpad*` existed: an unidentified numpad key fell back to
+/// its collapsed main-row logical (`Numpad1` → `Num1`, `NumpadComma` → `Comma`).
+/// The one code nothing mapped to, `NumpadMultiply` (`*` has no egui `Key`), falls
+/// back to its physical identity like every other code — otherwise its press and
+/// release would dispatch no `Event::Key` at all and `physical_key` could never be
+/// observed. `physical_key` still reports the real `Numpad*` identity for
+/// consumers that opt into it.
+fn logical_fallback_key(code: &str, physical_key: Option<egui::Key>) -> Option<egui::Key> {
+    use egui::Key;
+    match code {
+        "NumpadEnter" => Some(Key::Enter),
+        "NumpadComma" => Some(Key::Comma),
+        "NumpadSubtract" => Some(Key::Minus),
+        "NumpadDecimal" => Some(Key::Period),
+        "NumpadAdd" => Some(Key::Plus),
+        "NumpadEqual" => Some(Key::Equals),
+        "NumpadDivide" => Some(Key::Slash),
+        "Numpad0" => Some(Key::Num0),
+        "Numpad1" => Some(Key::Num1),
+        "Numpad2" => Some(Key::Num2),
+        "Numpad3" => Some(Key::Num3),
+        "Numpad4" => Some(Key::Num4),
+        "Numpad5" => Some(Key::Num5),
+        "Numpad6" => Some(Key::Num6),
+        "Numpad7" => Some(Key::Num7),
+        "Numpad8" => Some(Key::Num8),
+        "Numpad9" => Some(Key::Num9),
+        _ => physical_key,
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct KeyResolver {
     latin: Option<bool>,
@@ -139,7 +171,9 @@ impl KeyResolver {
         let physical_key = egui::Key::from_name(code);
         // Modifier keys, and keys that type something egui has no key for, fall back to the
         // physical key.
-        let logical_key = self.resolve(key, code).or(physical_key);
+        let logical_key = self
+            .resolve(key, code)
+            .or_else(|| logical_fallback_key(code, physical_key));
         if let Some(logical_key) = logical_key
             && !code.is_empty()
         {
@@ -159,7 +193,7 @@ impl KeyResolver {
             .pressed
             .remove(code)
             .or_else(|| self.resolve(key, code))
-            .or(physical_key);
+            .or_else(|| logical_fallback_key(code, physical_key));
         (logical_key, physical_key)
     }
 
@@ -392,5 +426,56 @@ mod tests {
         resolver.key_down("'", "KeyQ", false);
         resolver.clear_pressed();
         assert_eq!(resolver.key_up("/", "KeyQ").0, Some(egui::Key::Slash));
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn numpad_logical_fallback_keeps_pre_numpad_variants() {
+        let mut resolver = KeyResolver::default();
+
+        // An unrecognized logical key with an identified numpad code emits the
+        // collapsed main-row logical it had before `Key::Numpad*` existed, while
+        // `physical_key` still reports the real numpad identity.
+        for (code, logical, physical) in [
+            ("NumpadEnter", egui::Key::Enter, egui::Key::NumpadEnter),
+            ("Numpad1", egui::Key::Num1, egui::Key::Numpad1),
+            ("NumpadComma", egui::Key::Comma, egui::Key::NumpadComma),
+            (
+                "NumpadSubtract",
+                egui::Key::Minus,
+                egui::Key::NumpadSubtract,
+            ),
+            ("NumpadDecimal", egui::Key::Period, egui::Key::NumpadDecimal),
+            ("NumpadAdd", egui::Key::Plus, egui::Key::NumpadAdd),
+            ("NumpadEqual", egui::Key::Equals, egui::Key::NumpadEqual),
+            ("NumpadDivide", egui::Key::Slash, egui::Key::NumpadDivide),
+        ] {
+            let down = resolver.key_down("Unidentified", code, true);
+            assert_eq!(down.key, Some(logical), "key_down {code}");
+            assert_eq!(down.physical_key, Some(physical), "physical {code}");
+            let (up_key, up_physical) = resolver.key_up("Unidentified", code);
+            assert_eq!(up_key, Some(logical), "key_up {code}");
+            assert_eq!(up_physical, Some(physical), "physical up {code}");
+        }
+
+        // `NumpadMultiply` has no logical egui key: the standard browser pair
+        // `key="*"`, `code="NumpadMultiply"` resolves `*` to `None`. The press and
+        // release must still dispatch `Event::Key`, so it reports its physical
+        // identity — the same fallback every unidentified code uses.
+        let down = resolver.key_down("*", "NumpadMultiply", true);
+        assert_eq!(down.key, Some(egui::Key::NumpadMultiply));
+        assert_eq!(down.physical_key, Some(egui::Key::NumpadMultiply));
+        let (up_key, up_physical) = resolver.key_up("*", "NumpadMultiply");
+        assert_eq!(up_key, Some(egui::Key::NumpadMultiply));
+        assert_eq!(up_physical, Some(egui::Key::NumpadMultiply));
+
+        // The same holds for an `Unidentified` logical value.
+        let down = resolver.key_down("Unidentified", "NumpadMultiply", true);
+        assert_eq!(down.key, Some(egui::Key::NumpadMultiply));
+        assert_eq!(down.physical_key, Some(egui::Key::NumpadMultiply));
+        assert_eq!(
+            resolver.key_up("Unidentified", "NumpadMultiply").0,
+            Some(egui::Key::NumpadMultiply)
+        );
     }
 }
