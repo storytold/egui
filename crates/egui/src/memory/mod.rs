@@ -575,6 +575,25 @@ pub(crate) struct Focus {
 
     /// A cache of widget IDs that are interested in focus with their layers and rectangles.
     focus_widgets_cache: IdMap<(LayerId, Rect)>,
+
+    /// The widgets interested in focus in this pass, in the order they first registered (the Tab order).
+    candidates: Vec<FocusCandidate>,
+
+    /// Where each of `candidates` sits in it.
+    candidate_index: IdMap<usize>,
+}
+
+/// A widget interested in keyboard focus in the running pass ([`Memory::focus_candidates`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FocusCandidate {
+    /// The widget.
+    pub id: Id,
+
+    /// The layer it registered in.
+    pub layer: LayerId,
+
+    /// The widget is a text edit ([`Memory::mark_text_candidate`]).
+    pub text: bool,
 }
 
 /// The widget with focus.
@@ -620,6 +639,8 @@ impl Focus {
         let event_filter = self.focused_widget.map(|w| w.filter).unwrap_or_default();
 
         self.focus_direction = FocusDirection::None;
+        self.candidates.clear();
+        self.candidate_index.clear();
 
         let mut focus_requested_by_accesskit = None;
 
@@ -708,6 +729,16 @@ impl Focus {
     }
 
     fn interested_in_focus(&mut self, id: Id, layer_id: LayerId) {
+        // A widget that pre-registers (a `DragValue`) registers again under the same id: it keeps its first place.
+        let next = self.candidates.len();
+        if *self.candidate_index.entry(id).or_insert(next) == next {
+            self.candidates.push(FocusCandidate {
+                id,
+                layer: layer_id,
+                text: false,
+            });
+        }
+
         // The rect is updated at the end of the frame.
         self.focus_widgets_cache
             .entry(id)
@@ -1119,6 +1150,30 @@ impl Memory {
             return;
         }
         self.focus_mut().interested_in_focus(id, layer_id);
+    }
+
+    /// The widgets interested in keyboard focus in this pass of the running viewport, in the order they first
+    /// registered ([`Self::interested_in_focus`]): egui's own Tab order. Cleared when the viewport's next pass begins.
+    pub fn focus_candidates(&self) -> &[FocusCandidate] {
+        self.focus()
+            .map_or(&[], |focus| focus.candidates.as_slice())
+    }
+
+    /// Marks the widget `id`, interested in focus in this pass, as a text edit ([`FocusCandidate::text`]).
+    /// [`crate::TextEdit`] marks itself.
+    pub fn mark_text_candidate(&mut self, id: Id) {
+        let focus = self.focus_mut();
+        if let Some(&index) = focus.candidate_index.get(&id)
+            && let Some(candidate) = focus.candidates.get_mut(index)
+        {
+            candidate.text = true;
+        }
+    }
+
+    /// The event filter of the widget with keyboard focus ([`Self::set_focus_lock_filter`],
+    /// [`Self::request_focus_with_filter`]); `None` when no widget has focus.
+    pub fn focus_lock_filter(&self) -> Option<EventFilter> {
+        self.focus()?.focused_widget.map(|widget| widget.filter)
     }
 
     /// The navigation request after applying the focused widget's event filter.

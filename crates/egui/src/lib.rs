@@ -521,7 +521,7 @@ pub use self::{
     layers::{LayerId, Order},
     layout::Layout,
     load::SizeHint,
-    memory::{FocusDirection, Memory, Options, Theme, ThemePreference},
+    memory::{FocusCandidate, FocusDirection, Memory, Options, Theme, ThemePreference},
     painter::Painter,
     pass_records::{PassMark, PassRecords, PassRecordsDiff, RecordShift},
     plugin::Plugin,
