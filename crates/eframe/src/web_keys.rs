@@ -90,9 +90,11 @@ pub struct KeyDown {
 /// the user types. Until either says otherwise, the layout counts as Latin.
 /// The key a DOM `Numpad*` code contributed to `Event::Key`'s logical-or-physical
 /// fallback before `Key::Numpad*` existed: an unidentified numpad key fell back to
-/// its collapsed main-row logical (`Numpad1` → `Num1`, `NumpadComma` → `Comma`),
-/// and the codes nothing mapped to (`NumpadMultiply`) stayed unmapped — they get no
-/// new logical alias. `physical_key` still reports the real `Numpad*` identity for
+/// its collapsed main-row logical (`Numpad1` → `Num1`, `NumpadComma` → `Comma`).
+/// The one code nothing mapped to, `NumpadMultiply` (`*` has no egui `Key`), falls
+/// back to its physical identity like every other code — otherwise its press and
+/// release would dispatch no `Event::Key` at all and `physical_key` could never be
+/// observed. `physical_key` still reports the real `Numpad*` identity for
 /// consumers that opt into it.
 fn logical_fallback_key(code: &str, physical_key: Option<egui::Key>) -> Option<egui::Key> {
     use egui::Key;
@@ -114,7 +116,6 @@ fn logical_fallback_key(code: &str, physical_key: Option<egui::Key>) -> Option<e
         "Numpad7" => Some(Key::Num7),
         "Numpad8" => Some(Key::Num8),
         "Numpad9" => Some(Key::Num9),
-        "NumpadMultiply" => None,
         _ => physical_key,
     }
 }
@@ -457,9 +458,24 @@ mod tests {
             assert_eq!(up_physical, Some(physical), "physical up {code}");
         }
 
-        // `NumpadMultiply` mapped to nothing before and gets no new logical alias.
-        let down = resolver.key_down("Unidentified", "NumpadMultiply", true);
-        assert_eq!(down.key, None);
+        // `NumpadMultiply` has no logical egui key: the standard browser pair
+        // `key="*"`, `code="NumpadMultiply"` resolves `*` to `None`. The press and
+        // release must still dispatch `Event::Key`, so it reports its physical
+        // identity — the same fallback every unidentified code uses.
+        let down = resolver.key_down("*", "NumpadMultiply", true);
+        assert_eq!(down.key, Some(egui::Key::NumpadMultiply));
         assert_eq!(down.physical_key, Some(egui::Key::NumpadMultiply));
+        let (up_key, up_physical) = resolver.key_up("*", "NumpadMultiply");
+        assert_eq!(up_key, Some(egui::Key::NumpadMultiply));
+        assert_eq!(up_physical, Some(egui::Key::NumpadMultiply));
+
+        // The same holds for an `Unidentified` logical value.
+        let down = resolver.key_down("Unidentified", "NumpadMultiply", true);
+        assert_eq!(down.key, Some(egui::Key::NumpadMultiply));
+        assert_eq!(down.physical_key, Some(egui::Key::NumpadMultiply));
+        assert_eq!(
+            resolver.key_up("Unidentified", "NumpadMultiply").0,
+            Some(egui::Key::NumpadMultiply)
+        );
     }
 }

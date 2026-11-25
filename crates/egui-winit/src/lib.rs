@@ -4291,9 +4291,11 @@ fn key_from_key_code(key: winit::keyboard::KeyCode) -> Option<egui::Key> {
 /// fallback before `Key::Numpad*` existed: a numpad key with an unrecognized
 /// logical identity fell back to its collapsed main-row logical (`Numpad1` →
 /// `Num1`, `NumpadEnter` → `Enter`), and the codes nothing mapped to
-/// (`NumpadMultiply`, `NumpadDecimal`, `NumpadComma`, `NumpadEqual`) stayed
-/// unmapped — they get no new logical alias. `physical_key` still reports the
-/// real `Numpad*` identity for consumers that opt into it.
+/// (`NumpadDecimal`, `NumpadComma`, `NumpadEqual`) stayed unmapped — they get no
+/// new logical alias. `NumpadMultiply` is the exception: `*` has no egui `Key`,
+/// so it falls back to its physical identity like every other code, otherwise no
+/// `Event::Key` would ever fire for it. `physical_key` still reports the real
+/// `Numpad*` identity for consumers that opt into it.
 fn logical_fallback_key_from_key_code(key: winit::keyboard::KeyCode) -> Option<egui::Key> {
     use egui::Key;
     use winit::keyboard::KeyCode;
@@ -4313,10 +4315,7 @@ fn logical_fallback_key_from_key_code(key: winit::keyboard::KeyCode) -> Option<e
         KeyCode::Numpad7 => Some(Key::Num7),
         KeyCode::Numpad8 => Some(Key::Num8),
         KeyCode::Numpad9 => Some(Key::Num9),
-        KeyCode::NumpadMultiply
-        | KeyCode::NumpadDecimal
-        | KeyCode::NumpadComma
-        | KeyCode::NumpadEqual => None,
+        KeyCode::NumpadDecimal | KeyCode::NumpadComma | KeyCode::NumpadEqual => None,
         _ => key_from_key_code(key),
     }
 }
@@ -5508,13 +5507,20 @@ mod tests {
 
         // Codes that mapped to nothing stay unmapped — no invented logical alias.
         for code in [
-            KeyCode::NumpadMultiply,
             KeyCode::NumpadDecimal,
             KeyCode::NumpadComma,
             KeyCode::NumpadEqual,
         ] {
             assert_eq!(logical_fallback_key_from_key_code(code), None, "{code:?}");
         }
+
+        // `NumpadMultiply` is the exception: `*` has no egui `Key`, so nothing
+        // would emit an `Event::Key` for it. Like every other unidentified code
+        // it falls back to its physical identity, on press and release.
+        assert_eq!(
+            logical_fallback_key_from_key_code(KeyCode::NumpadMultiply),
+            Some(Key::NumpadMultiply)
+        );
 
         // Non-numpad codes still fall back to their (unchanged) physical identity.
         assert_eq!(
