@@ -1141,25 +1141,35 @@ impl Context {
 
             self.begin_pass(new_input.take());
             run_ui(self);
-            output.append(self.end_pass());
+            let mut pass = self.end_pass();
+            let textures_delta = core::mem::take(&mut pass.textures_delta);
+            output.append(pass);
             debug_assert!(
                 0 < output.platform_output.num_completed_passes,
                 "Completed passes was lower than 0, was {}",
                 output.platform_output.num_completed_passes
             );
 
-            if !output.platform_output.requested_discard() {
-                break; // no need for another pass
-            }
-
-            if max_passes <= output.platform_output.num_completed_passes {
+            let last = if !output.platform_output.requested_discard() {
+                true // no need for another pass
+            } else if max_passes <= output.platform_output.num_completed_passes {
                 log::debug!(
                     "Ignoring call request_discard, because max_passes={max_passes}. Requested from {:?}",
                     output.platform_output.request_discard_reasons
                 );
+                true
+            } else {
+                false
+            };
 
+            if last {
+                output.textures_delta.append(textures_delta);
                 break;
             }
+            // The run's output reaches the renderer only after its last pass, but a viewport shown in the next pass
+            // is painted during it, by the renderer the textures share. The delta goes back to the texture manager,
+            // so the next take, that viewport's or the last pass's, carries it ahead of the changes made since.
+            self.tex_manager().write().restore(textures_delta);
         }
 
         self.write(|ctx| {
