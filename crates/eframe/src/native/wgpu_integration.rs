@@ -1348,11 +1348,13 @@ fn render_immediate_viewport(
         ..
     } = &mut *shared_mut;
 
+    // The delta belongs to the textures all viewports share: it waits for the next paint,
+    // even when this viewport is gone.
+    pending_delta.append(textures_delta);
     let Some(viewport) = viewports.get_mut(&ids.this) else {
         warn!("Viewport disappeared unexpectedly!");
         return;
     };
-    pending_delta.append(textures_delta);
 
     viewport.info.events.clear(); // they should have been processed
     let (Some(egui_winit), Some(window)) = (&mut viewport.egui_winit, &viewport.window) else {
