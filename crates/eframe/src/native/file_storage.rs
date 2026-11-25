@@ -224,10 +224,27 @@ static SAVE_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64
 ///
 /// The folder itself is not synced, so after a power loss some file systems may keep the previous
 /// file rather than the new one.
+///
+/// A symlink is kept, and the file it leads to is the one replaced.
 fn write_atomically(
     file_path: &Path,
     write: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
+    // A rename would also replace a read-only file, or a device or pipe. Refuse the first, as
+    // `File::create` does, and write into the others.
+    match std::fs::OpenOptions::new().write(true).open(file_path) {
+        Ok(existing) => {
+            if !existing.metadata()?.is_file() {
+                let mut writer = std::io::BufWriter::new(existing);
+                write(&mut writer)?;
+                return writer.flush();
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err),
+    }
+    let file_path = &follow_symlinks(file_path)?;
+
     // Each save, in this process or another, gets its own temporary file, created exclusively.
     // A name left behind by an earlier process with the same id is skipped, not reused.
     let mut attempts = 0;
@@ -262,6 +279,25 @@ fn write_atomically(
         std::fs::remove_file(&tmp_path).ok();
     }
     result
+}
+
+/// The file `path` leads to, which may not exist yet (so this is not [`std::fs::canonicalize`]).
+fn follow_symlinks(path: &Path) -> std::io::Result<PathBuf> {
+    let mut path = path.to_owned();
+    // Linux follows 40 links too.
+    for _ in 0..40 {
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_symlink() => {
+                // A relative link starts from the folder it is in.
+                let target = std::fs::read_link(&path)?;
+                path.pop();
+                path.push(target);
+            }
+            Err(err) if err.kind() != std::io::ErrorKind::NotFound => return Err(err),
+            _ => return Ok(path),
+        }
+    }
+    Err(std::io::Error::other("too many symbolic links"))
 }
 
 // ----------------------------------------------------------------------------
@@ -360,6 +396,120 @@ mod tests {
 
         assert!(result.is_ok(), "{result:?}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+    }
+
+    #[test]
+    fn a_save_does_not_replace_a_read_only_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.ron");
+        std::fs::write(&path, "previous").unwrap();
+        let writable = std::fs::metadata(&path).unwrap().permissions();
+        let mut read_only = writable.clone();
+        read_only.set_readonly(true);
+        std::fs::set_permissions(&path, read_only).unwrap();
+        if std::fs::OpenOptions::new().write(true).open(&path).is_ok() {
+            return; // Running as root, which may write to it.
+        }
+
+        let result = write_atomically(&path, |writer| writer.write_all(b"new"));
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "previous");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        std::fs::set_permissions(&path, writable).unwrap(); // So that Windows can delete it.
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_save_through_a_symlink_updates_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.ron");
+        let real_dir = dir.path().join("real");
+        let link = real_dir.join("link.ron");
+        let target = real_dir.join("settings.ron");
+        std::fs::create_dir(&real_dir).unwrap();
+        std::fs::write(&target, "previous").unwrap();
+        // A chain: an absolute link to a link that is relative to its own folder.
+        symlink("settings.ron", &link).unwrap();
+        symlink(&link, &path).unwrap();
+
+        let result = write_atomically(&path, |writer| {
+            let files = std::fs::read_dir(&real_dir)?.count();
+            assert_eq!(files, 3, "the temporary file is next to the target");
+            writer.write_all(b"new")
+        });
+
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(std::fs::read_link(&path).unwrap(), link);
+        assert_eq!(
+            std::fs::read_link(&link).unwrap(),
+            Path::new("settings.ron")
+        );
+        assert!(!std::fs::symlink_metadata(&target).unwrap().is_symlink());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+        assert_eq!(std::fs::read_dir(&real_dir).unwrap().count(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_save_through_a_symlink_keeps_the_link_and_its_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.ron");
+        let target = dir.path().join("settings.ron");
+        std::fs::write(&target, "previous").unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+
+        let result = write_atomically(&path, |writer| {
+            writer.write_all(b"half of the new")?;
+            writer.flush()?;
+            Err(std::io::Error::other("disk full"))
+        });
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read_link(&path).unwrap(), target);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "previous");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_save_through_a_dangling_symlink_creates_its_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.ron");
+        let target = dir.path().join("settings.ron");
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+
+        let result = write_atomically(&path, |writer| writer.write_all(b"new"));
+
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(std::fs::read_link(&path).unwrap(), target);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_save_writes_into_a_pipe_without_replacing_it() {
+        use std::os::unix::fs::FileTypeExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.ron");
+        let pipe = dir.path().join("pipe");
+        let made = std::process::Command::new("mkfifo").arg(&pipe).status();
+        assert!(made.unwrap().success());
+        std::os::unix::fs::symlink(&pipe, &path).unwrap();
+        let reader = std::thread::Builder::new().spawn({
+            let pipe = pipe.clone();
+            move || std::fs::read_to_string(pipe).unwrap()
+        });
+
+        let result = write_atomically(&path, |writer| writer.write_all(b"new"));
+
+        assert!(result.is_ok(), "{result:?}");
+        assert!(std::fs::metadata(&pipe).unwrap().file_type().is_fifo());
+        assert_eq!(reader.unwrap().join().unwrap(), "new");
     }
 
     #[cfg(unix)]
