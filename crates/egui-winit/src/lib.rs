@@ -101,6 +101,9 @@ pub struct State {
     modifiers: egui::Modifiers,
 
     pointer_pos_in_points: Option<egui::Pos2>,
+    /// Linux X11 pen tablet samples that winit drops (pressure/tilt/rotation).
+    #[cfg(target_os = "linux")]
+    tablet_rx: Option<std::sync::mpsc::Receiver<Option<rust_motion_tablet::Sample>>>,
     any_pointer_button_down: bool,
     current_cursor_icon: Option<egui::CursorIcon>,
 
@@ -172,6 +175,22 @@ impl State {
             clipboard::Clipboard::new(display_target.display_handle().ok().map(|h| h.as_raw()))
         };
 
+        // winit delivers the pointer but drops the XInput2 tablet fields on Linux;
+        // a second pure-Rust X connection recovers pressure/tilt/rotation.
+        #[cfg(target_os = "linux")]
+        let tablet_rx = {
+            let (tx, rx) = std::sync::mpsc::channel();
+            match rust_motion_tablet::x11::spawn(None, move |sample| {
+                let _ = tx.send(sample);
+            }) {
+                Ok(_) => Some(rx),
+                Err(err) => {
+                    log::info!("egui-winit: XInput2 tablet bridge unavailable: {err}");
+                    None
+                }
+            }
+        };
+
         let mut slf = Self {
             viewport_id,
             start_time: web_time::Instant::now()
@@ -181,6 +200,8 @@ impl State {
             egui_input,
             modifiers: egui::Modifiers::default(),
             pointer_pos_in_points: None,
+            #[cfg(target_os = "linux")]
+            tablet_rx,
             any_pointer_button_down: false,
             current_cursor_icon: None,
             current_custom_cursor: None,
@@ -342,7 +363,33 @@ impl State {
             .or_default()
             .native_pixels_per_point = Some(window.scale_factor() as f32);
 
-        self.egui_input.take()
+        let mut input = self.egui_input.take();
+
+        // Linux: feed the pen force that winit drops into the event the apps
+        // already read (`egui::Event::Touch { force }` -> pen_force/brush).
+        #[cfg(target_os = "linux")]
+        {
+            let mut latest: Option<Option<rust_motion_tablet::Sample>> = None;
+            if let Some(rx) = self.tablet_rx.as_ref() {
+                while let Ok(sample) = rx.try_recv() {
+                    latest = Some(sample);
+                }
+            }
+            if let Some(Some(sample)) = latest {
+                if let Some(pos) = self.pointer_pos_in_points {
+                    let sample = sample.sanitized();
+                    input.events.push(egui::Event::Touch {
+                        device_id: egui::TouchDeviceId(0x57544d),
+                        id: egui::TouchId(1),
+                        phase: egui::TouchPhase::Move,
+                        pos,
+                        force: Some(sample.pressure),
+                    });
+                }
+            }
+        }
+
+        input
     }
 
     /// Call this when there is a new event.

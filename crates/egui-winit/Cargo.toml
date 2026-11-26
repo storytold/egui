@@ -123,3 +123,7 @@ wayland-cursor = { workspace = true, optional = true }
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 arboard = { workspace = true, optional = true, features = ["image-data"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Pen pressure/tilt/rotation that winit drops on Linux X11.
+rust-motion-tablet = "1.1"
