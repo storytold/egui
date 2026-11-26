@@ -702,6 +702,9 @@ impl State {
             .or_default()
             .native_pixels_per_point = native_pixels_per_point;
         slf.egui_input.system_theme = theme.map(to_egui_theme);
+        if let Some(theme) = slf.egui_input.system_theme {
+            slf.egui_input.events.push(egui::Event::SystemTheme(theme));
+        }
 
         if let Some(max_texture_side) = max_texture_side {
             slf.set_max_texture_side(max_texture_side);
@@ -2095,6 +2098,8 @@ impl State {
             .or_default()
             .native_pixels_per_point = Some(window.scale_factor() as f32);
 
+        self.ime_reset.drain_retired(&mut self.egui_input.events);
+
         self.egui_input.take()
     }
 
@@ -2323,7 +2328,9 @@ impl State {
                 }
             }
             WindowEvent::ThemeChanged(winit_theme) => {
-                self.egui_input.system_theme = Some(to_egui_theme(*winit_theme));
+                let theme = to_egui_theme(*winit_theme);
+                self.egui_input.system_theme = Some(theme);
+                self.egui_input.events.push(egui::Event::SystemTheme(theme));
                 EventResponse {
                     repaint: true,
                     consumed: false,
@@ -3276,7 +3283,9 @@ impl State {
             accesskit_update,
             num_completed_passes: _,    // `egui::Context::run` handles this
             request_discard_reasons: _, // `egui::Context::run` handles this
+            retired_ime_resets,
         } = platform_output;
+        self.ime_reset.retire(retired_ime_resets);
 
         let selection = output_selector::select_clipboard_commands(&commands);
         let generation = self.clipboard_paste.generation();

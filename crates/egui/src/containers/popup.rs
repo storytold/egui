@@ -180,8 +180,10 @@ pub struct Popup<'a> {
     /// Default width passed to the Area
     width: Option<f32>,
     sizing_pass: bool,
+    max_height_from_constrain: bool,
     sense: Sense,
     interactable: bool,
+    swallow_outside_press: bool,
     layout: Layout,
     frame: Option<Frame>,
     style: StyleModifier,
@@ -212,8 +214,10 @@ impl<'a> Popup<'a> {
             gap: 0.0,
             width: None,
             sizing_pass: false,
+            max_height_from_constrain: false,
             sense: Sense::CLICK,
             interactable: true,
+            swallow_outside_press: false,
             layout: Layout::default(),
             frame: None,
             style: StyleModifier::default(),
@@ -415,6 +419,25 @@ impl<'a> Popup<'a> {
         self
     }
 
+    /// If `true`, a primary-button pointer press outside the popup reaches no widget while the popup
+    /// is open, and neither does the release that ends it, so a press that closes the popup does nothing else.
+    ///
+    /// Presses inside the popup, inside any other popup that sets this, and on the popup's anchor
+    /// widget (see [`Self::anchor_widget`]) are unaffected. Presses with other buttons are never
+    /// swallowed. Use [`crate::Memory::allow_presses_in`] to let presses through elsewhere.
+    /// The popup does not close by itself on the press: close it when you see the press
+    /// (see [`crate::PointerState::any_pressed`]) or on the click, as usual.
+    /// Takes effect in the pass after the popup is first shown.
+    ///
+    /// See [`crate::Memory::swallow_presses_outside`].
+    ///
+    /// Default: `false`.
+    #[inline]
+    pub fn swallow_outside_press(mut self, swallow: bool) -> Self {
+        self.swallow_outside_press = swallow;
+        self
+    }
+
     /// Set the sense of the popup.
     #[inline]
     pub fn sense(mut self, sense: Sense) -> Self {
@@ -446,6 +469,21 @@ impl<'a> Popup<'a> {
     #[inline]
     pub fn sizing_pass(mut self, sizing_pass: bool) -> Self {
         self.sizing_pass = sizing_pass;
+        self
+    }
+
+    /// Offer the contents the height the screen leaves on the popup's side on every pass, so
+    /// contents that shrank grow back while the popup stays open
+    /// (see [`Area::max_height_from_constrain`]).
+    ///
+    /// The popup then keeps the side it opened on while it stays open: the side where it fits,
+    /// else the one with more room. Otherwise a popup that shrinks and grows again would move
+    /// from one side of its anchor to the other.
+    ///
+    /// Default: `false`.
+    #[inline]
+    pub fn max_height_from_constrain(mut self, max_height_from_constrain: bool) -> Self {
+        self.max_height_from_constrain = max_height_from_constrain;
         self
     }
 
@@ -549,6 +587,32 @@ impl<'a> Popup<'a> {
         .unwrap_or_default()
     }
 
+    /// The side a [`Self::max_height_from_constrain`] popup keeps while it stays open, chosen on
+    /// the first pass after the popup was measured.
+    fn kept_align(&self, sizing_pass: bool) -> RectAlign {
+        let key = self.id.with("kept_align");
+        if sizing_pass {
+            self.ctx.data_mut(|d| d.remove::<RectAlign>(key));
+            return self.get_best_align();
+        }
+        if let Some(align) = self.ctx.data(|d| d.get_temp::<RectAlign>(key)) {
+            return align;
+        }
+        let mut align = self.get_best_align();
+        if let (Some(size), Some(anchor)) = (self.get_expected_size(), self.get_anchor_rect()) {
+            let screen = self.ctx.content_rect();
+            let shown = |align: RectAlign| {
+                let rect = align.align_rect(&anchor, size, self.gap);
+                rect.intersect(screen).height()
+            };
+            if shown(align.flipped_y()) > shown(align) {
+                align = align.flipped_y();
+            }
+        }
+        self.ctx.data_mut(|d| d.insert_temp(key, align));
+        align
+    }
+
     /// Show the popup.
     ///
     /// Returns `None` if the popup is not open or anchor is `PopupAnchor::Pointer` and there is
@@ -589,7 +653,11 @@ impl<'a> Popup<'a> {
             return None;
         }
 
-        let best_align = self.get_best_align();
+        let best_align = if self.max_height_from_constrain {
+            self.kept_align(self.sizing_pass || !was_open_last_frame)
+        } else {
+            self.get_best_align()
+        };
 
         let Popup {
             id,
@@ -605,8 +673,10 @@ impl<'a> Popup<'a> {
             gap,
             width,
             sizing_pass,
+            max_height_from_constrain,
             sense,
             interactable,
+            swallow_outside_press,
             layout,
             frame,
             style,
@@ -636,6 +706,7 @@ impl<'a> Popup<'a> {
             .interactable(interactable)
             .layout(layout)
             .sizing_pass(sizing_pass || !was_open_last_frame)
+            .max_height_from_constrain(max_height_from_constrain)
             .info(info.unwrap_or_else(|| {
                 UiStackInfo::new(kind.into()).with_tag_value(
                     MenuConfig::MENU_CONFIG_TAG,
@@ -655,6 +726,15 @@ impl<'a> Popup<'a> {
             area = area.accessible_name(label);
         }
 
+        // A popup stays directly above the layer it opened from, which may itself be stacked by
+        // the app (`Context::set_layer_order`): a menu in a dialog never falls under that dialog.
+        if kind != PopupKind::Tooltip
+            && layer_id.order == area.layer().order
+            && layer_id != area.layer()
+        {
+            ctx.set_sublayer(layer_id, area.layer());
+        }
+
         let mut response = area.show(&ctx, |ui| {
             style.apply(ui.style_mut());
             let frame = frame.unwrap_or_else(|| Frame::popup(ui.style()));
@@ -664,6 +744,15 @@ impl<'a> Popup<'a> {
             }
             inner
         });
+
+        if swallow_outside_press {
+            ctx.memory_mut(|mem| {
+                mem.swallow_presses_outside(response.response.layer_id);
+                if anchor_widget.is_some() {
+                    mem.allow_presses_in(anchor_rect);
+                }
+            });
+        }
 
         // Only a click whose press started while the popup was already open may close it.
         // Otherwise a popup opened on a pointer *press* (e.g. a right-press context menu)

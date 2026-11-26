@@ -48,6 +48,21 @@ struct ViewportGalleyCache {
     used_since_begin_pass: bool,
 }
 
+/// Identifies the font and layout state under which a galley was made.
+///
+/// Equal revisions permit reuse only when the other layout inputs, including pixels per point,
+/// also match. A retained revision keeps its identity distinct from later font systems.
+#[derive(Clone, Debug)]
+pub struct FontCacheRevision(Arc<()>);
+
+impl PartialEq for FontCacheRevision {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for FontCacheRevision {}
+
 // ----------------------------------------------------------------------------
 
 /// What to do with a character that nothing can draw: no installed font has it,
@@ -79,6 +94,7 @@ pub enum MissingGlyphPolicy {
 /// [`Self::font_image_delta`] once every frame.
 pub struct Fonts {
     fonts: FontsImpl,
+    cache_revision: FontCacheRevision,
     // `GalleyCache::flush_cache` assumes consecutive calls are consecutive passes
     // of the same UI. Viewports are independently scheduled, so sharing one cache
     // would advance its eviction generation once per *viewport* pass. Alternating
@@ -88,12 +104,18 @@ pub struct Fonts {
 }
 
 impl Fonts {
+    fn invalidate_galleys(&mut self) {
+        self.galley_caches.clear();
+        self.cache_revision = FontCacheRevision(Arc::new(()));
+    }
+
     /// Create a new [`Fonts`] for text layout.
     ///
     /// This call is expensive, so only create one [`Fonts`] and then reuse it.
     pub fn new(options: TextOptions, definitions: FontDefinitions) -> Self {
         Self {
             fonts: FontsImpl::new(options, definitions),
+            cache_revision: FontCacheRevision(Arc::new(())),
             galley_caches: Default::default(),
         }
     }
@@ -118,7 +140,7 @@ impl Fonts {
     pub fn add_glyph_rasterizer(&mut self, glyph_rasterizer: GlyphRasterizer) -> bool {
         let changed = self.fonts.add_glyph_rasterizer(glyph_rasterizer);
         if changed {
-            self.galley_caches.clear();
+            self.invalidate_galleys();
         }
         changed
     }
@@ -128,7 +150,7 @@ impl Fonts {
     /// Pass an empty list to only use the installed fonts.
     pub fn set_glyph_rasterizers(&mut self, glyph_rasterizers: Vec<GlyphRasterizer>) {
         self.fonts.set_glyph_rasterizers(glyph_rasterizers);
-        self.galley_caches.clear();
+        self.invalidate_galleys();
     }
 
     /// Ask these for fonts, after the [`FontDefinitions`].
@@ -137,6 +159,7 @@ impl Fonts {
     #[inline]
     pub fn with_font_providers(mut self, font_providers: Vec<Arc<dyn FontProvider>>) -> Self {
         self.fonts.set_font_providers(font_providers);
+        self.invalidate_galleys();
         self
     }
 
@@ -160,7 +183,7 @@ impl Fonts {
     pub fn set_line_breaker(&mut self, line_breaker: Arc<dyn LineBreaker>) {
         if !Arc::ptr_eq(&self.fonts.line_breaker, &line_breaker) {
             self.fonts.line_breaker = line_breaker;
-            self.galley_caches.clear();
+            self.invalidate_galleys();
         }
     }
 
@@ -181,7 +204,7 @@ impl Fonts {
     pub fn set_missing_glyph_policy(&mut self, policy: MissingGlyphPolicy) {
         if self.fonts.missing_glyph_policy != policy {
             self.fonts.missing_glyph_policy = policy;
-            self.galley_caches.clear(); // Cached galleys may contain tofu.
+            self.invalidate_galleys(); // Cached galleys may contain tofu.
         }
     }
 
@@ -200,11 +223,11 @@ impl Fonts {
     pub fn begin_pass(&mut self, options: TextOptions, viewport_key: ViewportKey) {
         if self.fonts.options() != &options {
             self.fonts.set_options(options);
-            self.galley_caches.clear(); // Galleys point into the old atlas.
+            self.invalidate_galleys(); // Galleys point into the old atlas.
         } else if 0.8 < self.fonts.glyphs.fill_ratio() {
             // The parsed faces are still fine; only the bitmaps need to go.
             self.fonts.glyphs.clear();
-            self.galley_caches.clear(); // Galleys point into the old atlas.
+            self.invalidate_galleys(); // Galleys point into the old atlas.
         }
 
         let viewport_cache = self.galley_caches.entry(viewport_key).or_default();
@@ -254,6 +277,13 @@ impl Fonts {
     /// Pass this to [`crate::Tessellator`].
     pub fn font_image_size(&self) -> [usize; 2] {
         self.fonts.glyphs.atlas().size()
+    }
+
+    /// Which font atlas the glyphs are in: a new value whenever the atlas is made, cleared (it got full) or rebuilt
+    /// (new [`TextOptions`]). A galley laid out under one generation draws the right glyphs only while it is unchanged,
+    /// so kept paint that holds text is valid only under the generation it was made in.
+    pub fn atlas_generation(&self) -> u64 {
+        self.fonts.glyphs.generation()
     }
 
     /// Do the installed fonts have this glyph?
@@ -332,6 +362,7 @@ impl Fonts {
         let viewport_cache = self.galley_caches.entry(viewport_key).or_default();
         FontsView {
             fonts: &mut self.fonts,
+            cache_revision: &self.cache_revision,
             galley_cache: &mut viewport_cache.cache,
             pixels_per_point,
             used_since_begin_pass: &mut viewport_cache.used_since_begin_pass,
@@ -344,12 +375,21 @@ impl Fonts {
 /// The context's collection of fonts, with this context's `pixels_per_point`. This is what you use to do text layout.
 pub struct FontsView<'a> {
     fonts: &'a mut FontsImpl,
+    cache_revision: &'a FontCacheRevision,
     galley_cache: &'a mut GalleyCache,
     pixels_per_point: f32,
     used_since_begin_pass: &'a mut bool,
 }
 
 impl FontsView<'_> {
+    /// Return the revision for an externally cached galley and record font use in this viewport.
+    ///
+    /// Like laying out text, this prevents a pending font change from being applied midway through
+    /// the current viewport pass. It does not perform a text layout.
+    pub fn cache_revision_and_mark_used(&mut self) -> FontCacheRevision {
+        *self.used_since_begin_pass = true;
+        self.cache_revision.clone()
+    }
     #[inline]
     pub fn options(&self) -> &TextOptions {
         self.fonts.options()
@@ -370,6 +410,13 @@ impl FontsView<'_> {
     /// Pass this to [`crate::Tessellator`].
     pub fn font_image_size(&self) -> [usize; 2] {
         self.fonts.glyphs.atlas().size()
+    }
+
+    /// Which font atlas the glyphs are in: a new value whenever the atlas is made, cleared (it got full) or rebuilt
+    /// (new [`TextOptions`]). A galley laid out under one generation draws the right glyphs only while it is unchanged,
+    /// so kept paint that holds text is valid only under the generation it was made in.
+    pub fn atlas_generation(&self) -> u64 {
+        self.fonts.glyphs.generation()
     }
 
     /// Width of this character in points.
@@ -932,6 +979,112 @@ fn synthetic_tofu(font_size_px: f32) -> RasterizedGlyph {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn external_galley_revision_marks_use_and_changes_when_layout_inputs_change() {
+        let options = TextOptions::default();
+        let viewport = ViewportKey::new(1);
+        let mut fonts = Fonts::new(options, FontDefinitions::default());
+        fonts.begin_pass(options, viewport);
+        let first = fonts
+            .with_pixels_per_point_for_viewport(1.0, viewport)
+            .cache_revision_and_mark_used();
+        assert!(fonts.used_since_begin_pass(viewport));
+        assert_eq!(
+            fonts.num_galleys_in_cache(),
+            0,
+            "marking a cached galley must not lay out text"
+        );
+        fonts.begin_pass(options, viewport);
+        let same = fonts
+            .with_pixels_per_point_for_viewport(1.0, viewport)
+            .cache_revision_and_mark_used();
+        assert_eq!(first, same);
+        fonts.set_missing_glyph_policy(MissingGlyphPolicy::Panic);
+        let changed = fonts
+            .with_pixels_per_point_for_viewport(1.0, viewport)
+            .cache_revision_and_mark_used();
+        assert_ne!(
+            first, changed,
+            "layout changes invalidate externally cached galleys"
+        );
+        let breaker: Arc<dyn LineBreaker> = Arc::new(SimpleLineBreaker);
+        fonts.set_line_breaker(Arc::clone(&breaker));
+        let breaker_revision = fonts
+            .with_pixels_per_point_for_viewport(1.0, viewport)
+            .cache_revision_and_mark_used();
+        assert_ne!(
+            changed, breaker_revision,
+            "a new line breaker changes layout"
+        );
+        fonts.set_line_breaker(breaker);
+        assert_eq!(
+            breaker_revision,
+            fonts
+                .with_pixels_per_point_for_viewport(1.0, viewport)
+                .cache_revision_and_mark_used()
+        );
+        fonts.set_glyph_rasterizers(Vec::new());
+        let raster_revision = fonts
+            .with_pixels_per_point_for_viewport(1.0, viewport)
+            .cache_revision_and_mark_used();
+        assert_ne!(
+            breaker_revision, raster_revision,
+            "replacing rasterizers changes layout"
+        );
+        fonts.begin_pass(
+            TextOptions {
+                font_hinting: !options.font_hinting,
+                ..options
+            },
+            viewport,
+        );
+        assert_ne!(
+            raster_revision,
+            fonts
+                .with_pixels_per_point_for_viewport(1.0, viewport)
+                .cache_revision_and_mark_used()
+        );
+        let mut replacement = Fonts::new(options, FontDefinitions::default());
+        let replacement_revision = replacement
+            .with_pixels_per_point_for_viewport(1.0, viewport)
+            .cache_revision_and_mark_used();
+        assert_ne!(
+            first, replacement_revision,
+            "replacement font systems have distinct identities"
+        );
+    }
+
+    #[test]
+    fn the_atlas_generation_moves_when_the_atlas_is_rebuilt_only() {
+        let options = TextOptions::default();
+        let mut fonts = Fonts::new(options, FontDefinitions::default());
+        let key = ViewportKey::new(1);
+        fonts.begin_pass(options, key);
+        let first = fonts.atlas_generation();
+        fonts.begin_pass(options, key);
+        assert_eq!(
+            fonts.atlas_generation(),
+            first,
+            "a pass with the same options keeps the atlas"
+        );
+        let other = TextOptions {
+            font_hinting: !options.font_hinting,
+            ..options
+        };
+        fonts.begin_pass(other, key);
+        assert_ne!(
+            fonts.atlas_generation(),
+            first,
+            "new options rebuild the atlas"
+        );
+        let other_fonts = Fonts::new(options, FontDefinitions::default());
+        assert_ne!(
+            other_fonts.atlas_generation(),
+            first,
+            "a new atlas has its own generation"
+        );
+    }
 
     #[test]
     fn viewport_passes_do_not_evict_each_others_galleys() {

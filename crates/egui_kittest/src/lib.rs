@@ -206,6 +206,7 @@ impl<'a, State> Harness<'a, State> {
             missing_glyph_policy,
             check_accessibility,
             context_setup,
+            context,
 
             #[cfg(any(feature = "wgpu", feature = "snapshot"))]
             render_every_step,
@@ -221,7 +222,7 @@ impl<'a, State> Harness<'a, State> {
             #[cfg(feature = "wgpu")]
                 render_options: _,
         } = builder;
-        let ctx = ctx.unwrap_or_default();
+        let ctx = ctx.or(context).unwrap_or_default();
         if let Some(setup) = context_setup {
             setup(&ctx);
         }
@@ -246,7 +247,11 @@ impl<'a, State> Harness<'a, State> {
 
         // We need to run egui for a single frame so that the AccessKit state can be initialized
         // and users can immediately start querying for widgets.
-        let mut output = ctx.run_ui(input.clone(), |ui| {
+        #[cfg_attr(not(feature = "eframe"), expect(unused_mut))]
+        let mut first = input.clone();
+        #[cfg(feature = "eframe")]
+        app.raw_input_hook(&ctx, &mut state, &mut first);
+        let mut output = ctx.run_ui(first, |ui| {
             ui_output = app.run(ui, &mut state, false);
         });
 
@@ -383,7 +388,12 @@ impl<'a, State> Harness<'a, State> {
     fn step_impl(&mut self, sizing_pass: bool) {
         self.input.predicted_dt = self.step_dt;
 
-        let mut output = self.ctx.run_ui(self.input.take(), |ui| {
+        #[cfg_attr(not(feature = "eframe"), expect(unused_mut))]
+        let mut input = self.input.take();
+        #[cfg(feature = "eframe")]
+        self.app
+            .raw_input_hook(&self.ctx, &mut self.state, &mut input);
+        let mut output = self.ctx.run_ui(input, |ui| {
             self.ui_output = self.app.run(ui, &mut self.state, sizing_pass);
         });
         self.kittest.update(

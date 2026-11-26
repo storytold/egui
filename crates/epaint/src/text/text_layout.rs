@@ -21,8 +21,8 @@ use crate::{
 use unicode_segmentation::UnicodeSegmentation as _;
 
 use super::{
-    ByteRangeExt as _, FallbackAlign, Galley, Glyph, LayoutJob, LayoutSection, LineBreakKind,
-    LineBreaker, PlacedRow, Row, RowVisuals, TextDirection, VariationCoords,
+    ByteRangeExt as _, FallbackAlign, FontFeatures, Galley, Glyph, LayoutJob, LayoutSection,
+    LineBreakKind, LineBreaker, PlacedRow, Row, RowVisuals, TextDirection, VariationCoords,
     family::FamilyKey,
     font_face::{ClusterGlyph, FontFace, GlyphInfo, ShapedCluster, ShapedGlyph},
     glyph_atlas::{GlyphAllocation, OutlineGlyph, RasterGlyphAllocation},
@@ -809,6 +809,7 @@ fn layout_section(
                 run_text,
                 run.bidi_level % 2 == 1,
                 &format.coords,
+                &format.font_features,
                 shape_buffer,
                 flags,
             );
@@ -2290,6 +2291,7 @@ fn shape_text(
     text: &str,
     rtl: bool,
     coords: &VariationCoords,
+    features: &FontFeatures,
     mut buffer: harfrust::UnicodeBuffer,
     flags: harfrust::BufferFlags,
 ) -> harfrust::GlyphBuffer {
@@ -2327,7 +2329,14 @@ fn shape_text(
     });
     buffer.guess_segment_properties();
 
-    shaper.shape(buffer, harfrust::ShapeOptions::new())
+    // Each run lies within one section, so its features apply to the whole buffer:
+    let features: SmallVec<[harfrust::Feature; 2]> = features
+        .as_ref()
+        .iter()
+        .map(|&(tag, value)| harfrust::Feature::new(tag, value, ..))
+        .collect();
+
+    shaper.shape(buffer, harfrust::ShapeOptions::new().features(&features))
 }
 
 // ----------------------------------------------------------------------------
@@ -4768,5 +4777,82 @@ mod tests {
             galley.rows[0].rect(),
             galley.rows[1].rect()
         );
+    }
+
+    /// Space Grotesk's default digits are proportional; `tnum` makes them tabular.
+    fn digits_fonts() -> Fonts {
+        let mut definitions = FontDefinitions::empty();
+        definitions.font_data.insert(
+            "SpaceGrotesk-Digits".to_owned(),
+            Arc::new(FontData::from_static(include_bytes!(
+                "../../tests/fonts/SpaceGrotesk-Digits.ttf"
+            ))),
+        );
+        definitions.families.insert(
+            FontFamily::Proportional,
+            vec!["SpaceGrotesk-Digits".to_owned()],
+        );
+        Fonts::new(TextOptions::default(), definitions)
+    }
+
+    fn digits_job(text: &str, font_features: FontFeatures) -> LayoutJob {
+        LayoutJob::single_section(
+            text.to_owned(),
+            TextFormat {
+                font_id: FontId::proportional(20.0),
+                font_features,
+                ..Default::default()
+            },
+        )
+    }
+
+    #[test]
+    fn tnum_makes_digits_equally_wide() {
+        let mut fonts = digits_fonts();
+        let mut fonts = fonts.with_pixels_per_point(1.0);
+        let mut width = |text: &str, features: &FontFeatures| {
+            fonts
+                .layout_job(digits_job(text, features.clone()))
+                .rect
+                .width()
+        };
+        let none = FontFeatures::default();
+        let tnum = FontFeatures::new([(b"tnum", 1)]);
+
+        assert_ne!(width("1111", &none), width("0000", &none));
+        assert_eq!(width("1111", &tnum), width("0000", &tnum));
+    }
+
+    /// Text without features shapes exactly as the plain layout path does,
+    /// and a feature the font lacks changes nothing.
+    #[test]
+    fn missing_font_feature_lays_out_like_no_features() {
+        let mut fonts = digits_fonts();
+        let mut fonts = fonts.with_pixels_per_point(1.5);
+        let text = "0123456789";
+        let plain =
+            fonts.layout_no_wrap(text.to_owned(), FontId::proportional(20.0), Color32::GRAY);
+        let none = fonts.layout_job(digits_job(text, FontFeatures::default()));
+        let missing = fonts.layout_job(digits_job(text, FontFeatures::new([(b"smcp", 1)])));
+
+        assert_eq!(plain.rows[0].row.glyphs, none.rows[0].row.glyphs);
+        assert_eq!(plain.rect, none.rect);
+        assert_eq!(none.rows[0].row.glyphs, missing.rows[0].row.glyphs);
+    }
+
+    #[test]
+    fn font_features_are_part_of_the_galley_cache_key() {
+        let mut fonts = digits_fonts();
+        let mut fonts = fonts.with_pixels_per_point(1.0);
+        let tnum = FontFeatures::new([(b"tnum", 1)]);
+        let plain = fonts.layout_job(digits_job("1111", FontFeatures::default()));
+        let tabular = fonts.layout_job(digits_job("1111", tnum.clone()));
+
+        assert!(!Arc::ptr_eq(&plain, &tabular));
+        assert_ne!(plain.rect.width(), tabular.rect.width());
+        assert!(Arc::ptr_eq(
+            &tabular,
+            &fonts.layout_job(digits_job("1111", tnum))
+        ));
     }
 }

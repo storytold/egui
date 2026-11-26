@@ -21,6 +21,7 @@ pub struct HarnessBuilder<State = ()> {
     pub(crate) missing_glyph_policy: egui::MissingGlyphPolicy,
     pub(crate) check_accessibility: bool,
     pub(crate) context_setup: Option<Box<dyn FnOnce(&egui::Context)>>,
+    pub(crate) context: Option<egui::Context>,
 
     #[cfg(any(feature = "wgpu", feature = "snapshot"))]
     pub(crate) render_every_step: bool,
@@ -50,6 +51,7 @@ impl<State> Default for HarnessBuilder<State> {
             missing_glyph_policy: egui::MissingGlyphPolicy::Panic,
             check_accessibility: true,
             context_setup: None,
+            context: None,
 
             #[cfg(any(feature = "wgpu", feature = "snapshot"))]
             render_every_step: false,
@@ -246,6 +248,18 @@ impl<State> HarnessBuilder<State> {
         self
     }
 
+    /// Run the harness on this context instead of a new one.
+    ///
+    /// Use it when the state under test already holds the context its passes run on (an app
+    /// built before the harness that reads its own context), so both see the same memory,
+    /// input and pass records. [`Self::with_context_setup`] and the harness's test settings
+    /// are applied to it as to a new context.
+    #[inline]
+    pub fn with_context(mut self, ctx: egui::Context) -> Self {
+        self.context = Some(ctx);
+        self
+    }
+
     /// Enable wgpu rendering with the given setup.
     #[cfg(feature = "wgpu")]
     pub fn wgpu_setup(self, setup: egui_wgpu::WgpuSetup) -> Self {
@@ -291,7 +305,7 @@ impl<State> HarnessBuilder<State> {
     where
         State: eframe::App + 'static,
     {
-        let ctx = egui::Context::default();
+        let ctx = self.context.take().unwrap_or_default();
         if let Some(setup) = self.context_setup.take() {
             setup(&ctx);
         }

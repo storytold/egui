@@ -59,6 +59,9 @@ pub enum UiKind {
 
     /// A collapsible container, e.g. a [`crate::CollapsingHeader`].
     Collapsible,
+
+    /// The `Ui` of a [`crate::Grid`]: it places each allocation in the grid's next cell.
+    Grid,
 }
 
 impl UiKind {
@@ -83,7 +86,8 @@ impl UiKind {
             | Self::Picker
             | Self::TableCell
             | Self::GenericArea
-            | Self::Collapsible => Role::GenericContainer,
+            | Self::Collapsible
+            | Self::Grid => Role::GenericContainer,
         }
     }
 
@@ -113,7 +117,8 @@ impl UiKind {
             | Self::ScrollArea
             | Self::Resize
             | Self::Collapsible
-            | Self::TableCell => false,
+            | Self::TableCell
+            | Self::Grid => false,
 
             Self::Window
             | Self::Menu

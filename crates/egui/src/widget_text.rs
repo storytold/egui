@@ -1,6 +1,6 @@
 use alloc::{borrow::Cow, sync::Arc};
 use core::fmt::Formatter;
-use epaint::text::{IntoTag, TextFormat, VariationCoords};
+use epaint::text::{FontFeatures, IntoTag, TextFormat, VariationCoords};
 
 use crate::{
     Align, Color32, FontFamily, FontSelection, Galley, Style, TextStyle, TextWrapMode, Ui, Visuals,
@@ -34,6 +34,7 @@ pub struct RichText {
     expand_bg: f32,
     text_color: Option<Color32>,
     coords: VariationCoords,
+    font_features: FontFeatures,
     code: bool,
     strong: bool,
     weak: bool,
@@ -56,6 +57,7 @@ impl Default for RichText {
             expand_bg: 1.0,
             text_color: Default::default(),
             coords: Default::default(),
+            font_features: Default::default(),
             code: Default::default(),
             strong: Default::default(),
             weak: Default::default(),
@@ -211,6 +213,25 @@ impl RichText {
         variations: impl IntoIterator<Item = (T, f32)>,
     ) -> Self {
         self.coords = VariationCoords::new(variations);
+        self
+    }
+
+    /// Add an OpenType feature, e.g. `.font_feature(b"tnum", 1)` for tabular figures.
+    ///
+    /// Fonts that lack the feature ignore it.
+    #[inline]
+    pub fn font_feature(mut self, tag: impl IntoTag, value: u32) -> Self {
+        self.font_features.push(tag, value);
+        self
+    }
+
+    /// Override the OpenType features completely.
+    #[inline]
+    pub fn font_features<T: IntoTag>(
+        mut self,
+        features: impl IntoIterator<Item = (T, u32)>,
+    ) -> Self {
+        self.font_features = FontFeatures::new(features);
         self
     }
 
@@ -430,6 +451,7 @@ impl RichText {
             expand_bg,
             text_color: _, // already used by `get_text_color`
             coords,
+            font_features,
             code,
             strong: _, // already used by `get_text_color`
             weak: _,   // already used by `get_text_color`
@@ -489,6 +511,7 @@ impl RichText {
                 color: text_color,
                 background: background_color,
                 coords,
+                font_features,
                 italics,
                 underline,
                 strikethrough,

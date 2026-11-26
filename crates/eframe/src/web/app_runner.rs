@@ -182,6 +182,9 @@ impl AppRunner {
             .or_default()
             .native_pixels_per_point = Some(super::native_pixels_per_point());
         runner.input.raw.system_theme = super::system_theme();
+        if let Some(theme) = runner.input.raw.system_theme {
+            runner.input.raw.events.push(egui::Event::SystemTheme(theme));
+        }
 
         Ok(runner)
     }
@@ -413,7 +416,16 @@ impl AppRunner {
             accesskit_update: _,        // not currently implemented
             num_completed_passes: _,    // handled by `Context::run`
             request_discard_reasons: _, // handled by `Context::run`
+            retired_ime_resets,
         } = platform_output;
+
+        for request in retired_ime_resets {
+            super::text_agent::retire_reset(
+                request,
+                &mut self.input.raw.events,
+                &self.needs_repaint,
+            );
+        }
 
         for command in commands {
             match command {
@@ -481,11 +493,19 @@ impl AppRunner {
                     self.text_agent.restore_pending_focus();
                 }
                 Ok(()) => {
-                    self.text_agent.fail_reset();
+                    self.text_agent.fail_reset(
+                        request_id,
+                        &mut self.input.raw.events,
+                        &self.needs_repaint,
+                    );
                     log::warn!("text-agent reset descriptor no longer matches its request");
                 }
                 Err(err) => {
-                    self.text_agent.fail_reset();
+                    self.text_agent.fail_reset(
+                        request_id,
+                        &mut self.input.raw.events,
+                        &self.needs_repaint,
+                    );
                     log::error!(
                         "text-agent local reset failed; no completion: {}",
                         super::string_from_js_value(&err)

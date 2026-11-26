@@ -139,8 +139,14 @@ impl Element {
     /// Create a value that won't be persisted.
     #[inline]
     pub(crate) fn new_temp<T: 'static + Any + Clone + Send + Sync>(t: T) -> Self {
+        Self::new_temp_boxed(Box::new(t))
+    }
+
+    /// Create a value that won't be persisted, keeping the allocation of `value`.
+    #[inline]
+    pub(crate) fn new_temp_boxed<T: 'static + Any + Clone + Send + Sync>(value: Box<T>) -> Self {
         Self::Value {
-            value: Box::new(t),
+            value,
             clone_fn: |x| {
                 // This unwrap will never panic, because we always construct this type using this `new` function and because we return &mut reference only with this type `T`, so type cannot change.
                 #[expect(clippy::unwrap_used)]
@@ -430,6 +436,23 @@ impl IdTypeMap {
         let key = RawKey::new::<T>(id);
         self.map.insert(key, Element::new_temp(value));
         key
+    }
+
+    /// Insert a value that will not be persisted, keeping the allocation of `value`.
+    ///
+    /// With [`Self::remove_temp_raw`] a value leaves the map and returns in the same box.
+    /// Returns the value this replaced, so the caller can drop it outside any lock.
+    #[inline]
+    pub fn insert_temp_boxed<T: 'static + Any + Clone + Send + Sync>(
+        &mut self,
+        id: Id,
+        value: Box<T>,
+    ) -> Option<Box<dyn Any + Send + Sync>> {
+        let key = RawKey::new::<T>(id);
+        match self.map.insert(key, Element::new_temp_boxed(value))? {
+            Element::Value { value, .. } => Some(value),
+            Element::Serialized(_) => None,
+        }
     }
 
     /// Insert a value that will be persisted next time you start the app.

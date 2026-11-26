@@ -415,6 +415,7 @@ pub mod load;
 mod memory;
 pub mod os;
 mod painter;
+mod pass_records;
 mod pass_state;
 pub(crate) mod placer;
 pub mod plugin;
@@ -520,8 +521,9 @@ pub use self::{
     layers::{LayerId, Order},
     layout::Layout,
     load::SizeHint,
-    memory::{FocusDirection, Memory, Options, Theme, ThemePreference},
+    memory::{FocusCandidate, FocusDirection, Memory, Options, Theme, ThemePreference},
     painter::Painter,
+    pass_records::{PassMark, PassRecords, PassRecordsDiff, RecordShift},
     plugin::Plugin,
     response::{InnerResponse, Response},
     sense::Sense,

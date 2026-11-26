@@ -36,7 +36,9 @@ use log::warn;
 
 use super::{
     epi_integration, event_loop_context,
-    winit_integration::{EventResult, PassMode, UserEvent, WinitApp, create_egui_context},
+    winit_integration::{
+        AccessKitActivation, EventResult, PassMode, UserEvent, WinitApp, create_egui_context,
+    },
 };
 use crate::epaint::textures::TexturesDelta;
 use crate::{
@@ -75,16 +77,6 @@ struct GlowWinitRunning<'app> {
 
     // NOTE: one painter shared by all viewports.
     painter: Rc<RefCell<egui_glow::Painter>>,
-
-    /// Any not yet applied deltas for this app.
-    pending_deltas: TexturesDelta,
-}
-
-impl Drop for GlowWinitRunning<'_> {
-    fn drop(&mut self) {
-        // Avoid debug panic when dropping unapplied deltas on teardown
-        self.pending_deltas.clear();
-    }
 }
 
 /// This struct will contain both persistent and temporary glutin state.
@@ -129,6 +121,23 @@ struct GlutinWindowContext {
     window_from_viewport: OrderedViewportIdMap<WindowId>,
 
     focused_viewport: Option<ViewportId>,
+
+    /// Each window's AccessKit adapter sends its events through this.
+    event_loop_proxy: EventLoopProxy<UserEvent>,
+
+    accesskit_activation: AccessKitActivation,
+
+    /// Texture changes not yet applied. Every viewport paints with the one painter, so they wait here, in the order
+    /// egui made them, for whichever viewport paints next: a viewport that is not painted (a minimized root, a window
+    /// that closes) holds back no allocation another viewport's later updates need.
+    pending_delta: TexturesDelta,
+}
+
+impl Drop for GlutinWindowContext {
+    fn drop(&mut self) {
+        // Avoid debug panic when dropping unapplied deltas on teardown
+        self.pending_delta.clear();
+    }
 }
 
 struct Viewport {
@@ -139,9 +148,6 @@ struct Viewport {
     info: ViewportInfo,
     actions_requested: Vec<egui_winit::ActionRequested>,
 
-    /// Any not yet applied deltas for this viewport.
-    pending_delta: TexturesDelta,
-
     /// The user-callback that shows the ui.
     /// None for immediate viewports.
     viewport_ui_cb: Option<Arc<DeferredViewportUiCallback>>,
@@ -151,6 +157,9 @@ struct Viewport {
     gl_surface: Option<glutin::surface::Surface<glutin::surface::WindowSurface>>,
     window: Option<Arc<Window>>,
     egui_winit: Option<egui_winit::State>,
+
+    /// The window was created hidden and is shown once the viewport has painted.
+    show_after_first_paint: bool,
 }
 
 impl Viewport {
@@ -185,13 +194,6 @@ impl Viewport {
             state,
             &mut self.actions_requested,
         );
-    }
-}
-
-impl Drop for Viewport {
-    fn drop(&mut self) {
-        // Avoid debug panic when dropping unapplied deltas on teardown
-        self.pending_delta.clear();
     }
 }
 
@@ -264,6 +266,7 @@ impl<'app> GlowWinitApp<'app> {
         event_loop: &ActiveEventLoop,
         storage: Option<&dyn Storage>,
         native_options: &mut NativeOptions,
+        event_loop_proxy: EventLoopProxy<UserEvent>,
     ) -> Result<(GlutinWindowContext, egui_glow::Painter)> {
         profiling::function_scope!();
         let mut window_settings = epi_integration::load_window_settings(storage);
@@ -277,7 +280,13 @@ impl<'app> GlowWinitApp<'app> {
         .with_visible(false); // Start hidden until we render the first frame to fix white flash on startup (https://github.com/emilk/egui/pull/3631)
 
         let mut glutin_window_context = unsafe {
-            GlutinWindowContext::new(egui_ctx, winit_window_builder, native_options, event_loop)?
+            GlutinWindowContext::new(
+                egui_ctx,
+                winit_window_builder,
+                native_options,
+                event_loop,
+                event_loop_proxy,
+            )?
         };
 
         // Creates the window - must come before we create our glow context
@@ -337,6 +346,7 @@ impl<'app> GlowWinitApp<'app> {
             event_loop,
             storage.as_deref(),
             &mut self.native_options,
+            self.repaint_proxy.lock().clone(),
         )?;
         let gl = Arc::clone(painter.gl());
 
@@ -382,20 +392,6 @@ impl<'app> GlowWinitApp<'app> {
                         })
                         .ok();
                 });
-        }
-
-        #[cfg(feature = "accesskit")]
-        {
-            let event_loop_proxy = self.repaint_proxy.lock().clone();
-            let viewport = glutin.viewports.get_mut(&ViewportId::ROOT).unwrap(); // we always have a root
-            if let Viewport {
-                window: Some(window),
-                egui_winit: Some(egui_winit),
-                ..
-            } = viewport
-            {
-                egui_winit.init_accesskit(event_loop, window, event_loop_proxy);
-            }
         }
 
         if self
@@ -465,7 +461,6 @@ impl<'app> GlowWinitApp<'app> {
             app,
             glutin,
             painter,
-            pending_deltas: Default::default(),
         }))
     }
 }
@@ -612,13 +607,15 @@ impl WinitApp for GlowWinitApp<'_> {
         use super::winit_integration;
 
         if let Some(running) = &self.running {
-            let mut glutin = running.glutin.borrow_mut();
+            let glutin = &mut *running.glutin.borrow_mut();
             if let Some(viewport_id) = glutin.viewport_from_window.get(&event.window_id).copied()
                 && let Some(viewport) = glutin.viewports.get_mut(&viewport_id)
                 && let Some(egui_winit) = &mut viewport.egui_winit
             {
                 return Ok(winit_integration::on_accesskit_window_event(
                     egui_winit,
+                    &mut glutin.accesskit_activation,
+                    viewport_id,
                     event.window_id,
                     &event.window_event,
                 ));
@@ -825,7 +822,6 @@ impl GlowWinitRunning<'_> {
             app,
             glutin,
             painter,
-            pending_deltas,
             ..
         } = self;
 
@@ -839,7 +835,7 @@ impl GlowWinitRunning<'_> {
             pixels_per_point,
             mut viewport_output,
         } = full_output;
-        pending_deltas.append(textures_delta);
+        glutin.pending_delta.append(textures_delta);
 
         glutin.remove_viewports_not_in(&viewport_output);
 
@@ -848,6 +844,7 @@ impl GlowWinitRunning<'_> {
             current_gl_context,
             not_current_gl_context,
             current_viewport,
+            pending_delta,
             ..
         } = &mut *glutin;
 
@@ -905,7 +902,7 @@ impl GlowWinitRunning<'_> {
                 screen_size_in_pixels,
                 pixels_per_point,
                 &clipped_primitives,
-                pending_deltas,
+                pending_delta,
             );
 
             {
@@ -940,6 +937,9 @@ impl GlowWinitRunning<'_> {
                 }
 
                 integration.post_rendering(&window);
+                if core::mem::take(&mut viewport.show_after_first_paint) {
+                    window.set_visible(true);
+                }
             }
 
             {
@@ -1181,6 +1181,7 @@ impl GlutinWindowContext {
         viewport_builder: ViewportBuilder,
         native_options: &NativeOptions,
         event_loop: &ActiveEventLoop,
+        event_loop_proxy: EventLoopProxy<UserEvent>,
     ) -> Result<Self> {
         profiling::function_scope!();
 
@@ -1329,11 +1330,11 @@ impl GlutinWindowContext {
                 deferred_commands: vec![],
                 info: viewport_info,
                 actions_requested: Default::default(),
-                pending_delta: Default::default(),
                 viewport_ui_cb: None,
                 gl_surface: None,
                 window: window.map(Arc::new),
                 egui_winit: None,
+                show_after_first_paint: false,
             },
         );
 
@@ -1355,6 +1356,9 @@ impl GlutinWindowContext {
             clipboard_shortcuts: native_options.clipboard_shortcuts,
             window_from_viewport,
             focused_viewport: Some(ViewportId::ROOT),
+            event_loop_proxy,
+            accesskit_activation: AccessKitActivation::default(),
+            pending_delta: Default::default(),
         };
 
         slf.initialize_window(ViewportId::ROOT, event_loop)?;
@@ -1391,21 +1395,27 @@ impl GlutinWindowContext {
             .get_mut(&viewport_id)
             .expect("viewport doesn't exist");
 
+        let creates_window = viewport.window.is_none();
+        let creates_state = viewport.egui_winit.is_none();
+
         let window = if let Some(window) = &mut viewport.window {
             window
         } else {
             log::debug!("Creating a window for viewport {viewport_id:?}");
+            // Hidden until the first paint, so no unpainted window shows; an AccessKit adapter
+            // must also be attached before the window is first shown.
             let (window, viewport_info) = create_window_for_viewport(
                 &self.egui_ctx,
                 &self.gl_config,
-                &viewport.builder,
+                &viewport.builder.clone().with_visible(false),
                 event_loop,
             )?;
             viewport.info = viewport_info;
+            viewport.show_after_first_paint = viewport.builder.visible != Some(false);
             viewport.window.insert(window)
         };
 
-        viewport.egui_winit.get_or_insert_with(|| {
+        let egui_winit = viewport.egui_winit.get_or_insert_with(|| {
             log::debug!("Initializing egui_winit for viewport {viewport_id:?}");
             let mut egui_winit = egui_winit::State::new(
                 self.egui_ctx.clone(),
@@ -1418,6 +1428,20 @@ impl GlutinWindowContext {
             egui_winit.set_clipboard_shortcuts(self.clipboard_shortcuts);
             egui_winit
         });
+
+        // A new window needs its own adapter, also when its `State` outlived the old window
+        // (Android suspend drops only the window).
+        #[cfg(feature = "accesskit")]
+        if creates_window || creates_state {
+            egui_winit.init_accesskit(event_loop, window, self.event_loop_proxy.clone());
+        }
+        #[cfg(not(feature = "accesskit"))]
+        let _ = (
+            creates_window,
+            creates_state,
+            egui_winit,
+            &self.event_loop_proxy,
+        );
 
         if viewport.gl_surface.is_none() {
             log::debug!("Creating a gl_surface for viewport {viewport_id:?}");
@@ -1568,6 +1592,8 @@ impl GlutinWindowContext {
             .retain(|_, id| viewport_output.contains_key(id));
         self.window_from_viewport
             .retain(|id, _| viewport_output.contains_key(id));
+        self.accesskit_activation
+            .retain(&self.egui_ctx, &viewport_output.keys().copied().collect());
     }
 
     fn handle_viewport_output(
@@ -1683,11 +1709,11 @@ fn initialize_or_update_viewport<'a>(
                 deferred_commands: vec![],
                 info: Default::default(),
                 actions_requested: Default::default(),
-                pending_delta: Default::default(),
                 viewport_ui_cb,
                 window: None,
                 egui_winit: None,
                 gl_surface: None,
+                show_after_first_paint: false,
             })
         }
 
@@ -1835,14 +1861,17 @@ fn render_immediate_viewport(
         not_current_gl_context,
         current_viewport,
         viewports,
+        pending_delta,
         ..
     } = &mut *glutin;
 
+    // The delta belongs to the textures all viewports share: it waits for the next paint,
+    // even when this viewport is gone.
+    pending_delta.append(textures_delta);
     let Some(viewport) = viewports.get_mut(&viewport_id) else {
         warn!("Viewport disappeared unexpectedly!");
         return;
     };
-    viewport.pending_delta.append(textures_delta);
 
     viewport.info.events.clear(); // they should have been processed
 
@@ -1884,7 +1913,7 @@ fn render_immediate_viewport(
         screen_size_in_pixels,
         pixels_per_point,
         &clipped_primitives,
-        &mut viewport.pending_delta,
+        pending_delta,
     );
 
     {
@@ -1892,6 +1921,9 @@ fn render_immediate_viewport(
         if let Err(err) = gl_surface.swap_buffers(current_gl_context) {
             log::error!("swap_buffers failed: {err}");
         }
+    }
+    if core::mem::take(&mut viewport.show_after_first_paint) {
+        window.set_visible(true);
     }
 
     // As in the regular frame path, an `IMEAllowed` command must take effect before this
