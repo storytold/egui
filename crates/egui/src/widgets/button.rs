@@ -388,18 +388,23 @@ impl<'a> Button<'a> {
             ui.ctx().set_cursor_icon(cursor);
         }
 
+        // In a menu, a button is a menu item, and a selectable one a checkable menu item.
+        let role = match crate::containers::menu::menu_item_role(ui, Role::Button) {
+            Role::MenuItem if selected.is_some() => Role::MenuItemCheckBox,
+            role => role,
+        };
         response.response.widget_info(|| match (selected, &text) {
             (Some(selected), Some(text)) => {
-                WidgetInfo::selected(Role::Button, ui.is_enabled(), selected, text)
+                WidgetInfo::selected(role, ui.is_enabled(), selected, text)
             }
             (Some(selected), None) => {
-                let mut info = WidgetInfo::new(Role::Button);
+                let mut info = WidgetInfo::new(role);
                 info.enabled = ui.is_enabled();
                 info.selected = Some(selected);
                 info
             }
-            (None, Some(text)) => WidgetInfo::labeled(Role::Button, ui.is_enabled(), text),
-            (None, None) => WidgetInfo::new(Role::Button),
+            (None, Some(text)) => WidgetInfo::labeled(role, ui.is_enabled(), text),
+            (None, None) => WidgetInfo::new(role),
         });
 
         response

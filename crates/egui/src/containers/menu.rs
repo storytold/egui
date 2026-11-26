@@ -75,6 +75,48 @@ pub fn is_in_menu(ui: &Ui) -> bool {
     false
 }
 
+/// Tags the [`UiStackInfo`] of a popup whose entries are a list's options rather than menu items,
+/// such as a [`crate::ComboBox`]'s list, so they keep their own roles.
+pub(crate) const LIST_BOX_TAG: &str = "egui_list_box";
+
+/// The AccessKit role a button, checkbox or radio button whose role is `plain` takes in this
+/// [`Ui`]: its menu-item form inside a menu or a [`MenuBar`], `plain` elsewhere, including in a
+/// combo box's list and in popups that are not menus.
+///
+/// Screen readers present a menu bar, its menus and their items natively (and braille displays
+/// show a menu bar's titles in a row) only when the nodes have these roles.
+pub(crate) fn menu_item_role(ui: &Ui, plain: accesskit::Role) -> accesskit::Role {
+    use accesskit::Role;
+    let in_menu = ui
+        .stack()
+        .iter()
+        .find(|stack| {
+            stack.info.tags.contains(LIST_BOX_TAG)
+                || stack.info.tags.contains(MenuConfig::MENU_CONFIG_TAG)
+                || [Some(UiKind::Popup), Some(UiKind::Menu)].contains(&stack.kind())
+        })
+        .is_some_and(|stack| {
+            !stack.info.tags.contains(LIST_BOX_TAG) && stack.kind() == Some(UiKind::Menu)
+        });
+    if !in_menu {
+        return plain;
+    }
+    match plain {
+        Role::Button => Role::MenuItem,
+        Role::CheckBox => Role::MenuItemCheckBox,
+        Role::RadioButton => Role::MenuItemRadio,
+        other => other,
+    }
+}
+
+/// Reports a button that opens a menu: a menu popup, and whether it is open.
+fn expose_menu_opener(response: &Response, open: bool) {
+    response.ctx.accesskit_node_builder(response.id, |node| {
+        node.set_has_popup(accesskit::HasPopup::Menu);
+        node.set_expanded(open);
+    });
+}
+
 /// Configuration and style for menus.
 #[derive(Clone, Debug)]
 pub struct MenuConfig {
@@ -367,6 +409,7 @@ impl MenuBar {
             ui.scope_builder(
                 UiBuilder::new()
                     .layout(Layout::left_to_right(Align::Center))
+                    .accessibility_role(accesskit::Role::MenuBar)
                     .ui_stack_info(
                         UiStackInfo::new(UiKind::Menu)
                             .with_tag_value(MenuConfig::MENU_CONFIG_TAG, config),
@@ -465,6 +508,7 @@ impl<'a> MenuButton<'a> {
         {
             ui.data_mut(|d| d.insert_temp(bar_open_menu_id, popup_id));
         }
+        expose_menu_opener(&response, inner.is_some());
 
         (response, inner)
     }
@@ -569,6 +613,7 @@ impl<'a> SubMenuButton<'a> {
         ui.style_mut().visuals.widgets.inactive = inactive;
 
         let popup_response = self.sub_menu.show(ui, &response, content);
+        expose_menu_opener(&response, popup_response.is_some());
 
         (response, popup_response)
     }

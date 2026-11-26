@@ -68,9 +68,10 @@ impl Widget for RadioButton<'_> {
             .min_size(min_size)
             .allocate(ui);
 
+        let role = crate::containers::menu::menu_item_role(ui, Role::RadioButton);
         prepared.response.widget_info(|| {
             WidgetInfo::selected(
-                Role::RadioButton,
+                role,
                 ui.is_enabled(),
                 checked,
                 text.as_deref().unwrap_or(""),

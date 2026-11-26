@@ -295,6 +295,90 @@ fn tooltip_text_names_an_unnamed_widget() {
     harness.get_by_role_and_label(Role::Button, "Play");
 }
 
+/// A menu bar, its titles and the entries of its menus have the roles screen readers present as a
+/// native menu bar: the bar, menu items that open a menu and say whether it is open, and entries
+/// that are menu items, check items and radio items.
+#[test]
+fn menu_bar_titles_and_entries_are_menu_items() {
+    let mut harness = Harness::new_ui(|ui| {
+        egui::MenuBar::new().ui(ui, |ui| {
+            ui.menu_button("File", |ui| {
+                let _ = ui.button("Open");
+                let mut on = true;
+                ui.checkbox(&mut on, "Autosave");
+                let mut pick = 1;
+                ui.radio_value(&mut pick, 1, "Small");
+                let _ = ui.selectable_label(true, "Grid");
+                ui.menu_button("Recent", |ui| {
+                    let _ = ui.button("Song");
+                });
+            });
+        });
+    });
+    harness.run();
+
+    harness.get_by_role(Role::MenuBar);
+    let file = harness.get_by_role_and_label(Role::MenuItem, "File");
+    assert_eq!(
+        file.accesskit_node().has_popup(),
+        Some(egui::accesskit::HasPopup::Menu)
+    );
+    assert_eq!(file.accesskit_node().data().is_expanded(), Some(false));
+
+    file.click();
+    harness.run();
+
+    let file = harness.get_by_role_and_label(Role::MenuItem, "File");
+    assert_eq!(
+        file.accesskit_node().data().is_expanded(),
+        Some(true),
+        "an open menu's title says so"
+    );
+    let menu = file.get_by_role(Role::Menu);
+    menu.get_by_role_and_label(Role::MenuItem, "Open");
+    menu.get_by_role_and_label(Role::MenuItemCheckBox, "Autosave");
+    menu.get_by_role_and_label(Role::MenuItemRadio, "Small");
+    menu.get_by_role_and_label(Role::MenuItemCheckBox, "Grid");
+    let recent = menu.get_by_role_and_label(Role::MenuItem, "Recent");
+    assert_eq!(
+        recent.accesskit_node().has_popup(),
+        Some(egui::accesskit::HasPopup::Menu)
+    );
+}
+
+/// A context menu's entries are menu items too.
+#[test]
+fn context_menu_entries_are_menu_items() {
+    let mut harness = Harness::new_ui(|ui| {
+        ui.button("Track").context_menu(|ui| {
+            let _ = ui.button("Rename");
+        });
+    });
+    harness.get_by_label("Track").click_secondary();
+    harness.run();
+
+    harness.get_by_role_and_label(Role::MenuItem, "Rename");
+}
+
+/// A combo box's options are a list's, not a menu's, and buttons outside menus stay buttons.
+#[test]
+fn combo_box_options_and_plain_buttons_are_not_menu_items() {
+    let mut harness = Harness::new_ui(|ui| {
+        let _ = ui.button("Play");
+        egui::ComboBox::from_label("Fruit")
+            .selected_text("Apple")
+            .show_ui(ui, |ui| {
+                let _ = ui.selectable_label(false, "Apple");
+            });
+    });
+    harness.get_by_role(Role::ComboBox).click();
+    harness.run();
+
+    harness.get_by_role_and_label(Role::Button, "Play");
+    let apple = harness.get_by_role(Role::ListBox).get_by_label("Apple");
+    assert_eq!(apple.accesskit_node().role(), Role::Button);
+}
+
 fn accesskit_output_single_egui_frame(run_ui: impl FnMut(&mut Ui)) -> TreeUpdate {
     let ctx = Context::default();
     // Disable animations, so we do not need to wait for animations to end to see the result.
