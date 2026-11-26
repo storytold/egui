@@ -450,6 +450,10 @@ struct ContextImpl {
 
     /// Asked by an integration whether a pointer move needs a pass ([`Context::set_pointer_move_gate`]).
     pointer_move_gate: Option<PointerMoveGate>,
+
+    /// A pass whose only input was pointer moves leaves its follow-up repaint to the gate: the viewport and the
+    /// pointer's place before and after the moves. [`Context::begin_pass`] asks the gate once the context is unlocked.
+    pending_move_check: Option<(ViewportId, Option<Pos2>, Pos2)>,
     repaint_observer: Option<Box<dyn Fn(RequestRepaintInfo) + Send + Sync>>,
 
     viewport_parents: ViewportIdMap<ViewportId>,
@@ -510,6 +514,7 @@ impl ContextImpl {
 
         self.memory.begin_pass(&new_raw_input, &all_viewport_ids);
 
+        let pointer_before = viewport.input.pointer.latest_pos();
         viewport.input = core::mem::take(&mut viewport.input).begin_pass(
             new_raw_input,
             viewport.repaint.requested_immediate_repaint_prev_pass(),
@@ -609,7 +614,29 @@ impl ContextImpl {
         self.update_fonts_mut();
 
         if let Some(delay) = repaint_after {
-            self.request_repaint_after(delay, viewport_id, RepaintCause::new());
+            // With a pointer-move gate, a pass whose only input was pointer moves with no button held asks the gate
+            // whether the moves change anything before it asks for a follow-up pass.
+            let moved_to = self.pointer_move_gate.as_ref().and_then(|_| {
+                let viewport = self.viewports.get(&viewport_id)?;
+                let input = &viewport.input;
+                let only_moves = delay.is_zero()
+                    && !input.events.is_empty()
+                    && input.events.iter().all(|event| {
+                        matches!(
+                            event,
+                            crate::Event::PointerMoved(_) | crate::Event::MouseMoved(_)
+                        )
+                    })
+                    && !input.pointer.any_down()
+                    && input.raw.hovered_files.is_empty()
+                    && input.raw.dropped_files.is_empty()
+                    && input.smooth_scroll_delta() == Vec2::ZERO;
+                only_moves.then(|| input.pointer.latest_pos()).flatten()
+            });
+            match moved_to {
+                Some(to) => self.pending_move_check = Some((viewport_id, pointer_before, to)),
+                None => self.request_repaint_after(delay, viewport_id, RepaintCause::new()),
+            }
         }
     }
 
@@ -1310,6 +1337,12 @@ impl Context {
         plugins.on_input(self, &mut new_input);
 
         self.write(|ctx| ctx.begin_pass(new_input));
+        // Outside the lock: the gate reads the context.
+        if let Some((viewport, from, to)) = self.write(|ctx| ctx.pending_move_check.take())
+            && self.pointer_move_needs_pass(viewport, from, to)
+        {
+            self.request_repaint_of(viewport);
+        }
     }
 }
 
@@ -6221,5 +6254,37 @@ mod pointer_move_gate_tests {
             )
             .expect("the pass ran");
         assert_ne!(on, off, "a point off the button has other widgets under it");
+    }
+
+    #[test]
+    fn a_pass_of_pointer_moves_asks_the_gate_for_its_follow_up() {
+        let follow_up = |gate_says: bool| {
+            let ctx = Context::default();
+            ctx.set_pointer_move_gate(Some(Arc::new(
+                move |_: &Context, _: ViewportId, _: Option<Pos2>, _: Pos2| gate_says,
+            )));
+            let pass = |at: Pos2| {
+                let input = crate::RawInput {
+                    events: vec![crate::Event::PointerMoved(at)],
+                    ..Default::default()
+                };
+                let mut output = ctx.run_ui(input, |_| {});
+                output.textures_delta.clear();
+            };
+            for _ in 0..4 {
+                let mut output = ctx.run_ui(crate::RawInput::default(), |_| {});
+                output.textures_delta.clear();
+            }
+            pass(pos2(10.0, 10.0));
+            pass(pos2(20.0, 10.0));
+            let causes = ctx.repaint_causes();
+            (ctx.has_requested_repaint(), causes)
+        };
+        let (held, causes) = follow_up(false);
+        assert!(
+            !held,
+            "moves the gate holds back ask for no follow-up pass: {causes:?}"
+        );
+        assert!(follow_up(true).0, "moves the gate lets through ask for one");
     }
 }
