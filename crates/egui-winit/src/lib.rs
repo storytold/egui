@@ -2186,9 +2186,17 @@ impl State {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
+                let from = self.pointer_pos_in_points;
                 self.on_cursor_moved(window, *position);
+                // A move with no button held asks the app's gate, if it set one, whether anything it shows changes.
+                let repaint = self.any_pointer_button_down
+                    || self.simulate_touch_screen
+                    || self.pointer_pos_in_points.is_none_or(|to| {
+                        self.egui_ctx
+                            .pointer_move_needs_pass(self.viewport_id, from, to)
+                    });
                 EventResponse {
-                    repaint: true,
+                    repaint,
                     consumed: self.egui_ctx.egui_is_using_pointer(),
                 }
             }

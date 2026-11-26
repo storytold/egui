@@ -396,6 +396,11 @@ impl ViewportRepaintInfo {
     }
 }
 
+/// Decides whether a pointer move needs a pass: called with the context, the viewport, the last pointer position (if
+/// any) and the new one, in points. See [`Context::set_pointer_move_gate`].
+pub type PointerMoveGate =
+    Arc<dyn Fn(&Context, ViewportId, Option<Pos2>, Pos2) -> bool + Send + Sync>;
+
 // ----------------------------------------------------------------------------
 
 #[derive(Default)]
@@ -442,6 +447,9 @@ struct ContextImpl {
     paint_stats: PaintStats,
 
     request_repaint_callback: Option<Box<dyn Fn(RequestRepaintInfo) + Send + Sync>>,
+
+    /// Asked by an integration whether a pointer move needs a pass ([`Context::set_pointer_move_gate`]).
+    pointer_move_gate: Option<PointerMoveGate>,
     repaint_observer: Option<Box<dyn Fn(RequestRepaintInfo) + Send + Sync>>,
 
     viewport_parents: ViewportIdMap<ViewportId>,
@@ -2371,6 +2379,30 @@ impl Context {
     ) {
         let callback = Box::new(callback);
         self.write(|ctx| ctx.request_repaint_callback = Some(callback));
+    }
+
+    /// For integrations and apps: decides whether a pointer move with no button held needs a pass.
+    ///
+    /// An integration that supports it (egui-winit) asks [`Self::pointer_move_needs_pass`] for every such move and
+    /// requests no repaint when the gate answers `false`. The move is still part of the input, so the next pass sees
+    /// the latest position. The gate is called outside any lock of the context, with the viewport, the last position
+    /// and the new one in points.
+    ///
+    /// With no gate (the default) every move needs a pass, as before. `None` removes the gate.
+    pub fn set_pointer_move_gate(&self, gate: Option<PointerMoveGate>) {
+        self.write(|ctx| ctx.pointer_move_gate = gate);
+    }
+
+    /// Whether a pointer move from `from` to `to` in `viewport`, with no button held, needs a pass: the answer of the
+    /// gate set with [`Self::set_pointer_move_gate`], else `true`.
+    pub fn pointer_move_needs_pass(
+        &self,
+        viewport: ViewportId,
+        from: Option<Pos2>,
+        to: Pos2,
+    ) -> bool {
+        let gate = self.read(|ctx| ctx.pointer_move_gate.clone());
+        gate.is_none_or(|gate| gate(self, viewport, from, to))
     }
 
     /// For integrations: this observer will be called for every repaint request,
@@ -6091,5 +6123,40 @@ mod test {
             );
             output.drop_without_applying_deltas();
         }
+    }
+}
+
+#[cfg(test)]
+mod pointer_move_gate_tests {
+    use super::{Arc, Context, Pos2, ViewportId};
+    use crate::pos2;
+
+    #[test]
+    fn a_move_needs_a_pass_unless_the_gate_says_otherwise() {
+        let ctx = Context::default();
+        let (from, to) = (Some(pos2(1.0, 1.0)), pos2(2.0, 1.0));
+        assert!(
+            ctx.pointer_move_needs_pass(ViewportId::ROOT, from, to),
+            "without a gate every move needs a pass"
+        );
+
+        // A gate that lets only moves past x = 10 through.
+        ctx.set_pointer_move_gate(Some(Arc::new(
+            |_: &Context, _: ViewportId, _: Option<Pos2>, to: Pos2| to.x > 10.0,
+        )));
+        assert!(
+            !ctx.pointer_move_needs_pass(ViewportId::ROOT, from, to),
+            "the gate holds a move back"
+        );
+        assert!(
+            ctx.pointer_move_needs_pass(ViewportId::ROOT, from, pos2(11.0, 1.0)),
+            "the gate lets a move through"
+        );
+
+        ctx.set_pointer_move_gate(None);
+        assert!(
+            ctx.pointer_move_needs_pass(ViewportId::ROOT, from, to),
+            "a removed gate leaves every move a pass"
+        );
     }
 }
