@@ -6205,7 +6205,7 @@ mod pointer_move_gate_tests {
         let ctx = Context::default();
         let mut button = None;
         let mut output = ctx.run_ui(crate::RawInput::default(), |ui| {
-            button = Some(ui.button("Press").rect)
+            button = Some(ui.button("Press").rect);
         });
         output.textures_delta.clear();
         let rect = button.expect("the button was shown");
