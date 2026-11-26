@@ -2405,6 +2405,46 @@ impl Context {
         gate.is_none_or(|gate| gate(self, viewport, from, to))
     }
 
+    /// The widgets at `pos` in `viewport`, as the last finished pass of the viewport placed them: the ids of every
+    /// widget that contains `pos` (back to front), and of the widget a click and a drag starting there would reach.
+    /// The same hit test a pass runs at the pointer. `None` before the viewport's first pass.
+    ///
+    /// A [pointer-move gate](Self::set_pointer_move_gate) can compare the answers for the last and the new position:
+    /// equal answers mean egui's hover state does not change.
+    pub fn widgets_at(
+        &self,
+        viewport: ViewportId,
+        pos: Pos2,
+    ) -> Option<(Vec<Id>, Option<Id>, Option<Id>)> {
+        self.read(|ctx| {
+            let state = ctx.viewports.get(&viewport)?;
+            let areas = ctx.memory.areas_of(viewport)?;
+            let mut layers: Vec<LayerId> = state
+                .prev_pass
+                .widgets
+                .layer_ids()
+                .filter(|layer_id| areas.is_interactable(*layer_id))
+                .collect();
+            layers.sort_by(|&a, &b| areas.compare_order(a, b));
+            let radius = ctx.memory.options.style().interaction.interact_radius;
+            let hits = crate::hit_test::hit_test(
+                &state.prev_pass.widgets,
+                &layers,
+                &ctx.memory.to_global,
+                pos,
+                radius,
+            );
+            Some((
+                hits.contains_pointer
+                    .iter()
+                    .map(|widget| widget.id)
+                    .collect(),
+                hits.click.map(|widget| widget.id),
+                hits.drag.map(|widget| widget.id),
+            ))
+        })
+    }
+
     /// For integrations: this observer will be called for every repaint request,
     /// i.e. every call to [`Self::request_repaint`], [`Self::request_repaint_after`] and their variants,
     /// including the ones egui makes itself.
@@ -6158,5 +6198,28 @@ mod pointer_move_gate_tests {
             ctx.pointer_move_needs_pass(ViewportId::ROOT, from, to),
             "a removed gate leaves every move a pass"
         );
+    }
+
+    #[test]
+    fn widgets_at_answers_from_the_last_pass() {
+        let ctx = Context::default();
+        let mut button = None;
+        let mut output = ctx.run_ui(crate::RawInput::default(), |ui| {
+            button = Some(ui.button("Press").rect)
+        });
+        output.textures_delta.clear();
+        let rect = button.expect("the button was shown");
+        let on = ctx
+            .widgets_at(ViewportId::ROOT, rect.center())
+            .expect("the pass ran");
+        assert!(on.1.is_some(), "a click on the button reaches a widget");
+        assert!(!on.0.is_empty(), "the button contains the point");
+        let off = ctx
+            .widgets_at(
+                ViewportId::ROOT,
+                rect.right_bottom() + crate::vec2(200.0, 200.0),
+            )
+            .expect("the pass ran");
+        assert_ne!(on, off, "a point off the button has other widgets under it");
     }
 }

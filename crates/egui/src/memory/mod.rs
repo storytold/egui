@@ -939,6 +939,11 @@ impl Memory {
         self.viewport_id = viewport_id;
     }
 
+    /// The [`Areas`] of `viewport`, if it has run.
+    pub(crate) fn areas_of(&self, viewport: ViewportId) -> Option<&Areas> {
+        self.areas.get(&viewport)
+    }
+
     /// Access memory of the [`Area`](crate::containers::area::Area)s, such as `Window`s.
     pub fn areas(&self) -> &Areas {
         self.areas
