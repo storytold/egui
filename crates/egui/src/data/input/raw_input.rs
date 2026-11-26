@@ -370,7 +370,7 @@ mod tests {
         // Frame where dropped_files are delivered: frame2 receives the final drag position and
         // consumes it so it does not leak into later frames.
         raw.dropped_files
-            .push(std::sync::Arc::new(DummyDroppedFile));
+            .push(alloc::sync::Arc::new(DummyDroppedFile));
         let frame2 = raw.take();
         assert_eq!(frame2.file_drag_pos, Some(pos));
         assert_eq!(frame2.dropped_files.len(), 1);
