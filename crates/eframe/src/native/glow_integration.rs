@@ -1825,6 +1825,16 @@ fn render_immediate_viewport(
         };
         egui_winit::update_viewport_info(&mut viewport.info, egui_ctx, window, false);
 
+        // `run_ui_and_paint` runs the clipboard requests of the viewports it paints; an immediate viewport is painted
+        // here instead, so run the ones sent to it before its input is taken: the paste then arrives in this pass.
+        for action in core::mem::take(&mut viewport.actions_requested) {
+            match action {
+                ActionRequested::Cut => egui_winit.request_cut(window),
+                ActionRequested::Copy => egui_winit.request_copy(window),
+                ActionRequested::Paste => egui_winit.request_paste(window),
+                other => viewport.actions_requested.push(other),
+            }
+        }
         let mut raw_input = egui_winit.take_egui_input(window);
         raw_input.viewports = glutin
             .viewports
