@@ -10,7 +10,11 @@ fn run(ctx: &Context, ui: impl FnMut(&mut Ui)) {
 #[test]
 fn a_pass_lists_its_focus_candidates_in_registration_order() {
     let ctx = Context::default();
-    let (button, drag, field) = (Id::new("button"), Id::new("drag"), Id::new("field"));
+    let (button, drag, field) = (
+        Id::unique("button"),
+        Id::unique("drag"),
+        Id::unique("field"),
+    );
     let mut value = 1.0_f32;
     let mut text = String::new();
     let mut candidates = Vec::new();
@@ -46,10 +50,10 @@ fn a_pass_lists_its_focus_candidates_in_registration_order() {
 #[test]
 fn a_focused_multiline_text_edit_that_locks_focus_keeps_tab_in_its_filter() {
     let ctx = Context::default();
-    let field = Id::new("code");
+    let field = Id::unique("code");
     let mut text = String::new();
     let mut show = |ctx: &Context| {
-        run(&ctx, |ui| {
+        run(ctx, |ui| {
             ui.add(TextEdit::multiline(&mut text).id(field).lock_focus(true));
         });
     };

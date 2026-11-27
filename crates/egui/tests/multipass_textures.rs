@@ -12,12 +12,15 @@ use egui::{Context, RawInput, TextureId, ViewportBuilder, ViewportId, pos2, vec2
 #[derive(Default)]
 struct Store {
     allocated: HashSet<TextureId>,
+
     /// Partial updates of a texture the store had not allocated: egui-wgpu panics on these.
     unallocated: Vec<TextureId>,
 }
 
 impl Store {
     fn apply(&mut self, delta: &mut TexturesDelta) {
+        // Each id's deltas keep their order; the order between ids changes nothing here.
+        #[expect(clippy::iter_over_hash_type)]
         for (id, deltas) in delta.set.drain() {
             for image in deltas {
                 if image.is_whole() {
@@ -27,6 +30,7 @@ impl Store {
                 }
             }
         }
+        #[expect(clippy::iter_over_hash_type)]
         for id in delta.free.drain() {
             self.allocated.remove(&id);
         }

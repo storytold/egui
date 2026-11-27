@@ -39,30 +39,43 @@ pub(crate) struct PasteError {
 pub(crate) enum PasteErrorKind {
     /// No offer exists on the selected seat/family.
     Absent,
+
     /// The offer exists but does not advertise the requested type.
     NotOffered,
+
     /// The offer belongs to a stale source of this clipboard.
     StaleSelfSource,
+
     /// The owner, seat, focus, window or offer changed during the transfer.
     Interrupted,
+
     /// A transfer, delivery or claim deadline expired.
     TimedOut,
+
     /// The protocol family or backend is unavailable.
     Unsupported,
+
     /// A queue or admission budget is full.
     Busy,
+
     /// The payload exceeds a byte or pixel cap.
     TooLarge,
+
     /// The caller supplied invalid dimensions, limits or state.
     InvalidInput,
+
     /// The event loop or clipboard connection has ended.
     Disconnected,
+
     /// The encoded payload is not a valid accepted PNG.
     Malformed,
+
     /// PNG encoding failed.
     Encode,
+
     /// An internal codec invariant was violated.
     Internal,
+
     /// A backend failure that is not classified more specifically.
     Backend,
 }
@@ -132,6 +145,7 @@ impl core::error::Error for PasteError {}
 pub(crate) enum PasteKind {
     /// The regular clipboard (`wl_data_device` selection).
     Regular,
+
     /// The PRIMARY selection (`zwp_primary_selection_device_v1`).
     Primary,
 }
@@ -155,6 +169,7 @@ pub(crate) trait EncodedPng: Send + Sync {
 pub(crate) enum PasteContent {
     /// Normalized UTF-8 text.
     Text(Arc<str>),
+
     /// Exact `image/png` bytes with their transport permit still held.
     ImagePng(Arc<dyn EncodedPng>),
 }
@@ -184,6 +199,7 @@ pub(crate) trait PasteTransfer: Send + Sync {
 pub(crate) struct DecodedPasteImage {
     /// The decoded, premultiplied image.
     pub image: egui::ColorImage,
+
     /// Codec-owned accounting retained until the application owns `image`.
     pub(crate) retention: Box<dyn Send + Sync>,
 }
@@ -303,17 +319,21 @@ pub(crate) enum CapturedClaimOrigin<Token> {
     /// No claimable input event was captured for this batch.
     #[default]
     Absent,
+
     /// A claimable input event was observed and yielded this exact token.
     Captured {
         /// The paste/input generation at capture time.
         generation: u64,
+
         /// The transport's single-use-per-family token.
         token: Token,
     },
+
     /// A claimable input event was observed but its token could not be obtained.
     Failed {
         /// The paste/input generation at capture time.
         generation: u64,
+
         /// The transport error kind, retained for diagnostics.
         kind: io::ErrorKind,
     },
@@ -415,6 +435,7 @@ impl<Token> ClaimBatch<Token> {
 pub(crate) enum RegularClaimOriginPolicy {
     /// `CopyText`: a captured token or, when `Absent`, one synchronous fallback.
     AllowFreshFallback,
+
     /// `CopyImage`: the exact captured token only; never a fallback.
     RequireCapturedOrigin,
 }
@@ -428,27 +449,34 @@ pub(crate) enum ClaimOriginError {
     StaleCapture {
         /// Generation requested by output processing.
         expected_generation: u64,
+
         /// Generation at which the token was captured.
         captured_generation: u64,
     },
+
     /// A claimable input event was seen, but token capture failed.
     CaptureFailed {
         /// Generation requested by output processing.
         expected_generation: u64,
+
         /// Generation at which capture failed.
         captured_generation: u64,
+
         /// The transport error kind, retained for diagnostics.
         kind: io::ErrorKind,
     },
+
     /// An image winner requires a captured origin and none is available.
     ImageRequiresCapturedOrigin {
         /// Generation requested by output processing.
         expected_generation: u64,
     },
+
     /// The permitted one-shot fallback lookup failed.
     FreshOriginFailed {
         /// Transport error kind.
         kind: io::ErrorKind,
+
         /// Transport error text.
         message: String,
     },
@@ -516,6 +544,7 @@ impl From<ClaimOriginError> for io::Error {
 pub(crate) struct BatchClaimOrigins<Token> {
     /// Origin for the winning regular text or image command.
     pub regular: Option<Result<Token, ClaimOriginError>>,
+
     /// Origin for the winning PRIMARY command.
     pub primary: Option<Result<Token, ClaimOriginError>>,
 }
@@ -626,21 +655,29 @@ pub(crate) fn resolve_batch_claim_origins<T: ClipboardTransport>(
 pub(crate) enum InputKind {
     /// Another key press (an edit, shortcut or selection-changing key).
     KeyPress,
+
     /// A pointer press starts a click, selection or focus change.
     PointerPress,
+
     /// An IME commit edits the focused text.
     Edit,
+
     /// Window focus was lost.
     Focus,
+
     /// Window focus was gained. A click-to-focus compositor may deliver this immediately after
     /// the middle-click press that started a PRIMARY read; it must not cancel that same read.
     FocusGained,
+
     /// The window is closing or was destroyed.
     Close,
+
     /// The window was hidden, minimized or occluded.
     Hide,
+
     /// A wheel scroll can move content under a pending middle-click position.
     Scroll,
+
     /// A key/pointer release or a repaint. These deliberately do not cancel a pending paste.
     NonInvalidating,
 }
@@ -650,8 +687,10 @@ pub(crate) enum InputKind {
 pub(crate) enum PasteOutcome {
     /// A completed regular-clipboard text read, or a transfer/decode failure.
     Regular(Result<String, PasteError>),
+
     /// A completed regular-clipboard PNG read after bounded decode.
     RegularImage(DecodedPasteImage),
+
     /// A completed PRIMARY read, with the middle-click position captured at request time.
     Primary {
         pos: Pos2,
@@ -665,8 +704,10 @@ struct PendingCommon {
     target_window: WindowId,
     generation: u64,
     focused_widget: Option<Id>,
+
     /// How many focus-owner changes this request may tolerate before it becomes stale.
     allowed_focus_changes: u8,
+
     /// The layer under the middle-click position at request time.
     target_layer: Option<LayerId>,
     pos: Option<Pos2>,
@@ -742,6 +783,7 @@ struct ComposedRegularInner {
     decoder: Option<Arc<dyn ImagePasteDecoder>>,
     terminal_waker: CompletionWaker,
     deadline: Instant,
+
     /// Deterministic deadline clock for tests.
     #[cfg(test)]
     test_now: Mutex<Option<Instant>>,
@@ -1600,6 +1642,7 @@ mod tests {
         deny_primary: core::sync::atomic::AtomicBool,
         origin_calls: AtomicUsize,
         deny_origin: core::sync::atomic::AtomicBool,
+
         /// Result delivered synchronously from `begin_load`, before the handle is returned.
         immediate: Mutex<Option<Result<PasteContent, PasteError>>>,
     }
@@ -2577,6 +2620,7 @@ mod tests {
         assert_eq!(wakes.load(Ordering::Acquire), 0);
         assert!(bridge.drain(WindowId::from(1), focused).is_empty());
     }
+
     fn sample_image() -> egui::ColorImage {
         egui::ColorImage::new([1, 1], vec![egui::Color32::RED])
     }

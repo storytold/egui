@@ -40,6 +40,7 @@ ignore = [
 [bans]
 multiple-versions = "deny" # Use `cargo tree --duplicates` to easily find duplicates
 wildcards = "deny"
+allow-wildcard-paths = true # egui_extras can't give its egui_kittest dev-dependency a version: that makes a cycle during publish
 deny = [
   { name = "cmake", reason = "It has hurt me too much" },
   { name = "openssl-sys", reason = "Use rustls" },
@@ -122,4 +123,6 @@ license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
 unknown-registry = "deny"
 unknown-git = "deny"
 
-allow-git = []
+allow-git = [
+  "https://github.com/storytold/winit.git", # The Craft suite's reviewed winit fork, pinned by rev in Cargo.toml
+]

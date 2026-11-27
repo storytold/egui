@@ -12,6 +12,7 @@ use epaint::{ClippedShape, Shape};
 #[derive(Clone, Debug, Default)]
 pub struct PassMark {
     pub(crate) shapes: Vec<(LayerId, usize)>,
+
     /// How many widget placements the pass had made ([`crate::WidgetRects::placed_since`]).
     pub(crate) widgets: u64,
     pub(crate) nodes: usize,
@@ -33,6 +34,7 @@ pub struct PassRecords {
     pub(crate) shapes: Vec<(LayerId, Vec<ClippedShape>)>,
     pub(crate) widgets: Vec<WidgetRect>,
     pub(crate) nodes: Vec<(Id, accesskit::Node)>,
+
     /// The AccessKit parent of each widget and node that has one.
     pub(crate) parents: Vec<(Id, Id)>,
 }
@@ -71,10 +73,10 @@ impl PassRecords {
 
     /// The layers the part painted on or placed widgets on.
     pub fn layers(&self) -> impl Iterator<Item = LayerId> + '_ {
-        self.shapes
-            .iter()
-            .map(|(layer, _)| *layer)
-            .chain(self.widgets.iter().map(|widget| widget.layer_id))
+        core::iter::chain(
+            self.shapes.iter().map(|(layer, _)| *layer),
+            self.widgets.iter().map(|widget| widget.layer_id),
+        )
     }
 
     /// The widget rects, in the order they were added.
@@ -126,7 +128,7 @@ impl PassRecords {
                 right: right.map(|(layer, _)| *layer),
             });
         }
-        for ((layer, left), (_, right)) in self.shapes.iter().zip(&other.shapes) {
+        for ((layer, left), (_, right)) in core::iter::zip(&self.shapes, &other.shapes) {
             if let Some((index, left, right)) = first_unequal(left, right, |a, b| {
                 near::clipped_shape(a, b, tolerance) == *b
             }) {
@@ -356,9 +358,7 @@ fn first_unequal<'a, T>(
     right: &'a [T],
     same: impl Fn(&T, &T) -> bool,
 ) -> Option<(usize, Option<&'a T>, Option<&'a T>)> {
-    let index = left
-        .iter()
-        .zip(right)
+    let index = core::iter::zip(left, right)
         .position(|(a, b)| !same(a, b))
         .or_else(|| (left.len() != right.len()).then(|| left.len().min(right.len())))?;
     Some((index, left.get(index), right.get(index)))
@@ -404,7 +404,7 @@ mod near {
     /// `a`, each item taken from `b`'s item by `near`, when both hold as many.
     fn list<T: Clone>(a: &[T], b: &[T], near: impl Fn(&T, &T) -> T) -> Vec<T> {
         if a.len() == b.len() {
-            a.iter().zip(b).map(|(a, b)| near(a, b)).collect()
+            core::iter::zip(a, b).map(|(a, b)| near(a, b)).collect()
         } else {
             a.to_vec()
         }
