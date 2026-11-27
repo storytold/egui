@@ -218,7 +218,7 @@ pub struct GraphicLayers([IdMap<PaintList>; Order::COUNT]);
 impl GraphicLayers {
     /// The number of shapes in each layer that has a paint list.
     pub(crate) fn lens(&self) -> impl Iterator<Item = (LayerId, usize)> + '_ {
-        Order::ALL.iter().zip(&self.0).flat_map(|(order, lists)| {
+        core::iter::zip(Order::ALL.iter(), &self.0).flat_map(|(order, lists)| {
             lists
                 .iter()
                 .map(|(id, list)| (LayerId::new(*order, *id), list.0.len()))

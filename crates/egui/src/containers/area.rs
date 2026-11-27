@@ -637,7 +637,9 @@ impl Area {
 
         // Measured from the requested pivot position, before constraining moves it.
         let room = max_height_from_constrain.then(|| {
-            let pivot_y = state.pivot_pos.map_or(constrain_rect.top(), |pos| pos.y);
+            let pivot_y = state
+                .pivot_pos
+                .map_or_else(|| constrain_rect.top(), |pos| pos.y);
             match pivot.y() {
                 Align::Min => Rangef::new(pivot_y, constrain_rect.bottom()),
                 Align::Max => Rangef::new(constrain_rect.top(), pivot_y),

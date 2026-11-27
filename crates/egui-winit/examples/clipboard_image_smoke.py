@@ -637,7 +637,7 @@ class Smoke:
             text,
         )
         if match is None:
-            raise AssertionError(f"unparseable PNG_VERIFY output: {text!r}")
+            raise AssertionError(f"unparsable PNG_VERIFY output: {text!r}")
         details = {
             "output": text.strip(),
             "bytes": match.group(1),
@@ -671,7 +671,7 @@ class Smoke:
             line,
         )
         if match is None:
-            raise AssertionError(f"unparseable image log: {line}")
+            raise AssertionError(f"unparsable image log: {line}")
         expected = {
             "dims": "2x2",
             "pixels": 4,
@@ -703,7 +703,7 @@ class Smoke:
             line,
         )
         if match is None:
-            raise AssertionError(f"unparseable text log: {line}")
+            raise AssertionError(f"unparsable text log: {line}")
         details = {
             "frame": match.group(1),
             "bytes": match.group(3),

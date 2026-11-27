@@ -394,6 +394,7 @@ enum OutputClaimOrigins {
     /// No winit Wayland transport is available for this output.
     #[default]
     NotWayland,
+
     /// One captured-or-fallback origin per selected clipboard family.
     #[cfg(all(
         feature = "clipboard",
@@ -415,6 +416,7 @@ enum OutputClaimOrigin {
     /// No winit Wayland transport is available for this output.
     #[default]
     NotWayland,
+
     /// The exact token or permitted fallback to use for this family.
     #[cfg(all(
         feature = "clipboard",
@@ -428,6 +430,7 @@ enum OutputClaimOrigin {
         ),
     ))]
     Ready(winit::platform::wayland::InputOriginToken),
+
     /// The family must fail explicitly without consulting another origin.
     #[cfg(all(
         feature = "clipboard",
@@ -2551,7 +2554,7 @@ impl State {
             // (I can't find a documentation page dedicated to this value.)
             //
             // Keep this defensive code while any supported `winit` build can
-            // still emit IME-processed presses. If a pin drops that behaviour
+            // still emit IME-processed presses. If a pin drops that behavior
             // entirely, `pressed_processed_physical_keys` and this method can
             // be removed.
             //
@@ -3941,18 +3944,22 @@ fn latin_key(
 }
 
 /// The character of a key that types exactly one.
+// Unused where `latin_key` has no layout to read, except by the tests.
 #[cfg_attr(
-    not(any(
-        target_os = "macos",
-        all(
-            unix,
-            not(target_vendor = "apple"),
-            not(target_os = "android"),
-            not(target_os = "emscripten"),
-            not(target_os = "redox"),
-            any(feature = "x11", feature = "wayland")
-        )
-    )),
+    all(
+        not(test),
+        not(any(
+            target_os = "macos",
+            all(
+                unix,
+                not(target_vendor = "apple"),
+                not(target_os = "android"),
+                not(target_os = "emscripten"),
+                not(target_os = "redox"),
+                any(feature = "x11", feature = "wayland")
+            )
+        ))
+    ),
     expect(dead_code)
 )]
 fn key_char(key: &winit::keyboard::Key) -> Option<char> {

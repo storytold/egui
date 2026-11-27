@@ -788,7 +788,7 @@ impl Focus {
         self.focus_direction = FocusDirection::None;
     }
 
-    /// A candidate covered by a higher layer at its centre (`covered`) is never the target: it
+    /// A candidate covered by a higher layer at its center (`covered`) is never the target: it
     /// cannot be seen or clicked there, as a button under an open popup.
     fn find_widget_in_direction(
         &mut self,
@@ -1581,7 +1581,7 @@ impl Areas {
                 && self.areas.get(&above.id).is_some_and(|state| {
                     state.interactable
                         && to_global(above)
-                            .map_or(state.rect(), |to_global| to_global * state.rect())
+                            .map_or_else(|| state.rect(), |to_global| to_global * state.rect())
                             .contains(pos)
                 })
                 && widgets.get_layer(above).any(|widget| {

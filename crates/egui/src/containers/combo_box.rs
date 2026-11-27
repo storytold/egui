@@ -435,35 +435,32 @@ fn combo_box_dyn<'c, R>(
         )
         .min_size(min_size);
 
-    let (button_response, label_response, elided) = match label {
-        Some(label) => {
-            // The label is just another atom, next to the button.
-            let label_text = label.text().map(String::from).unwrap_or_default();
-            let outer = WidgetAtom::new((Atom::widget(button), label))
-                .gap(ui.spacing().item_spacing.x)
-                .direction(direction)
-                .measure(ui, ui.available_size());
-            let elided = outer.container.iter_kinds().any(|kind| {
-                matches!(kind, SizedAtomKind::Widget(button) if is_elided(&button.container))
-            });
-            let outer_response = outer.allocate(ui).paint(ui).response;
-            outer_response
-                .widget_info(|| WidgetInfo::labeled(Role::Label, ui.is_enabled(), &label_text));
-            let button_response = ui
-                .ctx()
-                .read_response(button_id)
-                .unwrap_or_else(|| outer_response.clone());
-            (
-                button_response,
-                Some((outer_response, !label_text.is_empty())),
-                elided,
-            )
-        }
-        None => {
-            let button = button.measure(ui, ui.available_size());
-            let elided = is_elided(&button.container);
-            (button.allocate(ui).paint(ui).response, None, elided)
-        }
+    let (button_response, label_response, elided) = if let Some(label) = label {
+        // The label is just another atom, next to the button.
+        let label_text = label.text().map(String::from).unwrap_or_default();
+        let outer = WidgetAtom::new((Atom::widget(button), label))
+            .gap(ui.spacing().item_spacing.x)
+            .direction(direction)
+            .measure(ui, ui.available_size());
+        let elided = outer.container.iter_kinds().any(
+            |kind| matches!(kind, SizedAtomKind::Widget(button) if is_elided(&button.container)),
+        );
+        let outer_response = outer.allocate(ui).paint(ui).response;
+        outer_response
+            .widget_info(|| WidgetInfo::labeled(Role::Label, ui.is_enabled(), &label_text));
+        let button_response = ui
+            .ctx()
+            .read_response(button_id)
+            .unwrap_or_else(|| outer_response.clone());
+        (
+            button_response,
+            Some((outer_response, !label_text.is_empty())),
+            elided,
+        )
+    } else {
+        let button = button.measure(ui, ui.available_size());
+        let elided = is_elided(&button.container);
+        (button.allocate(ui).paint(ui).response, None, elided)
     };
 
     // `on_hover_ui`, because `on_hover_text` would also set the button's accessible description.
