@@ -108,6 +108,16 @@ pub trait CallbackTrait: Send + Sync {
         Vec::new()
     }
 
+    /// Whether [`CallbackTrait::paint`] reads what the frame holds so far.
+    ///
+    /// That is the pixels every shape and callback before this one drew. `true` makes the integration render the
+    /// frame through a texture it can copy from and gives this callback a [`Backdrop`] in its
+    /// [`CallbackResources`] (from [`CallbackTrait::prepare`] on; the copy is made right before `paint`). Costs a
+    /// copy of the frame per such callback; `false` (the default) costs nothing.
+    fn wants_backdrop(&self) -> bool {
+        false
+    }
+
     /// Called after all [`CallbackTrait::finish_prepare`] calls are done.
     ///
     /// It is given access to the [`wgpu::RenderPass`] so that it can issue draw commands
@@ -118,6 +128,98 @@ pub trait CallbackTrait: Send + Sync {
         render_pass: &mut wgpu::RenderPass<'static>,
         callback_resources: &CallbackResources,
     );
+}
+
+/// What the frame holds so far, for a [`CallbackTrait`] whose [`CallbackTrait::wants_backdrop`] is `true`.
+///
+/// A copy of the render target as it was right before that callback's [`CallbackTrait::paint`], in the renderer's
+/// output colour format, the size of the screen in pixels. The callback finds it in [`CallbackResources`] (inserted
+/// before [`CallbackTrait::prepare`], so a pipeline can be built against [`Backdrop::bind_group_layout`]) and reads
+/// it through [`Backdrop::bind_group`]: binding 0 is the texture (`texture_2d<f32>`), binding 1 a nearest sampler.
+/// A fragment reads the pixel under it with `textureLoad(backdrop, vec2<i32>(position.xy), 0)`.
+///
+/// One texture serves every backdrop callback of a frame, and the frames after it: it holds the copy made for the
+/// callback that is painting.
+#[derive(Clone)]
+pub struct Backdrop {
+    /// The copied frame.
+    pub texture: wgpu::Texture,
+    /// A view of the whole texture.
+    pub view: wgpu::TextureView,
+    /// The texture's format: the renderer's output colour format.
+    pub format: wgpu::TextureFormat,
+    /// The layout of [`Backdrop::bind_group`].
+    pub bind_group_layout: wgpu::BindGroupLayout,
+    /// Binding 0: the texture; binding 1: a nearest sampler.
+    pub bind_group: wgpu::BindGroup,
+}
+
+impl Backdrop {
+    fn new(device: &wgpu::Device, format: wgpu::TextureFormat, size: wgpu::Extent3d) -> Self {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("egui_backdrop"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("egui_backdrop"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("egui_backdrop"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                    count: None,
+                },
+            ],
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("egui_backdrop"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+        Self {
+            texture,
+            view,
+            format,
+            bind_group_layout,
+            bind_group,
+        }
+    }
+
+    fn size(&self) -> wgpu::Extent3d {
+        self.texture.size()
+    }
 }
 
 /// Information about the screen used for rendering.
@@ -258,6 +360,13 @@ pub struct Renderer {
     samplers: HashMap<epaint::textures::TextureOptions, wgpu::Sampler>,
 
     options: RendererOptions,
+
+    /// The format the frame is rendered in, which a [`Backdrop`] copies.
+    output_color_format: wgpu::TextureFormat,
+    /// The frame-so-far texture for backdrop callbacks, kept across frames; sized to the screen.
+    backdrop: Option<Backdrop>,
+    /// The indices, in the last [`Renderer::update_buffers`]'s paint jobs, of the callbacks that want the backdrop.
+    backdrop_jobs: Vec<usize>,
 
     /// Storage for resources shared with all invocations of [`CallbackTrait`]'s methods.
     ///
@@ -489,6 +598,9 @@ impl Renderer {
             next_user_texture_id: 0,
             samplers: HashMap::default(),
             options,
+            output_color_format,
+            backdrop: None,
+            backdrop_jobs: Vec::new(),
             callback_resources: CallbackResources::default(),
         }
     }
@@ -509,6 +621,118 @@ impl Renderer {
         paint_jobs: &[epaint::ClippedPrimitive],
         screen_descriptor: &ScreenDescriptor,
     ) {
+        self.render_range(
+            render_pass,
+            paint_jobs,
+            screen_descriptor,
+            0..paint_jobs.len(),
+            0,
+        );
+    }
+
+    /// Whether a callback among the last [`Renderer::update_buffers`]'s paint jobs wants the backdrop.
+    ///
+    /// See [`CallbackTrait::wants_backdrop`]. The frame must then go through
+    /// [`Renderer::render_with_backdrops`], into a texture it can copy from.
+    pub fn has_backdrop_callbacks(&self) -> bool {
+        !self.backdrop_jobs.is_empty()
+    }
+
+    /// Renders `paint_jobs` as [`Renderer::render`] does, giving backdrop callbacks what was drawn before them.
+    ///
+    /// Before every callback whose [`CallbackTrait::wants_backdrop`] is `true` the pass ends, `source` (the texture
+    /// the passes render into, resolved if multisampled; it needs [`wgpu::TextureUsages::COPY_SRC`]) is copied into
+    /// the [`Backdrop`] texture, and a new pass goes on with that callback. `begin_pass` opens each pass on the
+    /// encoder, told whether it is the frame's first (clear the target) or a continuation (load what the passes
+    /// before drew, and keep what they stored).
+    ///
+    /// Without backdrop callbacks this is one pass, as [`Renderer::render`].
+    ///
+    /// # Panic
+    /// As [`Renderer::render`]: [`Renderer::update_buffers`] must have been called first.
+    pub fn render_with_backdrops(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        source: &wgpu::Texture,
+        paint_jobs: &[epaint::ClippedPrimitive],
+        screen_descriptor: &ScreenDescriptor,
+        begin_pass: &mut dyn FnMut(&mut wgpu::CommandEncoder, bool) -> wgpu::RenderPass<'static>,
+    ) {
+        profiling::function_scope!();
+
+        let mut start = 0;
+        let mut meshes_before = 0;
+        for &at in &self.backdrop_jobs {
+            let at = at.min(paint_jobs.len());
+            {
+                let mut render_pass = begin_pass(encoder, start == 0);
+                self.render_range(
+                    &mut render_pass,
+                    paint_jobs,
+                    screen_descriptor,
+                    start..at,
+                    meshes_before,
+                );
+            }
+            if let Some(backdrop) = &self.backdrop {
+                Self::copy_backdrop(encoder, source, backdrop);
+            }
+            meshes_before += paint_jobs[start..at]
+                .iter()
+                .filter(|job| matches!(job.primitive, Primitive::Mesh(_)))
+                .count();
+            start = at;
+        }
+        let mut render_pass = begin_pass(encoder, start == 0);
+        self.render_range(
+            &mut render_pass,
+            paint_jobs,
+            screen_descriptor,
+            start..paint_jobs.len(),
+            meshes_before,
+        );
+    }
+
+    /// Copies the frame so far from `source` into the backdrop texture (their common extent).
+    fn copy_backdrop(
+        encoder: &mut wgpu::CommandEncoder,
+        source: &wgpu::Texture,
+        backdrop: &Backdrop,
+    ) {
+        if source.format() != backdrop.format {
+            log::warn!(
+                "The backdrop ({:?}) cannot copy the render target ({:?}): the renderer's output format differs from the target's",
+                backdrop.format,
+                source.format()
+            );
+            return;
+        }
+        let (from, to) = (source.size(), backdrop.size());
+        let extent = wgpu::Extent3d {
+            width: from.width.min(to.width),
+            height: from.height.min(to.height),
+            depth_or_array_layers: 1,
+        };
+        if extent.width == 0 || extent.height == 0 {
+            return;
+        }
+        encoder.copy_texture_to_texture(
+            source.as_image_copy(),
+            backdrop.texture.as_image_copy(),
+            extent,
+        );
+    }
+
+    /// Renders `paint_jobs[range]`, with `meshes_before` the number of meshes among the jobs before the range
+    /// (their buffer slices are skipped).
+    fn render_range(
+        &self,
+        render_pass: &mut wgpu::RenderPass<'static>,
+        paint_jobs: &[epaint::ClippedPrimitive],
+        screen_descriptor: &ScreenDescriptor,
+        range: Range<usize>,
+        meshes_before: usize,
+    ) {
         profiling::function_scope!();
 
         let pixels_per_point = screen_descriptor.pixels_per_point;
@@ -518,13 +742,14 @@ impl Renderer {
         // run.
         let mut needs_reset = true;
 
-        let mut index_buffer_slices = self.index_buffer.slices.iter();
-        let mut vertex_buffer_slices = self.vertex_buffer.slices.iter();
+        let mut index_buffer_slices = self.index_buffer.slices.iter().skip(meshes_before);
+        let mut vertex_buffer_slices = self.vertex_buffer.slices.iter().skip(meshes_before);
 
+        let jobs = paint_jobs.get(range).unwrap_or_default();
         for epaint::ClippedPrimitive {
             clip_rect,
             primitive,
-        } in paint_jobs
+        } in jobs
         {
             if needs_reset {
                 render_pass.set_viewport(
@@ -1098,6 +1323,37 @@ impl Renderer {
                     Primitive::Callback(_) => {}
                 }
             }
+        }
+
+        // The callbacks that read the frame so far: `render_with_backdrops` splits the pass before each and copies
+        // the target into the backdrop texture, which they find in the resources from `prepare` on.
+        self.backdrop_jobs = paint_jobs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, job)| match &job.primitive {
+                Primitive::Callback(callback) => callback
+                    .callback
+                    .downcast_ref::<Callback>()
+                    .filter(|callback| callback.0.wants_backdrop())
+                    .map(|_| i),
+                Primitive::Mesh(_) => None,
+            })
+            .collect();
+        if !self.backdrop_jobs.is_empty() {
+            let size = wgpu::Extent3d {
+                width: screen_descriptor.size_in_pixels[0].max(1),
+                height: screen_descriptor.size_in_pixels[1].max(1),
+                depth_or_array_layers: 1,
+            };
+            let backdrop = match &self.backdrop {
+                Some(backdrop) if backdrop.size() == size => backdrop.clone(),
+                _ => {
+                    let backdrop = Backdrop::new(device, self.output_color_format, size);
+                    self.backdrop = Some(backdrop.clone());
+                    backdrop
+                }
+            };
+            self.callback_resources.insert(backdrop);
         }
 
         let mut user_cmd_bufs = Vec::new();

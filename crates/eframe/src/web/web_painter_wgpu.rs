@@ -222,6 +222,10 @@ impl WebPainter for WebPainterWgpu {
             )
         };
 
+        // Callbacks that read the frame so far make the frame go through the capture texture, which can be
+        // copied from, and are blitted to the surface like a screenshot's frame.
+        let backdrops = render_state.renderer.read().has_backdrop_callbacks();
+
         // Resize surface if needed
         let is_zero_sized_surface = size_in_pixels[0] == 0 || size_in_pixels[1] == 0;
         let frame_and_capture_buffer = if is_zero_sized_surface {
@@ -276,7 +280,7 @@ impl WebPainter for WebPainterWgpu {
             {
                 let renderer = render_state.renderer.read();
 
-                let target_texture = if capture {
+                let target_texture = if capture || backdrops {
                     let size = output_frame.texture.size();
                     let format = output_frame.texture.format();
                     let capture_state = self.screen_capture_state.get_or_insert_with(|| {
@@ -291,60 +295,91 @@ impl WebPainter for WebPainterWgpu {
                 let target_view =
                     target_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-                let render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &target_view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color {
-                                r: clear_color[0] as f64,
-                                g: clear_color[1] as f64,
-                                b: clear_color[2] as f64,
-                                a: clear_color[3] as f64,
+                let depth_texture_view = self.depth_texture_view.as_ref();
+                let depth_stencil_format = self.depth_stencil_format;
+                // A frame with backdrop callbacks runs as several passes (`render_with_backdrops`): the later
+                // ones load what the earlier ones drew, so the depth and stencil buffers are stored between them.
+                let mut begin_pass = |encoder: &mut wgpu::CommandEncoder, first: bool| {
+                    encoder
+                        .begin_render_pass(&wgpu::RenderPassDescriptor {
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: &target_view,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: if first {
+                                        wgpu::LoadOp::Clear(wgpu::Color {
+                                            r: clear_color[0] as f64,
+                                            g: clear_color[1] as f64,
+                                            b: clear_color[2] as f64,
+                                            a: clear_color[3] as f64,
+                                        })
+                                    } else {
+                                        wgpu::LoadOp::Load
+                                    },
+                                    store: wgpu::StoreOp::Store,
+                                },
+                                depth_slice: None,
+                            })],
+                            depth_stencil_attachment: depth_texture_view.map(|view| {
+                                wgpu::RenderPassDepthStencilAttachment {
+                                    view,
+                                    depth_ops: depth_stencil_format
+                                        .is_some_and(|format| format.has_depth_aspect())
+                                        .then_some(wgpu::Operations {
+                                            load: if first {
+                                                wgpu::LoadOp::Clear(1.0)
+                                            } else {
+                                                wgpu::LoadOp::Load
+                                            },
+                                            // It is very unlikely that the depth buffer is needed after egui
+                                            // finished rendering, so it is not stored (this can improve performance
+                                            // on tiling GPUs like mobile chips or Apple Silicon), except between
+                                            // the passes of a frame with backdrop callbacks.
+                                            store: if backdrops {
+                                                wgpu::StoreOp::Store
+                                            } else {
+                                                wgpu::StoreOp::Discard
+                                            },
+                                        }),
+                                    stencil_ops: depth_stencil_format
+                                        .is_some_and(|format| format.has_stencil_aspect())
+                                        .then_some(wgpu::Operations {
+                                            load: if first {
+                                                wgpu::LoadOp::Clear(0)
+                                            } else {
+                                                wgpu::LoadOp::Load
+                                            },
+                                            store: if backdrops {
+                                                wgpu::StoreOp::Store
+                                            } else {
+                                                wgpu::StoreOp::Discard
+                                            },
+                                        }),
+                                }
                             }),
-                            store: wgpu::StoreOp::Store,
-                        },
-                        depth_slice: None,
-                    })],
-                    depth_stencil_attachment: self.depth_texture_view.as_ref().map(|view| {
-                        wgpu::RenderPassDepthStencilAttachment {
-                            view,
-                            depth_ops: self
-                                .depth_stencil_format
-                                .is_some_and(|depth_stencil_format| {
-                                    depth_stencil_format.has_depth_aspect()
-                                })
-                                .then_some(wgpu::Operations {
-                                    load: wgpu::LoadOp::Clear(1.0),
-                                    // It is very unlikely that the depth buffer is needed after egui finished rendering
-                                    // so no need to store it. (this can improve performance on tiling GPUs like mobile chips or Apple Silicon)
-                                    store: wgpu::StoreOp::Discard,
-                                }),
-                            stencil_ops: self
-                                .depth_stencil_format
-                                .is_some_and(|depth_stencil_format| {
-                                    depth_stencil_format.has_stencil_aspect()
-                                })
-                                .then_some(wgpu::Operations {
-                                    load: wgpu::LoadOp::Clear(0),
-                                    store: wgpu::StoreOp::Discard,
-                                }),
-                        }
-                    }),
-                    label: Some("egui_render"),
-                    occlusion_query_set: None,
-                    timestamp_writes: None,
-                    multiview_mask: None,
-                });
+                            label: Some("egui_render"),
+                            occlusion_query_set: None,
+                            timestamp_writes: None,
+                            multiview_mask: None,
+                        })
+                        // Forgetting the pass' lifetime means that we are no longer compile-time protected from
+                        // runtime errors caused by accessing the parent encoder before the render pass is dropped.
+                        // Since we don't pass it on to the renderer, we should be perfectly safe against this mistake here!
+                        .forget_lifetime()
+                };
 
-                // Forgetting the pass' lifetime means that we are no longer compile-time protected from
-                // runtime errors caused by accessing the parent encoder before the render pass is dropped.
-                // Since we don't pass it on to the renderer, we should be perfectly safe against this mistake here!
-                renderer.render(
-                    &mut render_pass.forget_lifetime(),
-                    clipped_primitives,
-                    &screen_descriptor,
-                );
+                if backdrops {
+                    renderer.render_with_backdrops(
+                        &mut encoder,
+                        target_texture,
+                        clipped_primitives,
+                        &screen_descriptor,
+                        &mut begin_pass,
+                    );
+                } else {
+                    let mut render_pass = begin_pass(&mut encoder, true);
+                    renderer.render(&mut render_pass, clipped_primitives, &screen_descriptor);
+                }
             }
 
             let capture_buffer =
@@ -355,6 +390,9 @@ impl WebPainter for WebPainterWgpu {
                         &mut encoder,
                     ))
                 } else {
+                    if backdrops && let Some(capture_state) = &self.screen_capture_state {
+                        capture_state.blit(&mut encoder, &output_frame);
+                    }
                     None
                 };
 

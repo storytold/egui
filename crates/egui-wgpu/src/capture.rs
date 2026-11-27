@@ -161,29 +161,34 @@ impl CaptureState {
         // Blit to the surface, for the frame that is actually shown. A hidden window has no
         // surface texture to blit to, and nothing to show: the capture above is all we want.
         if let Some(output_frame) = output_frame {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("texture_copy"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &output_frame.texture.create_view(&Default::default()),
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: None,
-                occlusion_query_set: None,
-                timestamp_writes: None,
-                multiview_mask: None,
-            });
-
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.bind_group, &[]);
-            pass.draw(0..3, 0..1);
+            self.blit(encoder, output_frame);
         }
 
         buffer
+    }
+
+    /// Draws the capture texture onto the surface texture: the frame rendered into it is what is shown.
+    pub fn blit(&self, encoder: &mut wgpu::CommandEncoder, output_frame: &wgpu::SurfaceTexture) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("texture_copy"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &output_frame.texture.create_view(&Default::default()),
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: None,
+            occlusion_query_set: None,
+            timestamp_writes: None,
+            multiview_mask: None,
+        });
+
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.draw(0..3, 0..1);
     }
 
     /// Handles copying from the [`CaptureState`] texture to the surface texture and the cpu
