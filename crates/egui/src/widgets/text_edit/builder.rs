@@ -896,9 +896,17 @@ impl<'t> TextEdit<'t> {
 
             // TODO(emilk): drag selected text to either move or clone (ctrl on windows, alt on mac)
 
-            let cursor_at_pointer = galley.cursor_from_pos(
-                pointer_pos - inner_rect.min + state.text_offset + vec2(galley.rect.left(), 0.0),
-            );
+            let is_being_dragged = ui.is_being_dragged(response.id);
+            let mut pointer_in_galley =
+                pointer_pos - inner_rect.min + state.text_offset + vec2(galley.rect.left(), 0.0);
+            // A single-line selection drag follows x, even above or below its row.
+            if is_being_dragged
+                && !multiline
+                && let [row] = galley.rows.as_slice()
+            {
+                pointer_in_galley.y = (row.min_y() + row.max_y()) * 0.5;
+            }
+            let cursor_at_pointer = galley.cursor_from_pos(pointer_in_galley);
 
             if ui.visuals().text_cursor.preview
                 && response.hovered()
@@ -911,7 +919,6 @@ impl<'t> TextEdit<'t> {
                 text_selection::visuals::paint_cursor_end(&painter, ui.visuals(), cursor_rect);
             }
 
-            let is_being_dragged = ui.is_being_dragged(response.id);
             let did_interact = state.cursor.pointer_interaction(
                 ui,
                 &response,
