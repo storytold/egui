@@ -36,14 +36,19 @@ use crate::clipboard_bridge::{
 
 /// Largest accepted source or decoded image, in pixels.
 pub(crate) const MAX_PIXELS: usize = 8_000_000;
+
 /// Largest accepted width or height.
 pub(crate) const MAX_DIMENSION: u32 = 8192;
+
 /// Existing winit transfer cap, also the maximum encoded PNG this codec will produce.
 pub(crate) const MAX_ENCODED_BYTES: usize = 16 * 1024 * 1024;
+
 /// Shared admission budget for codec-owned queued/running/ready work.
 pub(crate) const CODEC_BUDGET_BYTES: usize = 192 * 1024 * 1024;
+
 /// Decoder allowance passed to `image` as `Limits::max_alloc`. The limit is non-strict.
 pub(crate) const DECODE_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
+
 /// Copy encode and reservation delivery budget; winit additionally bounds the reservation
 /// itself by the triggering input's five-second freshness.
 pub(crate) const COPY_DELIVERY_BUDGET: Duration = Duration::from_secs(3);
@@ -108,8 +113,10 @@ pub(crate) fn validate_image_size(size: [usize; 2]) -> Result<usize, PasteError>
 struct ImageAdmission {
     /// Logical pixel count from the declared dimensions; equal to `pixels.len()`.
     pixels: usize,
+
     /// Straight-alpha RGBA conversion buffer bytes.
     converted_bytes: usize,
+
     /// Retained source capacity charged when it exceeds the logical pixel count.
     retained_capacity_bytes: usize,
 }
@@ -248,6 +255,7 @@ type DecodeCompletion = Box<dyn FnOnce(Result<DecodedPasteImage, PasteError>) + 
 
 struct EncodeJob {
     image: ColorImage,
+
     /// The validated logical pixel count, equal to `image.pixels.len()`.
     pixels: usize,
     permit: CodecPermit,
@@ -825,6 +833,7 @@ struct CopyState {
     result: Option<Result<PngBytes, PasteError>>,
     terminal_woken: bool,
     cancelled: bool,
+
     /// Cancellation handle for the queued encode, if it has not completed.
     job: Option<Arc<dyn JobCancellation>>,
 }
