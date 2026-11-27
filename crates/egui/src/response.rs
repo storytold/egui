@@ -794,27 +794,36 @@ impl Response {
         })
     }
 
-    /// Use `text` as the accessible description of the widget (unless it has one),
-    /// and as its name if it has none (e.g. an icon-only button).
+    /// Use `text` as the accessible name of the widget if it has none (e.g. an icon-only button),
+    /// and otherwise as its description (unless it has one).
     ///
     /// This is what [`Self::on_hover_text`] sets. Call it from a tooltip with other contents
     /// to give the widget the same AccessKit description and name.
     /// It does nothing for a widget without an AccessKit node, and leaves the name of a
     /// `Label` or of a widget named by `labelled_by` alone.
+    ///
+    /// A text that is already the widget's name is not repeated as its description, so a screen
+    /// reader doesn't say it twice ("Play, button, Play").
     pub fn describe_for_accessibility(&self, text: &str) {
         // Only widgets that already have a node; don't invent nodes for hover-only rects.
         if self.ctx.has_accesskit_node(self.id) {
             self.ctx.accesskit_node_builder(self.id, |node| {
-                if node.description().is_none() {
-                    node.set_description(text);
-                }
                 // A `Label` is named by its value, and a widget named by
                 // `labelled_by` already has a name, so leave those be.
-                if node.role() != accesskit::Role::Label
+                let unnamed = node.role() != accesskit::Role::Label
                     && node.labelled_by().is_empty()
-                    && node.label().is_none_or(str::is_empty)
-                {
+                    && node.label().is_none_or(str::is_empty);
+                if unnamed {
                     node.set_label(text);
+                    return;
+                }
+                let name = if node.role() == accesskit::Role::Label {
+                    node.value()
+                } else {
+                    node.label()
+                };
+                if node.description().is_none() && name.map(str::trim) != Some(text.trim()) {
+                    node.set_description(text);
                 }
             });
         }
