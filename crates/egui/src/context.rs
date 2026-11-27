@@ -396,6 +396,11 @@ impl ViewportRepaintInfo {
     }
 }
 
+/// Decides whether a pointer move needs a pass: called with the context, the viewport, the last pointer position (if
+/// any) and the new one, in points. See [`Context::set_pointer_move_gate`].
+pub type PointerMoveGate =
+    Arc<dyn Fn(&Context, ViewportId, Option<Pos2>, Pos2) -> bool + Send + Sync>;
+
 // ----------------------------------------------------------------------------
 
 #[derive(Default)]
@@ -442,6 +447,13 @@ struct ContextImpl {
     paint_stats: PaintStats,
 
     request_repaint_callback: Option<Box<dyn Fn(RequestRepaintInfo) + Send + Sync>>,
+
+    /// Asked by an integration whether a pointer move needs a pass ([`Context::set_pointer_move_gate`]).
+    pointer_move_gate: Option<PointerMoveGate>,
+
+    /// A pass whose only input was pointer moves leaves its follow-up repaint to the gate: the viewport and the
+    /// pointer's place before and after the moves. [`Context::begin_pass`] asks the gate once the context is unlocked.
+    pending_move_check: Option<(ViewportId, Option<Pos2>, Pos2)>,
     repaint_observer: Option<Box<dyn Fn(RequestRepaintInfo) + Send + Sync>>,
 
     viewport_parents: ViewportIdMap<ViewportId>,
@@ -502,6 +514,7 @@ impl ContextImpl {
 
         self.memory.begin_pass(&new_raw_input, &all_viewport_ids);
 
+        let pointer_before = viewport.input.pointer.latest_pos();
         viewport.input = core::mem::take(&mut viewport.input).begin_pass(
             new_raw_input,
             viewport.repaint.requested_immediate_repaint_prev_pass(),
@@ -601,7 +614,29 @@ impl ContextImpl {
         self.update_fonts_mut();
 
         if let Some(delay) = repaint_after {
-            self.request_repaint_after(delay, viewport_id, RepaintCause::new());
+            // With a pointer-move gate, a pass whose only input was pointer moves with no button held asks the gate
+            // whether the moves change anything before it asks for a follow-up pass.
+            let moved_to = self.pointer_move_gate.as_ref().and_then(|_| {
+                let viewport = self.viewports.get(&viewport_id)?;
+                let input = &viewport.input;
+                let only_moves = delay.is_zero()
+                    && !input.events.is_empty()
+                    && input.events.iter().all(|event| {
+                        matches!(
+                            event,
+                            crate::Event::PointerMoved(_) | crate::Event::MouseMoved(_)
+                        )
+                    })
+                    && !input.pointer.any_down()
+                    && input.raw.hovered_files.is_empty()
+                    && input.raw.dropped_files.is_empty()
+                    && input.smooth_scroll_delta() == Vec2::ZERO;
+                only_moves.then(|| input.pointer.latest_pos()).flatten()
+            });
+            match moved_to {
+                Some(to) => self.pending_move_check = Some((viewport_id, pointer_before, to)),
+                None => self.request_repaint_after(delay, viewport_id, RepaintCause::new()),
+            }
         }
     }
 
@@ -1302,6 +1337,12 @@ impl Context {
         plugins.on_input(self, &mut new_input);
 
         self.write(|ctx| ctx.begin_pass(new_input));
+        // Outside the lock: the gate reads the context.
+        if let Some((viewport, from, to)) = self.write(|ctx| ctx.pending_move_check.take())
+            && self.pointer_move_needs_pass(viewport, from, to)
+        {
+            self.request_repaint_of(viewport);
+        }
     }
 }
 
@@ -2371,6 +2412,70 @@ impl Context {
     ) {
         let callback = Box::new(callback);
         self.write(|ctx| ctx.request_repaint_callback = Some(callback));
+    }
+
+    /// For integrations and apps: decides whether a pointer move with no button held needs a pass.
+    ///
+    /// An integration that supports it (egui-winit) asks [`Self::pointer_move_needs_pass`] for every such move and
+    /// requests no repaint when the gate answers `false`. The move is still part of the input, so the next pass sees
+    /// the latest position. The gate is called outside any lock of the context, with the viewport, the last position
+    /// and the new one in points.
+    ///
+    /// With no gate (the default) every move needs a pass, as before. `None` removes the gate.
+    pub fn set_pointer_move_gate(&self, gate: Option<PointerMoveGate>) {
+        self.write(|ctx| ctx.pointer_move_gate = gate);
+    }
+
+    /// Whether a pointer move from `from` to `to` in `viewport`, with no button held, needs a pass: the answer of the
+    /// gate set with [`Self::set_pointer_move_gate`], else `true`.
+    pub fn pointer_move_needs_pass(
+        &self,
+        viewport: ViewportId,
+        from: Option<Pos2>,
+        to: Pos2,
+    ) -> bool {
+        let gate = self.read(|ctx| ctx.pointer_move_gate.clone());
+        gate.is_none_or(|gate| gate(self, viewport, from, to))
+    }
+
+    /// The widgets at `pos` in `viewport`, as the last finished pass of the viewport placed them: the ids of every
+    /// widget that contains `pos` (back to front), and of the widget a click and a drag starting there would reach.
+    /// The same hit test a pass runs at the pointer. `None` before the viewport's first pass.
+    ///
+    /// A [pointer-move gate](Self::set_pointer_move_gate) can compare the answers for the last and the new position:
+    /// equal answers mean egui's hover state does not change.
+    pub fn widgets_at(
+        &self,
+        viewport: ViewportId,
+        pos: Pos2,
+    ) -> Option<(Vec<Id>, Option<Id>, Option<Id>)> {
+        self.read(|ctx| {
+            let state = ctx.viewports.get(&viewport)?;
+            let areas = ctx.memory.areas_of(viewport)?;
+            let mut layers: Vec<LayerId> = state
+                .prev_pass
+                .widgets
+                .layer_ids()
+                .filter(|layer_id| areas.is_interactable(*layer_id))
+                .collect();
+            layers.sort_by(|&a, &b| areas.compare_order(a, b));
+            let radius = ctx.memory.options.style().interaction.interact_radius;
+            let hits = crate::hit_test::hit_test(
+                &state.prev_pass.widgets,
+                &layers,
+                &ctx.memory.to_global,
+                pos,
+                radius,
+            );
+            Some((
+                hits.contains_pointer
+                    .iter()
+                    .map(|widget| widget.id)
+                    .collect(),
+                hits.click.map(|widget| widget.id),
+                hits.drag.map(|widget| widget.id),
+            ))
+        })
     }
 
     /// For integrations: this observer will be called for every repaint request,
@@ -6090,5 +6195,95 @@ mod test {
             );
             output.drop_without_applying_deltas();
         }
+    }
+}
+
+#[cfg(test)]
+mod pointer_move_gate_tests {
+    use super::{Arc, Context, Pos2, ViewportId};
+    use crate::pos2;
+
+    #[test]
+    fn a_move_needs_a_pass_unless_the_gate_says_otherwise() {
+        let ctx = Context::default();
+        let (from, to) = (Some(pos2(1.0, 1.0)), pos2(2.0, 1.0));
+        assert!(
+            ctx.pointer_move_needs_pass(ViewportId::ROOT, from, to),
+            "without a gate every move needs a pass"
+        );
+
+        // A gate that lets only moves past x = 10 through.
+        ctx.set_pointer_move_gate(Some(Arc::new(
+            |_: &Context, _: ViewportId, _: Option<Pos2>, to: Pos2| to.x > 10.0,
+        )));
+        assert!(
+            !ctx.pointer_move_needs_pass(ViewportId::ROOT, from, to),
+            "the gate holds a move back"
+        );
+        assert!(
+            ctx.pointer_move_needs_pass(ViewportId::ROOT, from, pos2(11.0, 1.0)),
+            "the gate lets a move through"
+        );
+
+        ctx.set_pointer_move_gate(None);
+        assert!(
+            ctx.pointer_move_needs_pass(ViewportId::ROOT, from, to),
+            "a removed gate leaves every move a pass"
+        );
+    }
+
+    #[test]
+    fn widgets_at_answers_from_the_last_pass() {
+        let ctx = Context::default();
+        let mut button = None;
+        let mut output = ctx.run_ui(crate::RawInput::default(), |ui| {
+            button = Some(ui.button("Press").rect);
+        });
+        output.textures_delta.clear();
+        let rect = button.expect("the button was shown");
+        let on = ctx
+            .widgets_at(ViewportId::ROOT, rect.center())
+            .expect("the pass ran");
+        assert!(on.1.is_some(), "a click on the button reaches a widget");
+        assert!(!on.0.is_empty(), "the button contains the point");
+        let off = ctx
+            .widgets_at(
+                ViewportId::ROOT,
+                rect.right_bottom() + crate::vec2(200.0, 200.0),
+            )
+            .expect("the pass ran");
+        assert_ne!(on, off, "a point off the button has other widgets under it");
+    }
+
+    #[test]
+    fn a_pass_of_pointer_moves_asks_the_gate_for_its_follow_up() {
+        let follow_up = |gate_says: bool| {
+            let ctx = Context::default();
+            ctx.set_pointer_move_gate(Some(Arc::new(
+                move |_: &Context, _: ViewportId, _: Option<Pos2>, _: Pos2| gate_says,
+            )));
+            let pass = |at: Pos2| {
+                let input = crate::RawInput {
+                    events: vec![crate::Event::PointerMoved(at)],
+                    ..Default::default()
+                };
+                let mut output = ctx.run_ui(input, |_| {});
+                output.textures_delta.clear();
+            };
+            for _ in 0..4 {
+                let mut output = ctx.run_ui(crate::RawInput::default(), |_| {});
+                output.textures_delta.clear();
+            }
+            pass(pos2(10.0, 10.0));
+            pass(pos2(20.0, 10.0));
+            let causes = ctx.repaint_causes();
+            (ctx.has_requested_repaint(), causes)
+        };
+        let (held, causes) = follow_up(false);
+        assert!(
+            !held,
+            "moves the gate holds back ask for no follow-up pass: {causes:?}"
+        );
+        assert!(follow_up(true).0, "moves the gate lets through ask for one");
     }
 }

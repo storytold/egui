@@ -258,6 +258,10 @@ pub struct State {
     /// Only one touch will be interpreted as pointer at any time.
     pointer_touch_id: Option<u64>,
 
+    /// The mouse buttons held right now, whatever `simulate_touch_screen` says. A move while one is held
+    /// is a drag and always gets a pass; the pointer-move gate only sees moves with none held.
+    held_mouse_buttons: HeldMouseButtons,
+
     #[cfg(feature = "accesskit")]
     pub accesskit: Option<accesskit_winit::Adapter>,
 
@@ -651,6 +655,7 @@ impl State {
 
             simulate_touch_screen: false,
             pointer_touch_id: None,
+            held_mouse_buttons: HeldMouseButtons::default(),
 
             #[cfg(feature = "accesskit")]
             accesskit: None,
@@ -2189,9 +2194,13 @@ impl State {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
+                let from = self.pointer_pos_in_points;
                 self.on_cursor_moved(window, *position);
+                let repaint = self
+                    .pointer_pos_in_points
+                    .is_none_or(|to| self.pointer_move_needs_repaint(from, to));
                 EventResponse {
-                    repaint: true,
+                    repaint,
                     consumed: self.egui_ctx.egui_is_using_pointer(),
                 }
             }
@@ -2310,6 +2319,8 @@ impl State {
                     // Avoid sticky modifiers when focus is lost (egui clears its own copy too).
                     self.modifiers = egui::Modifiers::default();
                     self.held_keys.clear();
+                    // A release that happens while another window has focus may never reach this one.
+                    self.held_mouse_buttons.clear();
                     #[cfg(target_os = "windows")]
                     self.pressed_processed_physical_keys.clear();
                     #[cfg(all(
@@ -2405,6 +2416,7 @@ impl State {
             WindowEvent::Destroyed => {
                 self.ime_reset.invalidate();
                 self.held_keys.clear();
+                self.held_mouse_buttons.clear();
                 self.modifiers = egui::Modifiers::default();
                 self.egui_input.focused = false;
                 self.egui_input
@@ -2852,6 +2864,30 @@ impl State {
         true
     }
 
+    /// Whether raw mouse motion that [`Self::on_mouse_motion`] sent to egui needs a repaint of its own.
+    ///
+    /// With a held mouse button (a drag), with `simulate_touch_screen`, with the pointer outside the window
+    /// or with no [pointer-move gate](egui::Context::set_pointer_move_gate) it does, as before. Otherwise the
+    /// gate decides, asked with the pointer's current position as both the last and the new one: the
+    /// `CursorMoved` that usually comes with the motion asks it with the real positions. An app that locks the
+    /// pointer and reads [`egui::InputState::pointer`]'s motion lets such moves through in its gate.
+    pub fn mouse_motion_needs_repaint(&self) -> bool {
+        self.pointer_pos_in_points
+            .is_none_or(|pos| self.pointer_move_needs_repaint(Some(pos), pos))
+    }
+
+    /// Whether a pointer move from `from` to `to` needs a repaint: always with a held mouse button or
+    /// `simulate_touch_screen`, else when the app's pointer-move gate (if it set one) says so.
+    fn pointer_move_needs_repaint(&self, from: Option<egui::Pos2>, to: egui::Pos2) -> bool {
+        pointer_move_needs_repaint(
+            &self.egui_ctx,
+            self.viewport_id,
+            self.held_mouse_buttons.any() || self.simulate_touch_screen,
+            from,
+            to,
+        )
+    }
+
     /// Returns `true` when the pointer is currently inside the window.
     pub fn is_pointer_in_window(&self) -> bool {
         self.pointer_pos_in_points.is_some()
@@ -2877,6 +2913,9 @@ impl State {
         state: winit::event::ElementState,
         button: winit::event::MouseButton,
     ) {
+        // Also outside the window: a drag that leaves it keeps the button held.
+        self.held_mouse_buttons
+            .set(button, state == winit::event::ElementState::Pressed);
         if let Some(pos) = self.pointer_pos_in_points
             && let Some(button) = translate_mouse_button(button)
         {
@@ -3778,6 +3817,59 @@ fn is_paste_command(modifiers: egui::Modifiers, keycode: egui::Key) -> bool {
     keycode == egui::Key::Paste
         || (modifiers.command_only() && keycode == egui::Key::V)
         || (cfg!(target_os = "windows") && modifiers.shift && keycode == egui::Key::Insert)
+}
+
+/// Whether a pointer move needs a repaint: always while a button is held (`bypass_gate`), else as the
+/// context's pointer-move gate answers.
+fn pointer_move_needs_repaint(
+    ctx: &egui::Context,
+    viewport_id: ViewportId,
+    bypass_gate: bool,
+    from: Option<egui::Pos2>,
+    to: egui::Pos2,
+) -> bool {
+    bypass_gate || ctx.pointer_move_needs_pass(viewport_id, from, to)
+}
+
+/// The mouse buttons held down: one bit per named button, and a count of the `Other` buttons.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct HeldMouseButtons {
+    named: u8,
+    other: u16,
+}
+
+impl HeldMouseButtons {
+    fn set(&mut self, button: winit::event::MouseButton, pressed: bool) {
+        use winit::event::MouseButton;
+        let bit = match button {
+            MouseButton::Left => 1,
+            MouseButton::Right => 1 << 1,
+            MouseButton::Middle => 1 << 2,
+            MouseButton::Back => 1 << 3,
+            MouseButton::Forward => 1 << 4,
+            MouseButton::Other(_) => {
+                self.other = if pressed {
+                    self.other.saturating_add(1)
+                } else {
+                    self.other.saturating_sub(1)
+                };
+                return;
+            }
+        };
+        if pressed {
+            self.named |= bit;
+        } else {
+            self.named &= !bit;
+        }
+    }
+
+    fn any(self) -> bool {
+        self.named != 0 || self.other != 0
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
 }
 
 fn translate_mouse_button(button: winit::event::MouseButton) -> Option<egui::PointerButton> {
@@ -5150,6 +5242,112 @@ pub fn short_window_event_description(event: &winit::event::WindowEvent) -> &'st
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod pointer_move_gate {
+        use super::*;
+
+        struct NoDisplay;
+
+        impl HasDisplayHandle for NoDisplay {
+            fn display_handle(
+                &self,
+            ) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError>
+            {
+                Err(raw_window_handle::HandleError::Unavailable)
+            }
+        }
+
+        /// A `State` whose context has a gate that holds back every move.
+        fn gated_state() -> State {
+            let ctx = egui::Context::default();
+            ctx.set_pointer_move_gate(Some(std::sync::Arc::new(
+                |_: &egui::Context, _: ViewportId, _: Option<egui::Pos2>, _: egui::Pos2| false,
+            )));
+            let mut state = State::new(ctx, ViewportId::ROOT, &NoDisplay, Some(1.0), None, None);
+            state.pointer_pos_in_points = Some(egui::pos2(10.0, 10.0));
+            state
+        }
+
+        fn press(state: &mut State, button: winit::event::MouseButton, pressed: bool) {
+            let element = if pressed {
+                winit::event::ElementState::Pressed
+            } else {
+                winit::event::ElementState::Released
+            };
+            state.on_mouse_button_input(element, button);
+        }
+
+        fn cursor_move_repaints(state: &State) -> bool {
+            state.pointer_move_needs_repaint(Some(egui::pos2(10.0, 10.0)), egui::pos2(11.0, 10.0))
+        }
+
+        #[test]
+        fn a_move_with_no_button_held_follows_the_gate_on_both_paths() {
+            let state = gated_state();
+            assert!(!cursor_move_repaints(&state), "CursorMoved asks the gate");
+            assert!(
+                !state.mouse_motion_needs_repaint(),
+                "raw MouseMotion asks the gate too"
+            );
+        }
+
+        #[test]
+        fn a_drag_bypasses_the_gate_on_both_paths_without_touch_simulation() {
+            use winit::event::MouseButton;
+            let mut state = gated_state();
+            assert!(!state.simulate_touch_screen);
+            press(&mut state, MouseButton::Left, true);
+            assert!(cursor_move_repaints(&state), "CursorMoved while dragging");
+            assert!(
+                state.mouse_motion_needs_repaint(),
+                "raw MouseMotion while dragging"
+            );
+
+            // Two buttons held, one released: still a drag.
+            press(&mut state, MouseButton::Right, true);
+            press(&mut state, MouseButton::Left, false);
+            assert!(cursor_move_repaints(&state), "one of two buttons released");
+            press(&mut state, MouseButton::Right, false);
+            assert!(!cursor_move_repaints(&state), "every button released");
+
+            // The same for a button egui has no name for.
+            press(&mut state, MouseButton::Other(7), true);
+            assert!(state.mouse_motion_needs_repaint(), "an extra button held");
+            press(&mut state, MouseButton::Other(7), false);
+            assert!(
+                !state.mouse_motion_needs_repaint(),
+                "the extra button released"
+            );
+        }
+
+        #[test]
+        fn a_press_outside_the_window_still_counts_as_held() {
+            let mut state = gated_state();
+            state.pointer_pos_in_points = None;
+            press(&mut state, winit::event::MouseButton::Left, true);
+            state.pointer_pos_in_points = Some(egui::pos2(10.0, 10.0));
+            assert!(cursor_move_repaints(&state));
+        }
+
+        #[test]
+        fn without_a_gate_or_with_touch_simulation_every_move_repaints() {
+            let mut state = gated_state();
+            state.simulate_touch_screen = true;
+            assert!(cursor_move_repaints(&state));
+            assert!(state.mouse_motion_needs_repaint());
+
+            state.simulate_touch_screen = false;
+            state.egui_ctx.set_pointer_move_gate(None);
+            assert!(cursor_move_repaints(&state));
+            assert!(state.mouse_motion_needs_repaint());
+
+            state.pointer_pos_in_points = None;
+            assert!(
+                state.mouse_motion_needs_repaint(),
+                "motion with the pointer outside the window keeps its repaint"
+            );
+        }
+    }
 
     #[test]
     fn destroyed_window_resets_ime_cursor_purpose_and_allow_on_every_platform() {
