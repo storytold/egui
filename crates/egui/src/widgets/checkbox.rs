@@ -99,16 +99,13 @@ impl Widget for Checkbox<'_> {
             *checked = !*checked;
             prepared.response.mark_changed();
         }
+        let role = crate::containers::menu::menu_item_role(ui, Role::CheckBox);
         prepared.response.widget_info(|| {
             if indeterminate {
-                WidgetInfo::labeled(
-                    Role::CheckBox,
-                    ui.is_enabled(),
-                    text.as_deref().unwrap_or(""),
-                )
+                WidgetInfo::labeled(role, ui.is_enabled(), text.as_deref().unwrap_or(""))
             } else {
                 WidgetInfo::selected(
-                    Role::CheckBox,
+                    role,
                     ui.is_enabled(),
                     *checked,
                     text.as_deref().unwrap_or(""),

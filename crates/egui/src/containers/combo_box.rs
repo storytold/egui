@@ -5,9 +5,10 @@ use epaint::Shape;
 use crate::{
     Align2, AsIdSalt, Atom, AtomExt as _, Atoms, Context, Id, IdSalt, InnerResponse, IntoAtoms,
     Label, NumExt as _, Painter, Popup, PopupCloseBehavior, Rect, Response, Role, ScrollArea,
-    Sense, SizedAtomKind, SizedContainerAtom, TextStyle, TextWrapMode, Ui, Vec2, WidgetAtom,
-    WidgetInfo,
+    Sense, SizedAtomKind, SizedContainerAtom, TextStyle, TextWrapMode, Ui, UiKind, UiStackInfo,
+    Vec2, WidgetAtom, WidgetInfo,
     class::{ClassName, Classes, HasClasses},
+    containers::menu::MenuConfig,
     epaint,
     style::{StyleModifier, WidgetVisuals},
     vec2,
@@ -482,8 +483,19 @@ fn combo_box_dyn<'c, R>(
 
     let height = height.unwrap_or_else(|| ui.spacing().combo_height);
 
+    // Its entries are a list's options, not menu items (`menu::LIST_BOX_TAG`); the rest of the info is
+    // what a menu popup has by default.
+    let list_info = UiStackInfo::new(UiKind::Menu)
+        .with_tag_value(
+            MenuConfig::MENU_CONFIG_TAG,
+            MenuConfig::new()
+                .close_behavior(close_behavior)
+                .style(popup_style.clone()),
+        )
+        .with_tag(crate::containers::menu::LIST_BOX_TAG);
     let inner = Popup::menu(&button_response)
         .id(popup_id)
+        .info(list_info)
         .width(button_response.rect.width())
         .max_height_from_constrain(true)
         .close_behavior(close_behavior)
