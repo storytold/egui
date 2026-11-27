@@ -536,7 +536,7 @@ impl WinitApp for WgpuWinitApp<'_> {
             let mut shared = running.shared.borrow_mut();
             let focused_viewport = shared.focused_viewport;
             let viewports = &mut shared.viewports;
-            if let Some(window_id) = focused_viewport
+            if let Some((window_id, repaint)) = focused_viewport
                 .and_then(|id| viewports.get_mut(&id))
                 .and_then(|viewport| viewport.on_mouse_motion(delta))
                 .or_else(|| {
@@ -545,7 +545,11 @@ impl WinitApp for WgpuWinitApp<'_> {
                         .find_map(|viewport| viewport.on_mouse_motion(delta))
                 })
             {
-                return Ok(EventResult::RepaintNext(window_id));
+                // The motion is in egui's input either way. With no button held, the app's pointer-move gate
+                // decides whether it needs a pass of its own.
+                if repaint {
+                    return Ok(EventResult::RepaintNext(window_id));
+                }
             }
         }
 
@@ -1127,11 +1131,13 @@ impl WgpuWinitRunning<'_> {
 impl Viewport {
     /// Forward raw mouse motion to egui.
     ///
-    /// Returns the window to repaint if the event was used.
-    fn on_mouse_motion(&mut self, delta: (f64, f64)) -> Option<winit::window::WindowId> {
+    /// Returns the window if the event was used, and whether it needs a repaint.
+    fn on_mouse_motion(&mut self, delta: (f64, f64)) -> Option<(winit::window::WindowId, bool)> {
         let window = self.window.as_ref()?;
         let egui_winit = self.egui_winit.as_mut()?;
-        egui_winit.on_mouse_motion(delta).then(|| window.id())
+        egui_winit
+            .on_mouse_motion(delta)
+            .then(|| (window.id(), egui_winit.mouse_motion_needs_repaint()))
     }
 
     /// Apply the commands, or defer them until both the window and its state exist.
