@@ -5,8 +5,9 @@
 use emath::GuiRounding as _;
 
 use crate::{
-    Align2, Context, Id, InnerResponse, LayerId, Layout, NumExt as _, Order, Pos2, Rect, Response,
-    Sense, Ui, UiBuilder, UiKind, UiStackInfo, Vec2, WidgetRect, WidgetWithState, emath, pos2,
+    Align, Align2, Context, Id, InnerResponse, LayerId, Layout, NumExt as _, Order, Pos2, Rangef,
+    Rect, Response, Sense, Ui, UiBuilder, UiKind, UiStackInfo, Vec2, WidgetRect, WidgetWithState,
+    emath, pos2,
 };
 
 /// State of an [`Area`] that is persisted between frames.
@@ -122,6 +123,7 @@ pub struct Area {
     fade_in: bool,
     layout: Layout,
     sizing_pass: bool,
+    max_height_from_constrain: bool,
     accessibility_parent: Option<Id>,
     accessibility_label: Option<String>,
     accessibility_role: Option<crate::accesskit::Role>,
@@ -152,6 +154,7 @@ impl Area {
             fade_in: true,
             layout: Layout::default(),
             sizing_pass: false,
+            max_height_from_constrain: false,
             accessibility_parent: None,
             accessibility_label: None,
             accessibility_role: None,
@@ -413,6 +416,20 @@ impl Area {
         self.sizing_pass = resize;
         self
     }
+
+    /// Offer the contents, on every pass but a sizing pass, the height the constrain rect leaves
+    /// on the area's side of its pivot, instead of the height the area had last pass.
+    ///
+    /// Contents that take what they are offered up to their own limit (such as a
+    /// [`crate::ScrollArea`] with a `max_height`) then grow back after they shrank, while the area
+    /// stays open. Without it they stay at the smallest height they had.
+    ///
+    /// Default: `false`.
+    #[inline]
+    pub fn max_height_from_constrain(mut self, max_height_from_constrain: bool) -> Self {
+        self.max_height_from_constrain = max_height_from_constrain;
+        self
+    }
 }
 
 pub(crate) struct Prepared {
@@ -430,6 +447,9 @@ pub(crate) struct Prepared {
     /// and then can correctly position the window and its contents the next frame,
     /// without having one frame where the window is wrongly positioned or sized.
     sizing_pass: bool,
+
+    /// The vertical span the contents may take, for [`Area::max_height_from_constrain`].
+    room: Option<Rangef>,
 
     fade_in: bool,
     layout: Layout,
@@ -469,6 +489,7 @@ impl Area {
             fade_in,
             layout,
             sizing_pass: force_sizing_pass,
+            max_height_from_constrain,
             accessibility_parent,
             accessibility_label,
             accessibility_role,
@@ -555,7 +576,7 @@ impl Area {
 
         // interact right away to prevent frame-delay
         let mut move_response = {
-            let interact_id = layer_id.id.with("move");
+            let interact_id = background_widget_id(layer_id);
             let sense = sense.unwrap_or_else(|| {
                 if movable {
                     Sense::DRAG
@@ -614,6 +635,18 @@ impl Area {
             move_response
         };
 
+        // Measured from the requested pivot position, before constraining moves it.
+        let room = max_height_from_constrain.then(|| {
+            let pivot_y = state
+                .pivot_pos
+                .map_or_else(|| constrain_rect.top(), |pos| pos.y);
+            match pivot.y() {
+                Align::Min => Rangef::new(pivot_y, constrain_rect.bottom()),
+                Align::Max => Rangef::new(constrain_rect.top(), pivot_y),
+                Align::Center => constrain_rect.y_range(),
+            }
+        });
+
         state.set_left_top_pos(round_area_position(
             ctx,
             if constrain {
@@ -636,12 +669,19 @@ impl Area {
             constrain,
             constrain_rect,
             sizing_pass,
+            room,
             fade_in,
             layout,
             accessibility_label,
             accessibility_role,
         }
     }
+}
+
+/// The id of the widget an [`Area`] senses its own background with: to move, or to come to the
+/// front at a click.
+pub(crate) fn background_widget_id(layer_id: LayerId) -> Id {
+    layer_id.id.with("move")
 }
 
 pub(crate) fn round_area_position(ctx: &Context, pos: Pos2) -> Pos2 {
@@ -668,7 +708,13 @@ impl Prepared {
     }
 
     pub(crate) fn content_ui(&mut self, ctx: &Context) -> Ui {
-        let max_rect = self.state.rect();
+        let mut max_rect = self.state.rect();
+        if let Some(room) = self.room
+            && !self.sizing_pass
+        {
+            max_rect.min.y = max_rect.min.y.max(room.min);
+            max_rect.max.y = max_rect.min.y + room.span().max(0.0);
+        }
 
         let mut ui_builder = UiBuilder::new()
             .ui_stack_info(self.info.take().unwrap_or_default())
@@ -728,10 +774,11 @@ impl Prepared {
             mut state,
             move_response: mut response,
             sizing_pass,
+            room,
             ..
         } = self;
 
-        state.size = Some(content_ui.min_size());
+        let last_size = state.size.replace(content_ui.min_size());
 
         // Make sure we report back the correct size.
         // Very important after the initial sizing pass, when the initial estimate of the size is way off.
@@ -749,6 +796,11 @@ impl Prepared {
 
         if sizing_pass {
             // If we didn't know the size, we were likely drawing the area in the wrong place.
+            ctx.request_repaint();
+        } else if room.is_some() && state.size != last_size {
+            // Placed from last pass's size: lay it out again at the new size, in this frame
+            // when egui allows another pass.
+            ctx.request_discard("Area changed size");
             ctx.request_repaint();
         }
 

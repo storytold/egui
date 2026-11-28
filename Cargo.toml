@@ -179,7 +179,7 @@ winit = { version = "0.30.13", default-features = false }
 # The Craft suite's reviewed immutable winit fork, including native lifecycle, clipboard,
 # IME and Latin-letter shortcut support.
 [patch.crates-io]
-winit = { git = "https://github.com/storytold/winit.git", rev = "a517b3846ee8457d84ee4975110bfda6797c44dc" }
+winit = { git = "https://github.com/storytold/winit.git", rev = "2aa8330c41762d5c1249de1930be5a82ab49c0fb" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

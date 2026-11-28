@@ -103,6 +103,13 @@ impl TextureManager {
         core::mem::take(&mut self.delta)
     }
 
+    /// Puts back `older`, a delta [`Self::take_delta`] returned that never reached the renderer, before the changes
+    /// made since, so the next take carries both in order.
+    pub fn restore(&mut self, mut older: TexturesDelta) {
+        older.append(core::mem::take(&mut self.delta));
+        self.delta = older;
+    }
+
     /// Get meta-data about a specific texture.
     pub fn meta(&self, id: TextureId) -> Option<&TextureMeta> {
         self.metas.get(&id)

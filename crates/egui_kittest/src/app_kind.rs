@@ -34,6 +34,20 @@ pub(crate) enum AppKind<'a, State> {
 }
 
 impl<State> AppKind<'_, State> {
+    /// Runs an eframe app's [`eframe::App::raw_input_hook`] on the input of the next pass, as eframe does before
+    /// every frame. The `Ui` kinds have no hook.
+    #[cfg(feature = "eframe")]
+    pub fn raw_input_hook(
+        &mut self,
+        ctx: &egui::Context,
+        state: &mut State,
+        input: &mut egui::RawInput,
+    ) {
+        if let Self::Eframe(eframe_kind) = self {
+            (eframe_kind.get_app)(state).raw_input_hook(ctx, input);
+        }
+    }
+
     // The `Option` is needed when the `eframe` feature is enabled, because the
     // `Eframe` variant has no `egui::Response` to return. Without `eframe` the
     // wrap is unnecessary, so we silence `clippy::unnecessary_wraps` for that case.

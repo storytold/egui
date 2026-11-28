@@ -19,7 +19,11 @@
 //! fallback fixture (for example the pinned craft-fonts Arabic/Thai/CJK fonts)
 //! and is not silently covered by tofu glyphs.
 
-#![expect(clippy::print_stdout, clippy::print_stderr)] // a command-line harness
+#![allow(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "stdout/stderr carry this harness's summary and diagnostics"
+)]
 
 use core::{fmt::Write as _, hint::black_box, time::Duration};
 use std::{
@@ -134,7 +138,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                 let p = value("--dpi")?;
                 let dpi: f32 = p
                     .parse()
-                    .map_err(|err| format!("invalid --dpi value: {p}: {err}"))?;
+                    .map_err(|err| format!("invalid --dpi value {p}: {err}"))?;
                 if !dpi.is_finite() || dpi <= 0.0 {
                     return Err(format!("--dpi must be positive and finite, got {p}"));
                 }
@@ -161,7 +165,7 @@ fn parse_args() -> Result<Option<Args>, String> {
 
 fn parse_usize(name: &str, s: &str) -> Result<usize, String> {
     s.parse()
-        .map_err(|err| format!("invalid {name} value: {s}: {err}"))
+        .map_err(|err| format!("invalid {name} value {s}: {err}"))
 }
 
 #[derive(Clone, Copy, Default)]
@@ -836,7 +840,10 @@ impl TextureUploads {
 
 fn take_textures(out: &mut egui::FullOutput) -> TextureUploads {
     let mut uploads = TextureUploads::default();
-    #[expect(clippy::iter_over_hash_type)] // Order doesn't matter here
+    #[expect(
+        clippy::iter_over_hash_type,
+        reason = "only sums counts and sizes, which don't depend on the order"
+    )]
     for deltas in out.textures_delta.set.values() {
         for delta in deltas {
             uploads.deltas += 1;

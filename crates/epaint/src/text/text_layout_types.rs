@@ -535,6 +535,59 @@ impl core::hash::Hash for VariationCoords {
     }
 }
 
+/// OpenType features to apply when shaping a section of text, as (tag, value) pairs.
+///
+/// A value of `0` turns a feature off and `1` turns it on;
+/// features with alternates (like `salt` or `cv01`) use higher values to pick one.
+/// Fonts that lack a feature ignore it.
+///
+/// Empty by default, which shapes with the font's default features.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+pub struct FontFeatures(SmallVec<[(font_types::Tag, u32); 2]>);
+
+impl FontFeatures {
+    /// Create a list of features from a sequence of (tag, value) pairs.
+    ///
+    /// ## Example:
+    /// ```
+    /// use epaint::text::FontFeatures;
+    ///
+    /// // Tabular figures, no standard ligatures:
+    /// let features = FontFeatures::new([(b"tnum", 1), (b"liga", 0)]);
+    /// ```
+    pub fn new<T: IntoTag>(features: impl IntoIterator<Item = (T, u32)>) -> Self {
+        Self(
+            features
+                .into_iter()
+                .map(|(t, v)| (t.into_tag(), v))
+                .collect(),
+        )
+    }
+
+    /// Add a feature to the list. If a tag is listed more than once, the last value wins.
+    #[inline(always)]
+    pub fn push(&mut self, tag: impl IntoTag, value: u32) {
+        self.0.push((tag.into_tag(), value));
+    }
+
+    #[inline(always)]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+}
+
+impl AsRef<[(font_types::Tag, u32)]> for FontFeatures {
+    #[inline(always)]
+    fn as_ref(&self) -> &[(font_types::Tag, u32)] {
+        &self.0
+    }
+}
+
 /// Formatting option for a section of text.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
@@ -570,6 +623,11 @@ pub struct TextFormat {
     pub expand_bg: f32,
 
     pub coords: VariationCoords,
+
+    /// OpenType features to shape this text with, e.g. `tnum` for tabular figures.
+    ///
+    /// Default: none.
+    pub font_features: FontFeatures,
 
     pub italics: bool,
 
@@ -607,6 +665,7 @@ impl Default for TextFormat {
             background: Color32::TRANSPARENT,
             expand_bg: 1.0,
             coords: VariationCoords::default(),
+            font_features: FontFeatures::default(),
             italics: false,
             underline: Stroke::NONE,
             strikethrough: Stroke::NONE,
@@ -626,6 +685,7 @@ impl core::hash::Hash for TextFormat {
             background,
             expand_bg,
             coords,
+            font_features,
             italics,
             underline,
             strikethrough,
@@ -640,6 +700,7 @@ impl core::hash::Hash for TextFormat {
         background.hash(state);
         emath::OrderedFloat(*expand_bg).hash(state);
         coords.hash(state);
+        font_features.hash(state);
         italics.hash(state);
         underline.hash(state);
         strikethrough.hash(state);
