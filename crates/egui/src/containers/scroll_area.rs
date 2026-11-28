@@ -414,6 +414,7 @@ pub struct ScrollArea {
     min_scrolled_size: Vec2,
     scroll_bar_visibility: ScrollBarVisibility,
     scroll_bar_rect: Option<Rect>,
+    scroll_bar_labels: [Option<String>; 2],
     id_salt: Option<IdSalt>,
     offset_x: Option<f32>,
     offset_y: Option<f32>,
@@ -469,6 +470,7 @@ impl ScrollArea {
             min_scrolled_size: Vec2::splat(64.0),
             scroll_bar_visibility: Default::default(),
             scroll_bar_rect: None,
+            scroll_bar_labels: [None, None],
             id_salt: None,
             offset_x: None,
             offset_y: None,
@@ -544,6 +546,25 @@ impl ScrollArea {
     #[inline]
     pub fn scroll_bar_rect(mut self, scroll_bar_rect: Rect) -> Self {
         self.scroll_bar_rect = Some(scroll_bar_rect);
+        self
+    }
+
+    /// The accessible name of the horizontal scroll bar, for screen readers.
+    ///
+    /// Without a name, the scroll bar has no accessible name (WCAG 4.1.2).
+    /// egui has no built-in text, so the app supplies it, in the language of its UI.
+    #[inline]
+    pub fn horizontal_scroll_bar_label(mut self, label: impl Into<String>) -> Self {
+        self.scroll_bar_labels[0] = Some(label.into());
+        self
+    }
+
+    /// The accessible name of the vertical scroll bar, for screen readers.
+    ///
+    /// See [`Self::horizontal_scroll_bar_label`].
+    #[inline]
+    pub fn vertical_scroll_bar_label(mut self, label: impl Into<String>) -> Self {
+        self.scroll_bar_labels[1] = Some(label.into());
         self
     }
 
@@ -773,6 +794,9 @@ struct Prepared {
     scroll_bar_visibility: ScrollBarVisibility,
     scroll_bar_rect: Option<Rect>,
 
+    /// The accessible names of the horizontal and vertical scroll bars.
+    scroll_bar_labels: [Option<String>; 2],
+
     /// The vertical scroll bar sits on the left ([`crate::Style::right_to_left`]).
     vertical_bar_on_left: bool,
 
@@ -824,6 +848,7 @@ impl ScrollArea {
             min_scrolled_size,
             scroll_bar_visibility,
             scroll_bar_rect,
+            scroll_bar_labels,
             id_salt,
             offset_x,
             offset_y,
@@ -1109,6 +1134,7 @@ impl ScrollArea {
             current_bar_use,
             scroll_bar_visibility,
             scroll_bar_rect,
+            scroll_bar_labels,
             vertical_bar_on_left,
             inner_rect,
             content_ui,
@@ -1242,6 +1268,7 @@ impl Prepared {
             current_bar_use,
             scroll_bar_visibility,
             scroll_bar_rect,
+            scroll_bar_labels,
             vertical_bar_on_left,
             content_ui,
             viewport: _,
@@ -1554,6 +1581,9 @@ impl Prepared {
             let response = ui.interact(max_bar_rect, interact_id, sense);
 
             response.widget_info(|| WidgetInfo::new(Role::ScrollBar));
+            if let Some(label) = &scroll_bar_labels[d] {
+                response.clone().accessible_name(label.clone());
+            }
 
             // top/bottom of a horizontal scroll (d==0).
             // left/rigth of a vertical scroll (d==1).

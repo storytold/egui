@@ -1,6 +1,6 @@
 use alloc::sync::Arc;
 
-use emath::OrderedFloat;
+use emath::{GuiRounding as _, OrderedFloat};
 use nohash_hasher::IntMap;
 
 use crate::text::{
@@ -54,7 +54,11 @@ impl GalleyCache {
             // and so the text re-wraps and reports a new width of 185.0 points.
             // And then the cycle continues.
 
-            // So we limit max_width to integers.
+            // So we round max_width to the GUI rounding step (`emath::GUI_ROUNDING`).
+            // Every width a galley reports is on that grid, so a reported width fed back
+            // as the max width (with or without such an error) lays out to the same width.
+            // Rounding to whole points would not: a text 22.47 wide laid out at 22.47
+            // would wrap at 22 and report 22, narrower than its row.
 
             // Related issues:
             // * https://github.com/emilk/egui/issues/4927
@@ -62,7 +66,7 @@ impl GalleyCache {
             // * https://github.com/emilk/egui/issues/5084
             // * https://github.com/emilk/egui/issues/5163
 
-            job.wrap.max_width = job.wrap.max_width.round();
+            job.wrap.max_width = job.wrap.max_width.round_ui();
         }
 
         let hash = crate::util::hash((&job, OrderedFloat(pixels_per_point))); // TODO(emilk): even faster hasher?
@@ -499,6 +503,38 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// A single word laid out at a finite width equal to its own width reports that width,
+    /// including widths whose fraction of a point is below one half.
+    #[test]
+    fn test_wrap_at_own_width_keeps_width() {
+        for pixels_per_point in [1.0, 2.0] {
+            let mut fonts = FontsImpl::new(TextOptions::default(), FontDefinitions::default());
+            let mut below_half = 0;
+            for word in [
+                "200", "100", "44%", "40%", "201", "45%", "Hello", "Width", "mm",
+            ] {
+                let mut job = LayoutJob::single_section(word.to_owned(), TextFormat::default());
+                job.wrap = TextWrapping::no_max_width();
+                let width = GalleyCache::default()
+                    .layout(&mut fonts, pixels_per_point, job.clone(), false)
+                    .size()
+                    .x;
+                if width.fract() > 0.0 && width.fract() < 0.5 {
+                    below_half += 1;
+                }
+                job.wrap = TextWrapping::wrap_at_width(width);
+                let galley =
+                    GalleyCache::default().layout(&mut fonts, pixels_per_point, job, false);
+                assert_eq!(galley.rows.len(), 1, "{word:?} at {pixels_per_point}x");
+                assert_eq!(galley.size().x, width, "{word:?} at {pixels_per_point}x");
+            }
+            assert!(
+                below_half > 0,
+                "no word below half a point at {pixels_per_point}x"
+            );
         }
     }
 }

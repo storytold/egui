@@ -34,7 +34,7 @@ rm -f "${CRATE_NAME}_bg.wasm" # Remove old output (if any)
 
 TARGET_NAME="${CRATE_NAME}.wasm"
 wasm-bindgen "${TARGET}/wasm32-unknown-unknown/$BUILD/$TARGET_NAME" \
-  --out-dir . --no-modules --no-typescript
+  --out-dir . --target web --no-typescript
 
 # Remove output:
 rm -f "${CRATE_NAME}_bg.wasm"

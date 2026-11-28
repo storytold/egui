@@ -4,8 +4,9 @@ use epaint::Shape;
 
 use crate::{
     Align2, AsIdSalt, Atom, AtomExt as _, Atoms, Context, Id, IdSalt, InnerResponse, IntoAtoms,
-    NumExt as _, Painter, Popup, PopupCloseBehavior, Rect, Response, Role, ScrollArea, Sense,
-    TextStyle, TextWrapMode, Ui, Vec2, WidgetAtom, WidgetInfo,
+    Label, NumExt as _, Painter, Popup, PopupCloseBehavior, Rect, Response, Role, ScrollArea,
+    Sense, SizedAtomKind, SizedContainerAtom, TextStyle, TextWrapMode, Ui, Vec2, WidgetAtom,
+    WidgetInfo,
     class::{ClassName, Classes, HasClasses},
     epaint,
     style::{StyleModifier, WidgetVisuals},
@@ -50,6 +51,7 @@ pub struct ComboBox<'a> {
     height: Option<f32>,
     icon: Option<IconPainter>,
     wrap_mode: Option<TextWrapMode>,
+    show_tooltip_when_elided: bool,
     close_behavior: Option<PopupCloseBehavior>,
     popup_style: StyleModifier,
     classes: Classes,
@@ -72,6 +74,7 @@ impl<'a> ComboBox<'a> {
             height: None,
             icon: None,
             wrap_mode: None,
+            show_tooltip_when_elided: true,
             close_behavior: None,
             popup_style: StyleModifier::default(),
             classes: Classes::default().with_class(Self::CLASS),
@@ -91,6 +94,7 @@ impl<'a> ComboBox<'a> {
             height: None,
             icon: None,
             wrap_mode: None,
+            show_tooltip_when_elided: true,
             close_behavior: None,
             popup_style: StyleModifier::default(),
             classes: Classes::default().with_class(Self::CLASS),
@@ -107,6 +111,7 @@ impl<'a> ComboBox<'a> {
             height: None,
             icon: None,
             wrap_mode: None,
+            show_tooltip_when_elided: true,
             close_behavior: None,
             popup_style: StyleModifier::default(),
             classes: Classes::default().with_class(Self::CLASS),
@@ -212,6 +217,15 @@ impl<'a> ComboBox<'a> {
         self
     }
 
+    /// Show the full selected text when the button is hovered, if the button cut it short.
+    ///
+    /// By default, this is true. Turn it off if you put your own tooltip on the button.
+    #[inline]
+    pub fn show_tooltip_when_elided(mut self, show: bool) -> Self {
+        self.show_tooltip_when_elided = show;
+        self
+    }
+
     /// Controls the close behavior for the popup.
     ///
     /// By default, `PopupCloseBehavior::CloseOnClick` will be used.
@@ -255,6 +269,7 @@ impl<'a> ComboBox<'a> {
             height,
             icon,
             wrap_mode,
+            show_tooltip_when_elided,
             close_behavior,
             popup_style,
             classes,
@@ -270,6 +285,7 @@ impl<'a> ComboBox<'a> {
             menu_contents,
             icon,
             wrap_mode,
+            show_tooltip_when_elided,
             close_behavior,
             popup_style,
             classes,
@@ -353,6 +369,7 @@ fn combo_box_dyn<'c, R>(
     menu_contents: Box<dyn FnOnce(&mut Ui) -> R + 'c>,
     icon: Option<IconPainter>,
     wrap_mode: Option<TextWrapMode>,
+    show_tooltip_when_elided: bool,
     close_behavior: Option<PopupCloseBehavior>,
     popup_style: StyleModifier,
     mut classes: Classes,
@@ -418,27 +435,42 @@ fn combo_box_dyn<'c, R>(
         )
         .min_size(min_size);
 
-    let (button_response, label_response) = match label {
-        Some(label) => {
-            // The label is just another atom, next to the button.
-            let label_text = label.text().map(String::from).unwrap_or_default();
-            let outer_response = WidgetAtom::new((Atom::widget(button), label))
-                .gap(ui.spacing().item_spacing.x)
-                .direction(direction)
-                .show(ui)
-                .response;
-            outer_response
-                .widget_info(|| WidgetInfo::labeled(Role::Label, ui.is_enabled(), &label_text));
-            let button_response = ui
-                .ctx()
-                .read_response(button_id)
-                .unwrap_or_else(|| outer_response.clone());
-            (
-                button_response,
-                Some((outer_response, !label_text.is_empty())),
-            )
-        }
-        None => (button.show(ui).response, None),
+    let (button_response, label_response, elided) = if let Some(label) = label {
+        // The label is just another atom, next to the button.
+        let label_text = label.text().map(String::from).unwrap_or_default();
+        let outer = WidgetAtom::new((Atom::widget(button), label))
+            .gap(ui.spacing().item_spacing.x)
+            .direction(direction)
+            .measure(ui, ui.available_size());
+        let elided = outer.container.iter_kinds().any(
+            |kind| matches!(kind, SizedAtomKind::Widget(button) if is_elided(&button.container)),
+        );
+        let outer_response = outer.allocate(ui).paint(ui).response;
+        outer_response
+            .widget_info(|| WidgetInfo::labeled(Role::Label, ui.is_enabled(), &label_text));
+        let button_response = ui
+            .ctx()
+            .read_response(button_id)
+            .unwrap_or_else(|| outer_response.clone());
+        (
+            button_response,
+            Some((outer_response, !label_text.is_empty())),
+            elided,
+        )
+    } else {
+        let button = button.measure(ui, ui.available_size());
+        let elided = is_elided(&button.container);
+        (button.allocate(ui).paint(ui).response, None, elided)
+    };
+
+    // `on_hover_ui`, because `on_hover_text` would also set the button's accessible description.
+    let button_response = if show_tooltip_when_elided && elided {
+        button_response.on_hover_ui(|ui| {
+            ui.set_max_width(ui.spacing().tooltip_width);
+            ui.add(Label::new(accessible_text.as_str()).wrap());
+        })
+    } else {
+        button_response
     };
 
     button_response.widget_info(|| {
@@ -453,6 +485,7 @@ fn combo_box_dyn<'c, R>(
     let inner = Popup::menu(&button_response)
         .id(popup_id)
         .width(button_response.rect.width())
+        .max_height_from_constrain(true)
         .close_behavior(close_behavior)
         .style(popup_style)
         .show(|ui| {
@@ -491,6 +524,11 @@ fn combo_box_dyn<'c, R>(
             None => button_response,
         },
     }
+}
+
+/// Did the button cut any of its selected text short?
+fn is_elided(button: &SizedContainerAtom<'_>) -> bool {
+    button.iter_texts().any(|galley| galley.elided)
 }
 
 fn paint_default_icon(painter: &Painter, rect: Rect, visuals: &WidgetVisuals) {

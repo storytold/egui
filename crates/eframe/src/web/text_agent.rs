@@ -21,8 +21,24 @@ pub(super) struct TextAgentContext {
     pub listeners: Rc<RefCell<TextAgentListeners>>,
 }
 
+// A JS dispatch snapshot may retain a callback even after successful removeEventListener.
+// Gate before entering the wasm Closure, so a captured retired wrapper remains a safe no-op
+// after Rust releases the Closure. Static module code requires no unsafe-eval/CSP exception.
+#[wasm_bindgen(
+    inline_js = "export function egui_text_agent_session() { return { active: false }; }\nexport function egui_text_agent_activate(session, active) { session.active = active; }\nexport function egui_text_agent_listener(session, callback) { return event => { if (session.active) callback(event); }; }"
+)]
+extern "C" {
+    fn egui_text_agent_session() -> JsValue;
+
+    fn egui_text_agent_activate(session: &JsValue, active: bool);
+
+    fn egui_text_agent_listener(session: &JsValue, callback: &js_sys::Function)
+    -> js_sys::Function;
+}
+
 struct Session {
     active: Cell<bool>,
+    gate: JsValue,
 
     /// Only keys actually forwarded by this agent; do not reset unrelated keyboard state.
     forwarded_keys: RefCell<Vec<ForwardedKey>>,
@@ -37,6 +53,7 @@ impl Default for Session {
     fn default() -> Self {
         Self {
             active: Cell::new(false),
+            gate: egui_text_agent_session(),
             forwarded_keys: Default::default(),
         }
     }
@@ -45,17 +62,14 @@ impl Default for Session {
 impl Session {
     fn set_active(&self, active: bool) {
         self.active.set(active);
+        egui_text_agent_activate(&self.gate, active);
     }
 }
 
 struct Listener {
     target: web_sys::EventTarget,
     name: &'static str,
-
-    /// The function registered with the DOM. It stays callable for the page's lifetime and
-    /// forwards to `_closure` only while `forward` is set.
     callback: js_sys::Function,
-    forward: Rc<RefCell<Option<js_sys::Function>>>,
     _closure: Closure<dyn FnMut(web_sys::Event)>,
     capture: bool,
 }
@@ -67,6 +81,7 @@ impl Listener {
         session: Weak<Session>,
         mut callback: impl FnMut(E) + 'static,
     ) -> Self {
+        let callback_session = Weak::clone(&session);
         let closure = Closure::wrap(Box::new(move |event: web_sys::Event| {
             let Some(session) = session.upgrade() else {
                 return;
@@ -76,31 +91,17 @@ impl Listener {
                 callback(event.unchecked_into::<E>());
             }
         }) as Box<dyn FnMut(web_sys::Event)>);
-
-        // A JS dispatch snapshot may retain the registered function even after a successful
-        // removeEventListener, and invoking a dropped wasm closure throws. The registered function
-        // is therefore a small forwarder that is never freed; dropping the `Listener` clears
-        // `forward`, which turns a retained forwarder into a no-op.
-        let forward = Rc::new(RefCell::new(Some(
-            closure.as_ref().unchecked_ref::<js_sys::Function>().clone(),
-        )));
-        let forwarder = {
-            let forward = Rc::clone(&forward);
-            Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
-                let target = forward.borrow().clone();
-                if let Some(target) = target {
-                    target.call1(&JsValue::NULL, &event).ok();
-                }
-            })
+        let callback = if let Some(session) = callback_session.upgrade() {
+            egui_text_agent_listener(&session.gate, closure.as_ref().unchecked_ref())
+        } else {
+            // Construction always owns its session. A retired/missing session is never active.
+            let gate = egui_text_agent_session();
+            egui_text_agent_listener(&gate, closure.as_ref().unchecked_ref())
         };
-        let callback = forwarder
-            .into_js_value()
-            .unchecked_into::<js_sys::Function>();
         Self {
             target: target.clone(),
             name,
             callback,
-            forward,
             _closure: closure,
             capture: false,
         }
@@ -120,12 +121,6 @@ impl Listener {
             &self.callback,
             self.capture,
         )
-    }
-}
-
-impl Drop for Listener {
-    fn drop(&mut self) {
-        self.forward.borrow_mut().take();
     }
 }
 
@@ -378,7 +373,7 @@ impl TextAgentListeners {
 impl Drop for TextAgentListeners {
     fn drop(&mut self) {
         // Failed handles were retained while alive. Even if final JS removal fails, the
-        // forwarder is now permanently closed before Rust releases their callback captures.
+        // private gate is now permanently closed before Rust releases their callback captures.
         self.shutdown();
     }
 }
@@ -615,9 +610,16 @@ impl TextAgent {
         true
     }
 
-    pub fn fail_reset(&self) {
+    /// Drops the request this agent could not complete and reports it as retired.
+    pub(crate) fn fail_reset(
+        &self,
+        request: egui::ImeResetId,
+        events: &mut Vec<egui::Event>,
+        repaint: &NeedRepaint,
+    ) {
         self.context.listeners.borrow_mut().requests.invalidate();
         self.focus.pending.borrow_mut().take();
+        retire_reset(request, events, repaint);
     }
 
     pub fn capture_reset_focus(&self, ime: &egui::output::IMEOutput) {
@@ -793,6 +795,19 @@ impl Drop for TextAgent {
     fn drop(&mut self) {
         self.retire();
     }
+}
+
+/// Reports a reset request that will never complete in the next raw batch, so a custom editor
+/// waiting for it asks again.
+pub(crate) fn retire_reset(
+    request: egui::ImeResetId,
+    events: &mut Vec<egui::Event>,
+    repaint: &NeedRepaint,
+) {
+    events.push(egui::Event::ImeResetRetired {
+        request_id: request,
+    });
+    repaint.repaint_asap();
 }
 
 fn same_key(a: &web_sys::KeyboardEvent, b: &web_sys::KeyboardEvent) -> bool {
@@ -1409,9 +1424,16 @@ mod browser_tests {
                 TextAgent::attach_unfocused(context.clone(), &canvas, true).is_err(),
                 "failed removal blocks a second group"
             );
-            agent.fail_reset(); // same failure branch as AppRunner
+            agent.fail_reset(request, &mut events, &repaint); // same failure branch as AppRunner
             assert!(!agent.complete_reset(request, &ime, &mut events, &repaint));
-            assert!(events.is_empty());
+            assert_eq!(
+                events,
+                vec![egui::Event::ImeResetRetired {
+                    request_id: request
+                }],
+                "the failed request is reported retired, never completed"
+            );
+            events.clear();
             egui_probe_remove_failure(&old, None);
             assert!(listeners.borrow_mut().retire());
             callback
